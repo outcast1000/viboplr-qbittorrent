@@ -1,14 +1,14 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, watch progress, and start, stop or remove torrents without leaving the app.",
   "minAppVersion": "1.0.27",
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-qbittorrent",
   "updateUrl": "https://github.com/outcast1000/viboplr-qbittorrent/releases/latest/download/update.json",
-  "icon": "M12 3v12M12 15l-4-4M12 15l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2",
+  "icon": "M4 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0M11 8.5v11M13.5 4.5v11M13.5 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0",
   "apiUsage": [
     {
       "api": "network.fetch",
@@ -24,7 +24,7 @@
       {
         "id": "qbittorrent",
         "label": "Torrents",
-        "icon": "M12 3v12M12 15l-4-4M12 15l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+        "icon": "M4 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0M11 8.5v11M13.5 4.5v11M13.5 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0"
       }
     ],
     "settingsPanel": {

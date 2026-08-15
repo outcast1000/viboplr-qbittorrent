@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Its own icon: the qBittorrent “qb” letterform, replacing a generic download
+  arrow that was identical to the yt-dlp plugin’s — two different plugins were
+  indistinguishable in the sidebar.
+
 ## 0.2.0
 
 Status and setup. Nothing about connecting was discoverable before: a failure
