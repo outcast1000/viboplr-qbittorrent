@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.0
+
+**Fixes adding a torrent from search appearing to do nothing.** Two separate
+causes, both real:
+
+- **A refused add reported success.** qBittorrent answers a rejected add with
+  HTTP 200 and the body `Fails.`, so checking only the status code showed
+  "Added to qBittorrent" for torrents it never took. The body is now checked and
+  the real reason is shown.
+- **The category wasn't being created.** qBittorrent doesn't create a category
+  on demand, so torrents added with one that didn't exist yet ended up
+  uncategorised — downloading fine, but hidden by the category-filtered list.
+  The category is now created before it's relied on.
+- Adding from the Search tab now **switches to Downloading**, so you can see
+  where the torrent went instead of being left staring at search results.
+
+Also, list rows now behave like every other track list in the app:
+
+- **Files rows have hover Play and Add-to-queue buttons**, plus multi-select,
+  keyboard navigation and drag-to-queue. Select several files and the buttons
+  act on all of them.
+- **Search results have a visible "Add to qBittorrent" button** rather than only
+  responding to a click on the row.
+
 ## 0.5.0
 
 Search, using the indexers you've already set up in qBittorrent.

@@ -111,6 +111,7 @@ var searchGen = 0; // guards a late poll against a newer search
 var localCollections = [];
 var knownComplete = {};
 var completionsSeeded = false;
+var categoryEnsured = false;
 
 // UI.
 var activeTab = "downloading";
@@ -951,6 +952,30 @@ function tabTorrents(tab) {
   return out;
 }
 
+// qBittorrent does NOT create a category on demand — adding with an unknown one
+// leaves the torrent uncategorised, which the category-filtered list then hides.
+// The torrent downloads fine and appears to have vanished. So make sure the
+// category exists before relying on it.
+//
+// Once per session: creating an existing category answers 409, which is a
+// success for our purposes, so failure and success both settle the flag.
+function ensureCategory() {
+  if (!category || categoryEnsured) return Promise.resolve();
+  var dest = collectionById(destCollectionId);
+  var form = { category: category };
+  if (dest && dest.path) form.savePath = remotePathFor(dest.path);
+  return authed("/torrents/createCategory", { method: "POST", form: form })
+    .then(function () {
+      categoryEnsured = true;
+    })
+    .catch(function (e) {
+      // Already exists (409) is the common case and is fine; anything else just
+      // means the add falls back to being uncategorised, which is recoverable.
+      console.error("qBittorrent: could not ensure the category exists:", e);
+      categoryEnsured = true;
+    });
+}
+
 function addTorrent(source) {
   var uri = String(source || "").trim();
   if (!looksLikeTorrentSource(uri)) {
@@ -973,11 +998,29 @@ function addTorrent(source) {
   var dest = collectionById(destCollectionId);
   if (dest && dest.path) form.savepath = remotePathFor(dest.path);
 
-  return authed("/torrents/add", { method: "POST", form: form })
+  return ensureCategory()
+    .then(function () {
+      return authed("/torrents/add", { method: "POST", form: form });
+    })
     .then(function (resp) {
       expectOk(resp, "Adding the torrent");
+      return resp.text();
+    })
+    .then(function (body) {
+      // qBittorrent answers a REFUSED add with HTTP 200 and the body "Fails." —
+      // the status code alone says nothing. Checking only the status is how this
+      // reported "Added" for torrents it never took.
+      if (/^fails\.?$/i.test(String(body || "").trim())) {
+        throw new Error(
+          "qBittorrent refused it. The link may have expired, the save folder may not be writable, or it may already be in the list."
+        );
+      }
       var name = magnetDisplayName(uri);
       api.ui.showNotification(name ? "Added " + name : "Added to qBittorrent");
+      // Show where it went. Adding from the Search tab otherwise leaves the user
+      // looking at search results with no sign anything happened.
+      activeTab = "downloading";
+      render();
       return refresh();
     })
     .catch(function (e) {
@@ -1313,6 +1356,59 @@ function trackForFile(torrent, file) {
     album_title: torrent.name || null,
     track_number: parsed.trackNumber
   };
+}
+
+// The selectable row list sends `selectedIds` (an array, one entry for an
+// overlay button, several when acting on a selection) plus `itemId`. Take both.
+function rowIndices(data) {
+  var out = [];
+  var ids = data && data.selectedIds;
+  if (ids && ids.length) {
+    for (var i = 0; i < ids.length; i++) {
+      var n = parseInt(ids[i], 10);
+      if (!isNaN(n)) out.push(n);
+    }
+  }
+  if (!out.length && data && data.itemId != null) {
+    var single = parseInt(data.itemId, 10);
+    if (!isNaN(single)) out.push(single);
+  }
+  return out;
+}
+
+function tracksForIndices(hash, indices) {
+  var torrent = torrents[hash];
+  if (!torrent) return [];
+  var files = filesByHash[hash] || [];
+  var byIndex = {};
+  for (var i = 0; i < files.length; i++) byIndex[files[i].index] = files[i];
+  var tracks = [];
+  for (var j = 0; j < indices.length; j++) {
+    var f = byIndex[indices[j]];
+    // Skip anything unfinished: same rule as the Play button, since a partial
+    // file stops partway and reads as corrupt.
+    if (f && Number(f.progress) >= 1 && mediaKindOf(f.name)) tracks.push(trackForFile(torrent, f));
+  }
+  return tracks;
+}
+
+function enqueueFiles(hash, indices) {
+  return ensureFiles(hash).then(function () {
+    var tracks = tracksForIndices(hash, indices);
+    if (!tracks.length) {
+      api.ui.showNotification("Nothing there that's finished downloading");
+      return;
+    }
+    // Append: the end of the queue is where "add to queue" means, and the host
+    // has no dedicated enqueue call.
+    var position = 0;
+    if (typeof api.playback.getQueue === "function") {
+      var q = api.playback.getQueue();
+      position = (q && q.tracks && q.tracks.length) || 0;
+    }
+    api.playback.insertTracks(tracks, position);
+    api.ui.showNotification(tracks.length === 1 ? "Added to the queue" : "Added " + tracks.length + " to the queue");
+  });
 }
 
 function playFiles(hash, startIndex) {
@@ -1852,6 +1948,7 @@ function saveSettings() {
   torrents = {};
   filesByHash = {};
   expandedHash = null;
+  categoryEnsured = false;
   connected = false;
   lastError = null;
 
@@ -2061,8 +2158,16 @@ function searchTabNodes() {
       action: "qbt:search-add"
     });
   }
-  children.push({ type: "text", content: searchResults.length + " results — click one to add it", className: "muted" });
-  children.push({ type: "track-row-list", items: items });
+  children.push({ type: "text", content: searchResults.length + " results", className: "muted" });
+  // `selectable` is what switches the host to its library-parity row list, which
+  // is the one that renders hover action buttons. Without a visible button the
+  // only way to download was to click the row and hope.
+  children.push({
+    type: "track-row-list",
+    items: items,
+    selectable: true,
+    actions: [{ id: "qbt:search-add", label: "Add to qBittorrent", icon: "↓" }]
+  });
   return children;
 }
 
@@ -2106,7 +2211,21 @@ function fileRowsNode(hash) {
       albumTitle: torrent ? torrent.name : null
     });
   }
-  return { type: "track-row-list", items: items, numbered: true };
+  // `selectable` selects the host's library-parity row list: hover Play /
+  // Add-to-queue overlay buttons, multi-select, keyboard listbox navigation and
+  // drag-to-queue — the same behaviour every other track list in the app has.
+  // The FIRST action is the one the host styles as Play (and the one a
+  // double-click fires), so its order is load-bearing.
+  return {
+    type: "track-row-list",
+    items: items,
+    numbered: true,
+    selectable: true,
+    actions: [
+      { id: "qbt:play-file", label: "Play", icon: "▶" },
+      { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" }
+    ]
+  };
 }
 
 // "Find torrents" on a library item: build the query, open the view, search.
@@ -2145,8 +2264,8 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:search-add", function (data) {
-    var index = parseInt((data && (data.itemId != null ? data.itemId : data.id)) || "", 10);
-    if (!isNaN(index)) addSearchResult(index);
+    var indices = rowIndices(data);
+    for (var i = 0; i < indices.length; i++) addSearchResult(indices[i]);
   });
 
   api.ui.onAction("qbt:start", function (data) {
@@ -2205,11 +2324,29 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:play-file", function (data) {
-    // track-row-list sends the row's id back; the expanded torrent is the one
-    // it belongs to.
-    var index = parseInt((data && (data.itemId != null ? data.itemId : data.id)) || "", 10);
-    if (isNaN(index) || !expandedHash) return;
-    playFiles(expandedHash, index);
+    // The row ids are file indices; the expanded torrent is the one they belong
+    // to.
+    var indices = rowIndices(data);
+    if (!indices.length || !expandedHash) return;
+    // A multi-row selection plays exactly those files; a single row plays the
+    // whole torrent from that point, which is what clicking a track in any other
+    // list does.
+    if (indices.length > 1) {
+      var tracks = tracksForIndices(expandedHash, indices);
+      if (!tracks.length) {
+        api.ui.showNotification("Nothing there that's finished downloading");
+        return;
+      }
+      var t = torrents[expandedHash];
+      api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
+      return;
+    }
+    playFiles(expandedHash, indices[0]);
+  });
+
+  api.ui.onAction("qbt:enqueue-file", function (data) {
+    var indices = rowIndices(data);
+    if (indices.length && expandedHash) enqueueFiles(expandedHash, indices);
   });
 
   api.ui.onAction("qbt:delete-ask", function (data) {
@@ -2342,6 +2479,7 @@ return {
   _mergeMaindata: mergeMaindata,
   _classifyConnectionError: classifyConnectionError,
   _searchQueryForTarget: searchQueryForTarget,
+  _rowIndices: rowIndices,
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
   _searchResultSubtitle: searchResultSubtitle,
