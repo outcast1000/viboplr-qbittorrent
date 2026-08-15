@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+Search, using the indexers you've already set up in qBittorrent.
+
+- **A Search tab** in the Torrents view. Results stream in as the indexers answer
+  rather than appearing all at once at the end, sorted by seeders, with size,
+  swarm and source on each row. Click one to add it.
+- **"Find torrents…"** on any track, album or artist in your library. It opens
+  the Search tab and searches straight away. A track searches its *album* — one
+  track's title finds single-track rips and misses the release it came from.
+- **With no search plugins enabled, it says so** and points at where to add them
+  in qBittorrent, instead of reporting "nothing found" for an album that exists.
+- Search jobs are disposed of on every exit path, including retyping a query
+  mid-search: qBittorrent caps how many can exist at once, and an abandoned job
+  holds its slot.
+
+This plugin ships no indexers. It drives whatever search plugins you have
+installed in qBittorrent itself.
+
 ## 0.4.0
 
 Finished downloads reach your library on their own.

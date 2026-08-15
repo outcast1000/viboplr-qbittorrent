@@ -98,6 +98,15 @@ var filesByHash = {};
 var expandedHash = null;
 var filesLoading = null;
 
+// Search.
+var searchQuery = "";
+var searchResults = [];
+var searchRunning = false;
+var searchError = null;
+var searchPlugins = null; // null = not asked yet, [] = none installed
+var searchJobId = null;
+var searchGen = 0; // guards a late poll against a newer search
+
 // Local collections, and which torrents we have already seen finish.
 var localCollections = [];
 var knownComplete = {};
@@ -595,6 +604,62 @@ function playableFiles(files) {
   return out;
 }
 
+// --- Search -----------------------------------------------------------------
+
+// What to type into a torrent search for a thing the user right-clicked.
+//
+// Artist first, because indexers name releases that way ("Artist - Album
+// [FLAC]"). An album is the useful unit — searching one track's title finds
+// single-track rips and misses the release it came from — so a track target
+// searches its ALBUM when it has one.
+function searchQueryForTarget(target) {
+  var t = target || {};
+  var parts = [];
+  if (t.kind === "artist") {
+    parts.push(t.artistName || t.title);
+  } else if (t.kind === "album") {
+    parts.push(t.artistName, t.albumTitle || t.title);
+  } else {
+    parts.push(t.artistName, t.albumTitle || t.title);
+  }
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = String(parts[i] == null ? "" : parts[i]).trim();
+    if (p) out.push(p);
+  }
+  return out.join(" ").replace(/\s{2,}/g, " ").trim();
+}
+
+// The indexer's hostname, for showing where a result came from.
+function siteLabel(url) {
+  var m = /^https?:\/\/(?:www\.)?([^/:]+)/i.exec(String(url || ""));
+  return m ? m[1] : "";
+}
+
+// Seeders first — for a torrent it is the difference between a download and a
+// dead entry, and every indexer's own default sort. Ties break on size so the
+// order is stable rather than dependent on which indexer answered first.
+function sortSearchResults(results) {
+  var list = (results || []).slice();
+  list.sort(function (a, b) {
+    var sa = Number((a && a.nbSeeders) || 0);
+    var sb = Number((b && b.nbSeeders) || 0);
+    if (sb !== sa) return sb - sa;
+    return Number((b && b.fileSize) || 0) - Number((a && a.fileSize) || 0);
+  });
+  return list;
+}
+
+function searchResultSubtitle(r) {
+  var bits = [formatBytes(r && r.fileSize)];
+  bits.push(Number((r && r.nbSeeders) || 0) + " seeders");
+  var leech = Number((r && r.nbLeechers) || 0);
+  if (leech) bits.push(leech + " leechers");
+  var site = siteLabel(r && r.siteUrl);
+  if (site) bits.push(site);
+  return bits.join("  ·  ");
+}
+
 // --- Library import ---------------------------------------------------------
 
 // Which local collection a downloaded path belongs to, or null.
@@ -938,6 +1003,150 @@ function actOn(path, hashes, label) {
       busy = null;
       return refresh();
     });
+}
+
+// --- Search -----------------------------------------------------------------
+
+var SEARCH_POLL_MS = 1200;
+var SEARCH_MAX_MS = 45000;
+var SEARCH_LIMIT = 60;
+
+// The search runs on qBittorrent's own installed search plugins. With none, the
+// API answers every query with nothing — so the empty state has to say that
+// rather than showing "no results", which reads as "this album doesn't exist".
+function loadSearchPlugins() {
+  return authed("/search/plugins")
+    .then(function (resp) {
+      expectOk(resp, "Reading search plugins");
+      return resp.json();
+    })
+    .then(function (list) {
+      var enabled = [];
+      for (var i = 0; i < (list || []).length; i++) {
+        if (list[i] && list[i].enabled) enabled.push(list[i]);
+      }
+      searchPlugins = enabled;
+      return enabled;
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not list search plugins:", e);
+      searchPlugins = [];
+      return [];
+    });
+}
+
+// A finished job holds resources on the server until it's told otherwise, and
+// qBittorrent caps how many can exist at once — so every exit path disposes of
+// it, including the ones where we stopped caring about the answer.
+function disposeSearch(id) {
+  if (id == null) return Promise.resolve();
+  return authed("/search/stop", { method: "POST", form: { id: id } })
+    .catch(function () {
+      // Already stopped is the normal case here; deleting is what matters.
+      return null;
+    })
+    .then(function () {
+      return authed("/search/delete", { method: "POST", form: { id: id } });
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not dispose of search job " + id + ":", e);
+    });
+}
+
+function runSearch(query) {
+  var q = String(query || "").trim();
+  if (!q) return Promise.resolve();
+
+  searchGen++;
+  var gen = searchGen;
+  var previousJob = searchJobId;
+
+  searchQuery = q;
+  searchRunning = true;
+  searchError = null;
+  searchResults = [];
+  searchJobId = null;
+  activeTab = "search";
+  render();
+
+  // Drop the previous job before starting another; a user retyping a query
+  // would otherwise leak one server-side job per attempt.
+  return disposeSearch(previousJob)
+    .then(function () {
+      return searchPlugins === null ? loadSearchPlugins() : searchPlugins;
+    })
+    .then(function (plugins) {
+      if (!plugins.length) {
+        throw new Error("no-plugins");
+      }
+      return authed("/search/start", {
+        method: "POST",
+        form: { pattern: q, plugins: "enabled", category: "all" }
+      });
+    })
+    .then(function (resp) {
+      expectOk(resp, "Starting the search");
+      return resp.json();
+    })
+    .then(function (job) {
+      if (gen !== searchGen) {
+        // A newer search started while this one was getting going.
+        return disposeSearch(job && job.id);
+      }
+      searchJobId = job && job.id;
+      return pollSearch(searchJobId, gen, 0);
+    })
+    .catch(function (e) {
+      if (gen !== searchGen) return null;
+      searchRunning = false;
+      searchError = String(e && e.message) === "no-plugins" ? "no-plugins" : errText(e);
+      if (searchError !== "no-plugins") console.error("qBittorrent: search failed:", e);
+      render();
+      return null;
+    });
+}
+
+function pollSearch(id, gen, elapsed) {
+  if (gen !== searchGen) return Promise.resolve();
+  return authed("/search/results?id=" + encodeURIComponent(id) + "&limit=" + SEARCH_LIMIT)
+    .then(function (resp) {
+      expectOk(resp, "Reading search results");
+      return resp.json();
+    })
+    .then(function (data) {
+      if (gen !== searchGen) return null;
+      searchResults = sortSearchResults((data && data.results) || []);
+      var done = String((data && data.status) || "") !== "Running" || elapsed >= SEARCH_MAX_MS;
+      if (done) {
+        searchRunning = false;
+        render();
+        var finishedId = searchJobId;
+        searchJobId = null;
+        return disposeSearch(finishedId);
+      }
+      // Results stream in, so render each pass rather than making the user wait
+      // for the slowest indexer before seeing anything.
+      render();
+      return new Promise(function (resolve) {
+        setTimeout(resolve, SEARCH_POLL_MS);
+      }).then(function () {
+        return pollSearch(id, gen, elapsed + SEARCH_POLL_MS);
+      });
+    })
+    .catch(function (e) {
+      if (gen !== searchGen) return null;
+      console.error("qBittorrent: reading search results failed:", e);
+      searchRunning = false;
+      searchError = errText(e);
+      render();
+      return disposeSearch(id);
+    });
+}
+
+function addSearchResult(index) {
+  var r = searchResults[index];
+  if (!r || !r.fileUrl) return;
+  addTorrent(r.fileUrl);
 }
 
 // --- Library import ---------------------------------------------------------
@@ -1339,9 +1548,17 @@ function render() {
     tabs: [
       { id: "downloading", label: "Downloading", count: counts.downloading },
       { id: "completed", label: "Completed", count: counts.completed },
-      { id: "all", label: "All", count: counts.all }
+      { id: "all", label: "All", count: counts.all },
+      { id: "search", label: "Search" }
     ]
   });
+
+  if (activeTab === "search") {
+    var searchNodes = searchTabNodes();
+    for (var si = 0; si < searchNodes.length; si++) children.push(searchNodes[si]);
+    api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: "search" });
+    return;
+  }
 
   children.push({
     type: "search-input",
@@ -1786,6 +2003,69 @@ function registerStreamResolver() {
   });
 }
 
+function searchTabNodes() {
+  var children = [
+    {
+      type: "search-input",
+      placeholder: "Search torrents — try “artist album”",
+      action: "qbt:search",
+      buttonLabel: "Search",
+      value: searchQuery
+    }
+  ];
+
+  if (searchError === "no-plugins") {
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content:
+        "qBittorrent has no search plugins enabled, so it has nowhere to search. " +
+        "Add one in qBittorrent under View → Search Engine → Search plugins, then try again."
+    });
+    return children;
+  }
+  if (searchError) {
+    children.push({ type: "text", className: "ds-banner ds-banner--error", content: searchError });
+    return children;
+  }
+
+  if (searchRunning) {
+    children.push({
+      type: "loading",
+      message: searchResults.length
+        ? "Searching… " + searchResults.length + " so far"
+        : "Searching " + (searchPlugins ? searchPlugins.length : 0) + " indexers…"
+    });
+  }
+
+  if (!searchResults.length) {
+    if (!searchRunning && searchQuery) {
+      children.push({ type: "text", content: "Nothing found for “" + searchQuery + "”." });
+    } else if (!searchRunning) {
+      children.push({
+        type: "text",
+        content: "Search the indexers you've enabled in qBittorrent, and add what you find straight to the queue.",
+        className: "muted"
+      });
+    }
+    return children;
+  }
+
+  var items = [];
+  for (var i = 0; i < searchResults.length; i++) {
+    var r = searchResults[i];
+    items.push({
+      id: String(i),
+      title: r.fileName || "(untitled)",
+      subtitle: searchResultSubtitle(r),
+      action: "qbt:search-add"
+    });
+  }
+  children.push({ type: "text", content: searchResults.length + " results — click one to add it", className: "muted" });
+  children.push({ type: "track-row-list", items: items });
+  return children;
+}
+
 function fileRowsNode(hash) {
   var torrent = torrents[hash];
   var files = filesByHash[hash];
@@ -1829,6 +2109,23 @@ function fileRowsNode(hash) {
   return { type: "track-row-list", items: items, numbered: true };
 }
 
+// "Find torrents" on a library item: build the query, open the view, search.
+// The view is opened FIRST so the user lands on the running search rather than
+// on a page that changes under them when it finishes.
+function registerContextMenu() {
+  if (!api.contextMenu || typeof api.contextMenu.onAction !== "function") return;
+  api.contextMenu.onAction("qbt-find-torrents", function (target) {
+    var query = searchQueryForTarget(target);
+    if (!query) {
+      api.ui.showNotification("Nothing to search for on that item");
+      return;
+    }
+    activeTab = "search";
+    if (typeof api.ui.navigateToView === "function") api.ui.navigateToView(VIEW_ID);
+    runSearch(query);
+  });
+}
+
 function registerActions() {
   api.ui.onAction("qbt:tab", function (data) {
     activeTab = (data && data.tabId) || (data && data.id) || activeTab;
@@ -1841,6 +2138,15 @@ function registerActions() {
 
   api.ui.onAction("qbt:refresh", function () {
     refresh();
+  });
+
+  api.ui.onAction("qbt:search", function (data) {
+    runSearch((data && data.query) || "");
+  });
+
+  api.ui.onAction("qbt:search-add", function (data) {
+    var index = parseInt((data && (data.itemId != null ? data.itemId : data.id)) || "", 10);
+    if (!isNaN(index)) addSearchResult(index);
   });
 
   api.ui.onAction("qbt:start", function (data) {
@@ -1992,6 +2298,7 @@ function activate(hostApi) {
   }
   registerActions();
   registerStreamResolver();
+  registerContextMenu();
   render();
   renderSettings();
 
@@ -2034,6 +2341,10 @@ return {
   _isErrored: isErrored,
   _mergeMaindata: mergeMaindata,
   _classifyConnectionError: classifyConnectionError,
+  _searchQueryForTarget: searchQueryForTarget,
+  _siteLabel: siteLabel,
+  _sortSearchResults: sortSearchResults,
+  _searchResultSubtitle: searchResultSubtitle,
   _collectionForPath: collectionForPath,
   _detectCompletions: detectCompletions,
   _mediaKindOf: mediaKindOf,

@@ -106,10 +106,24 @@ torrent.
   to my library* to make that the only way.
 - Restarting doesn't re-announce or re-import anything already finished.
 
+## Searching
+
+The **Search** tab drives the search plugins you have installed in qBittorrent —
+this plugin ships none of its own. Results are sorted by seeders and stream in as
+each indexer answers; clicking one adds it.
+
+Right-clicking a track, album or artist in your library offers **Find torrents…**,
+which opens the tab and searches for it. A track searches its *album*, since
+that's the unit indexers actually publish.
+
+If qBittorrent has no search plugins enabled, the tab says so and tells you where
+to add them (qBittorrent → View → Search Engine → Search plugins) rather than
+claiming nothing was found.
+
 ## Not here yet
 
-Planned: driving qBittorrent's own search plugins from the view, plus a
-"find torrents for this artist/album" action on library items.
+Planned: RSS auto-download rules for artists you follow, and playing a file
+while it's still downloading.
 
 This plugin controls a torrent client. It ships no indexers and no content, and
 searching (when it lands) will use whatever search plugins you have installed in
