@@ -129,3 +129,39 @@ test("playableFiles copes with an empty or absent list", () => {
   assert.deepEqual(plugin._playableFiles([]), []);
   assert.deepEqual(plugin._playableFiles(undefined), []);
 });
+
+test("partitionAudio separates the tracks from everything else", () => {
+  const { audio, others } = plugin._partitionAudio([
+    { index: 0, name: "01 Song.flac" },
+    { index: 1, name: "cover.jpg" },
+    { index: 2, name: "02 Song.flac" },
+    { index: 3, name: "Making Of.mkv" },
+    { index: 4, name: "info.nfo" },
+  ]);
+  assert.deepEqual(audio, [0, 2]);
+  // Video counts as "other": on a music release the video extra is usually the
+  // bulk of the download and the thing being skipped.
+  assert.deepEqual(others, [1, 3, 4]);
+});
+
+test("partitionAudio keeps file index 0 and ignores entries with no index", () => {
+  // Index 0 is a real file; a truthiness check would drop the first track of
+  // every torrent.
+  const { audio, others } = plugin._partitionAudio([
+    { index: 0, name: "a.flac" },
+    { name: "no-index.flac" },
+    null,
+  ]);
+  assert.deepEqual(audio, [0]);
+  assert.deepEqual(others, []);
+});
+
+test("partitionAudio on an all-audio torrent leaves nothing to skip", () => {
+  // The caller uses this to decide whether to offer the bulk button at all.
+  const { audio, others } = plugin._partitionAudio([
+    { index: 0, name: "a.flac" },
+    { index: 1, name: "b.flac" },
+  ]);
+  assert.deepEqual(audio, [0, 1]);
+  assert.deepEqual(others, []);
+});

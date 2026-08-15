@@ -593,6 +593,22 @@ function parseQbtUri(id) {
   return { hash: hash, index: index };
 }
 
+// Split a torrent's files into the audio and everything else, by file index.
+// Video counts as "other": on a music release a video extra is usually the bulk
+// of the download and the thing being skipped.
+function partitionAudio(files) {
+  var audio = [];
+  var others = [];
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    if (!f || typeof f.index !== "number") continue;
+    if (mediaKindOf(f.name) === "audio") audio.push(f.index);
+    else others.push(f.index);
+  }
+  return { audio: audio, others: others };
+}
+
 // Only fully-downloaded media is offered. A partially-downloaded file would open
 // and then hit EOF partway through, which reads as a corrupt file rather than as
 // an incomplete download — worse than not offering it.
@@ -1349,7 +1365,12 @@ function fetchFiles(hash) {
           index: typeof f.index === "number" ? f.index : i,
           name: f.name,
           size: f.size,
-          progress: f.progress
+          progress: f.progress,
+          // 0 means "don't download this one". Everything else is a download
+          // priority (1 normal, 6 high, 7 maximum) — the plugin only ever sets
+          // 0 or 1, but it must not flatten a priority the user set in
+          // qBittorrent itself, so the raw value is kept.
+          priority: typeof f.priority === "number" ? f.priority : 1
         });
       }
       filesByHash[hash] = files;
@@ -1364,6 +1385,50 @@ function fetchFiles(hash) {
       filesLoading = null;
       render();
       return files;
+    });
+}
+
+// Include or exclude files from the download (qBittorrent's per-file priority;
+// 0 = don't download).
+//
+// Only ever sets 0 or 1: this is a two-state control, and writing a high/maximum
+// priority the user had set in qBittorrent back down to normal would quietly
+// undo their own tuning.
+function setFilePriority(hash, indices, priority) {
+  if (!indices.length) return Promise.resolve();
+  busy = hash;
+  render();
+  return authed("/torrents/filePrio", {
+    method: "POST",
+    form: { hash: hash, id: indices.join("|"), priority: priority }
+  })
+    .then(function (resp) {
+      expectOk(resp, priority === 0 ? "Skipping those files" : "Including those files");
+      api.ui.showNotification(
+        priority === 0
+          ? indices.length === 1 ? "That file won't be downloaded" : indices.length + " files won't be downloaded"
+          : indices.length === 1 ? "That file will be downloaded" : indices.length + " files will be downloaded"
+      );
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not change file priority:", e);
+      api.ui.showNotification(
+        // The usual cause is a magnet whose metadata hasn't arrived: there is no
+        // file list to prioritise yet, and qBittorrent answers 409.
+        /409/.test(errText(e))
+          ? "qBittorrent doesn't have this torrent's file list yet — try again in a moment"
+          : "Couldn't change that: " + errText(e)
+      );
+    })
+    .then(function () {
+      busy = null;
+      // Re-read rather than patching locally: qBittorrent may adjust what it
+      // actually applied (a completed file, a conflicting priority), and the
+      // list must show what IT decided, not what we asked for.
+      return fetchFiles(hash);
+    })
+    .then(function () {
+      return refresh();
     });
 }
 
@@ -1617,6 +1682,30 @@ function torrentNode(t) {
           "qBittorrent looks like it's on another machine, so these files aren't on this one. " +
           "If its download folder is mounted here, set the path mapping in Settings → qBittorrent and they'll play."
       });
+    }
+    // "Only the audio" is the one bulk choice a music app can make confidently,
+    // and it is the reason most people open this list: a release full of video
+    // extras, scans and samples where only the tracks are wanted. Offered only
+    // while there is still something to download — after that it would only
+    // stop seeding files already on disk.
+    var loaded = filesByHash[t.hash];
+    if (loaded && !done) {
+      var audioCount = 0;
+      var otherCount = 0;
+      for (var fi = 0; fi < loaded.length; fi++) {
+        if (mediaKindOf(loaded[fi].name) === "audio") audioCount++;
+        else otherCount++;
+      }
+      if (audioCount && otherCount) {
+        children.push({
+          type: "button",
+          label: "Download only the audio (skip " + otherCount + " other file" + (otherCount === 1 ? "" : "s") + ")",
+          action: "qbt:only-audio",
+          variant: "secondary",
+          disabled: rowBusy,
+          data: { hash: t.hash }
+        });
+      }
     }
     var rows = fileRowsNode(t.hash);
     if (rows) children.push(rows);
@@ -2273,38 +2362,46 @@ function fileRowsNode(hash) {
   if (filesLoading === hash && !files) return { type: "loading", message: "Reading files…" };
   if (!files) return null;
 
-  var media = [];
-  for (var i = 0; i < files.length; i++) {
-    if (mediaKindOf(files[i].name)) media.push(files[i]);
-  }
-  if (!media.length) {
-    return { type: "text", content: "No audio or video files in this torrent.", className: "muted" };
+  // Every file, not just the playable ones: this is the torrent's CONTENTS, and
+  // choosing what to download is the main reason to look at it — you cannot skip
+  // a 4 GB video extra that the list filtered out.
+  var all = files.slice();
+  if (!all.length) {
+    return { type: "text", content: "qBittorrent hasn't got this torrent's file list yet.", className: "muted" };
   }
 
-  media.sort(function (a, b) {
+  all.sort(function (a, b) {
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
 
   var items = [];
-  for (var j = 0; j < media.length; j++) {
-    var f = media[j];
+  for (var j = 0; j < all.length; j++) {
+    var f = all[j];
+    var kind = mediaKindOf(f.name);
     var done = Number(f.progress) >= 1;
+    var skipped = Number(f.priority) === 0;
     var parsed = parseFileTrack(f.name);
+    // A non-media file keeps its real filename: "cover" and "01" are what the
+    // track parser would leave, which is useless when deciding whether to skip
+    // something.
+    var label = kind ? parsed.title : String(f.name || "").replace(/\\/g, "/").split("/").pop();
     var subtitle = formatBytes(f.size);
-    if (!done) subtitle += " · " + Math.round(Number(f.progress || 0) * 100) + "% downloaded";
+    if (skipped) subtitle += " · not downloading";
+    else if (!done) subtitle += " · " + Math.round(Number(f.progress || 0) * 100) + "% downloaded";
     items.push({
       id: String(f.index),
       // An unfinished file stays visible but is marked, so the list shows the
-      // whole torrent rather than appearing to be missing tracks.
-      title: (done ? "" : "◌ ") + parsed.title,
+      // whole torrent rather than appearing to be missing tracks. A skipped one
+      // is marked differently again — it is not coming unless you say so.
+      title: (skipped ? "⊘ " : done ? "" : "◌ ") + label,
       subtitle: subtitle,
       album: torrent ? torrent.name : undefined,
-      action: done ? "qbt:play-file" : undefined,
-      // Only a finished, reachable file gets a path — that is what makes the
-      // host's right-click menu and drag-to-queue work on these rows.
-      path: done && filesAreReachable() ? qbtUri(hash, f.index) : null,
-      artistName: parsed.artist,
-      albumTitle: torrent ? torrent.name : null
+      action: kind && done ? "qbt:play-file" : undefined,
+      // Only a finished, reachable, PLAYABLE file gets a path — that is what
+      // makes the host's right-click menu and drag-to-queue work on these rows.
+      path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
+      artistName: kind ? parsed.artist : null,
+      albumTitle: kind && torrent ? torrent.name : null
     });
   }
   // `selectable` selects the host's library-parity row list: hover Play /
@@ -2319,7 +2416,9 @@ function fileRowsNode(hash) {
     selectable: true,
     actions: [
       { id: "qbt:play-file", label: "Play", icon: "▶" },
-      { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" }
+      { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" },
+      { id: "qbt:file-download", label: "Download this file", icon: "↓" },
+      { id: "qbt:file-skip", label: "Don't download this file", icon: "⊘" }
     ]
   };
 }
@@ -2476,6 +2575,30 @@ function registerActions() {
       return;
     }
     playFiles(expandedHash, indices[0]);
+  });
+
+  api.ui.onAction("qbt:file-download", function (data) {
+    var indices = rowIndices(data);
+    if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 1);
+  });
+
+  api.ui.onAction("qbt:file-skip", function (data) {
+    var indices = rowIndices(data);
+    if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 0);
+  });
+
+  api.ui.onAction("qbt:only-audio", function (data) {
+    var hash = hashOf(data);
+    var files = hash && filesByHash[hash];
+    if (!files) return;
+    var split = partitionAudio(files);
+    if (!split.others.length || !split.audio.length) return;
+    // Include the audio first: if the second call fails, the torrent is left
+    // wanting MORE than intended rather than nothing at all, which is the
+    // recoverable direction.
+    setFilePriority(hash, split.audio, 1).then(function () {
+      return setFilePriority(hash, split.others, 0);
+    });
   });
 
   api.ui.onAction("qbt:enqueue-file", function (data) {
@@ -2641,6 +2764,7 @@ return {
   _qbtUri: qbtUri,
   _parseQbtUri: parseQbtUri,
   _playableFiles: playableFiles,
+  _partitionAudio: partitionAudio,
   _setupSteps: setupSteps,
   _looksLikeTorrentSource: looksLikeTorrentSource,
   _magnetDisplayName: magnetDisplayName,

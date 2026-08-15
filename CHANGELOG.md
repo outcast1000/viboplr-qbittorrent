@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0
+
+Choose what a torrent actually downloads.
+
+- **The Files list now shows every file**, not just the playable ones. You
+  cannot skip a 4 GB video extra the list filtered out.
+- **Include or skip any file** with the ↓ and ⊘ buttons on its row. Skipped
+  files are marked and stop downloading; qBittorrent keeps the rest going.
+- **“Download only the audio”** on any unfinished torrent with non-audio files —
+  the usual reason to open the list on a music release full of scans, samples
+  and video extras.
+- Priorities you set in qBittorrent itself (high, maximum) are left alone; this
+  only ever switches a file between “download” and “don’t”.
+
 ## 0.8.0
 
 - **A running search can be stopped.** A slow indexer could hold one open for

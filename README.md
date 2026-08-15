@@ -79,11 +79,24 @@ if you want it.
   probed once per session and the right names are used.
 - **Self-signed HTTPS** needs *Allow self-signed certificates* turned on.
 
+## Contents, and choosing what downloads
+
+Press **Files** on any torrent to see everything inside it — not just the
+playable files, because the point of the list is often to skip the 4 GB video
+extra. Each row shows its size and progress; skipped files are marked `⊘` and
+unfinished ones `◌`.
+
+Per row: **↓** includes a file in the download, **⊘** drops it. On an unfinished
+torrent that also holds non-audio files, **Download only the audio** does the
+common case in one press. Priorities you set in qBittorrent itself (high,
+maximum) are left alone — this only ever switches a file between *download* and
+*don't*.
+
 ## Playing from a torrent
 
-Press **Files** on any torrent to see the audio and video inside it. **Play**
-plays the whole torrent, or click a single file to play just that one — they
-become ordinary queue entries, with the usual right-click menu and drag-to-queue.
+**Play** plays the whole torrent, or click a single file to play just that one —
+they become ordinary queue entries, with the usual right-click menu and
+drag-to-queue. Hover a row for **▶ Play** and **+ Add to queue**.
 
 Three things worth knowing:
 
