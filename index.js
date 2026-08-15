@@ -69,6 +69,8 @@ var pathMapTo = "";
 var destCollectionId = "";
 // Rescan the owning collection when a download finishes.
 var autoImport = true;
+// Add torrents paused so their contents can be chosen before anything downloads.
+var chooseFilesFirst = false;
 
 // Draft settings — what the settings panel's inputs currently hold. Kept apart
 // from the live values so a half-typed password never reaches storage and never
@@ -97,6 +99,11 @@ var pendingDelete = null; // hash awaiting delete confirmation
 var filesByHash = {};
 var expandedHash = null;
 var filesLoading = null;
+// Torrents added paused and waiting for the user to pick files, and the ones
+// temporarily started only to fetch their metadata. Session-only: an interrupted
+// selection should not outlive a restart as a mysteriously paused torrent.
+var pendingSelection = {};
+var metadataFetching = {};
 
 // Search.
 var searchQuery = "";
@@ -593,6 +600,41 @@ function parseQbtUri(id) {
   return { hash: hash, index: index };
 }
 
+// A magnet's info hash, when it is written as hex (40 chars for v1, 64 for v2).
+//
+// Base32 magnets exist and are NOT converted here: qBittorrent reports hashes in
+// hex, so a base32 value would never match and a wrong hash is worse than none —
+// the caller falls back to diffing the torrent list, which always works.
+function magnetHash(uri) {
+  var m = /xt=urn:bt[im]h:([A-Za-z0-9]+)/i.exec(String(uri || ""));
+  if (!m) return null;
+  var h = m[1];
+  if (!/^[A-Fa-f0-9]{40}$/.test(h) && !/^[A-Fa-f0-9]{64}$/.test(h)) return null;
+  return h.toLowerCase();
+}
+
+// Hashes present after an add that weren't there before.
+//
+// How a newly added torrent is identified at all: /torrents/add answers "Ok."
+// and nothing else — no hash, no id.
+function newHashes(before, after) {
+  var out = [];
+  for (var hash in after || {}) {
+    if (!Object.prototype.hasOwnProperty.call(after, hash)) continue;
+    if (!before || !before[hash]) out.push(hash);
+  }
+  return out;
+}
+
+// Does qBittorrent know what's inside this torrent yet? A magnet arrives as a
+// hash and nothing else; the file list only exists once metadata has been
+// fetched from the swarm.
+function hasMetadata(t) {
+  if (!t) return false;
+  if (/^(metaDL|forcedMetaDL)$/.test(String(t.state || ""))) return false;
+  return Number(t.size || 0) > 0 || Number(t.total_size || 0) > 0;
+}
+
 // Split a torrent's files into the audio and everything else, by file index.
 // Video counts as "other": on a music release a video extra is usually the bulk
 // of the download and the thing being skipped.
@@ -1014,6 +1056,93 @@ function ensureCategory() {
     });
 }
 
+function shallowHashSet(map) {
+  var out = {};
+  for (var hash in map || {}) {
+    if (Object.prototype.hasOwnProperty.call(map, hash)) out[hash] = true;
+  }
+  return out;
+}
+
+// After adding paused: find the torrent, get its file list in front of the user,
+// and leave it stopped until they say go.
+//
+// The awkward part is metadata. A .torrent carries its file list, so it is
+// available at once. A MAGNET is just a hash — the file list has to be fetched
+// from the swarm, and qBittorrent won't do that for a torrent that is stopped.
+// So a magnet is started briefly, purely to fetch metadata, and stopped again
+// the moment it has it. No file data is downloaded during metaDL.
+function beginSelection(knownBefore, expectedHash) {
+  var hash = expectedHash && torrents[expectedHash] ? expectedHash : null;
+  if (!hash) {
+    var fresh = newHashes(knownBefore, torrents);
+    // Exactly one new torrent is the only case that can be attributed with
+    // confidence; with several (a batch, or someone else adding at the same
+    // moment) the selection flow is skipped rather than guessing wrong and
+    // pausing a stranger's download.
+    if (fresh.length === 1) hash = fresh[0];
+  }
+  if (!hash) return Promise.resolve();
+
+  pendingSelection[hash] = true;
+  expandedHash = hash;
+  render();
+
+  return waitForMetadata(hash, 0);
+}
+
+var METADATA_POLL_MS = 1500;
+var METADATA_MAX_MS = 90000;
+
+function waitForMetadata(hash, elapsed) {
+  return refresh().then(function () {
+    var t = torrents[hash];
+    if (!t || !pendingSelection[hash]) return null; // removed, or the user moved on
+    if (hasMetadata(t)) {
+      // It may have been started to fetch metadata — put it back to stopped so
+      // nothing downloads before the user has chosen.
+      var wasFetching = metadataFetching[hash];
+      delete metadataFetching[hash];
+      var settle = wasFetching && !isPaused(t)
+        ? actOn(stopEndpoint(), [hash], "Pausing for file selection")
+        : Promise.resolve();
+      return settle.then(function () {
+        return fetchFiles(hash);
+      }).then(function () {
+        api.ui.showNotification("Ready — choose which files to download, then press Start");
+        render();
+      });
+    }
+    if (elapsed >= METADATA_MAX_MS) {
+      // Give up waiting rather than holding a paused torrent forever: the user
+      // can still start it by hand and select files afterwards.
+      delete metadataFetching[hash];
+      api.ui.showNotification("Couldn't get this torrent's file list — start it and choose files as it runs");
+      render();
+      return null;
+    }
+    // A stopped magnet will never fetch metadata on its own; start it just for
+    // that. During metaDL no file data is transferred.
+    if (isPaused(t) && !metadataFetching[hash]) {
+      metadataFetching[hash] = true;
+      return actOn(startEndpoint(), [hash], "Fetching the file list").then(function () {
+        return delay(METADATA_POLL_MS);
+      }).then(function () {
+        return waitForMetadata(hash, elapsed + METADATA_POLL_MS);
+      });
+    }
+    return delay(METADATA_POLL_MS).then(function () {
+      return waitForMetadata(hash, elapsed + METADATA_POLL_MS);
+    });
+  });
+}
+
+function delay(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
+}
+
 function addTorrent(source) {
   var uri = String(source || "").trim();
   if (!looksLikeTorrentSource(uri)) {
@@ -1028,6 +1157,14 @@ function addTorrent(source) {
     sequentialDownload: "true",
     firstLastPiecePrio: "true"
   };
+  if (chooseFilesFirst) {
+    // Both spellings: 5.0 renamed paused -> stopped, and qBittorrent ignores a
+    // form field it doesn't know, so this needs no version branch.
+    form.paused = "true";
+    form.stopped = "true";
+  }
+  var knownBefore = chooseFilesFirst ? shallowHashSet(torrents) : null;
+  var expectedHash = chooseFilesFirst ? magnetHash(uri) : null;
   if (category) form.category = category;
   // Saving into a collection folder is what makes the finished download reach
   // the library at all — without it the files land somewhere the app never
@@ -1054,12 +1191,18 @@ function addTorrent(source) {
         );
       }
       var name = magnetDisplayName(uri);
-      api.ui.showNotification(name ? "Added " + name : "Added to qBittorrent");
+      api.ui.showNotification(
+        chooseFilesFirst
+          ? (name ? "Added " + name + " — paused so you can choose files" : "Added, paused so you can choose files")
+          : (name ? "Added " + name : "Added to qBittorrent")
+      );
       // Show where it went. Adding from the Search tab otherwise leaves the user
       // looking at search results with no sign anything happened.
       activeTab = "downloading";
       render();
-      return refresh();
+      return refresh().then(function () {
+        if (chooseFilesFirst) return beginSelection(knownBefore, expectedHash);
+      });
     })
     .catch(function (e) {
       console.error("qBittorrent: add failed:", e);
@@ -1615,7 +1758,22 @@ function torrentNode(t) {
 
   var open = expandedHash === t.hash;
   var reachable = filesAreReachable();
+  var awaiting = !!pendingSelection[t.hash];
   var buttons = [];
+
+  // A torrent held for selection leads with the one thing to do next, and its
+  // Start button says what it starts — "Start" alone reads as "resume", which is
+  // not what is being decided here.
+  if (awaiting) {
+    buttons.push({
+      type: "button",
+      label: metadataFetching[t.hash] ? "Fetching file list…" : "Start download",
+      action: "qbt:start-selected",
+      variant: "accent",
+      disabled: rowBusy || !!metadataFetching[t.hash],
+      data: { hash: t.hash }
+    });
+  }
 
   // Play is offered only when the files are reachable from this machine —
   // qBittorrent on a NAS reports ITS paths, which mean nothing here. Hidden
@@ -1709,6 +1867,16 @@ function torrentNode(t) {
     }
     var rows = fileRowsNode(t.hash);
     if (rows) children.push(rows);
+  }
+
+  if (awaiting) {
+    children.unshift({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content: metadataFetching[t.hash]
+        ? "Fetching this torrent's file list — nothing is downloading yet."
+        : "Paused. Choose which files you want below, then press Start download."
+    });
   }
 
   if (isErrored(t)) {
@@ -1899,7 +2067,8 @@ function currentDraft() {
       pathMapFrom: pathMapFrom,
       pathMapTo: pathMapTo,
       destCollectionId: destCollectionId,
-      autoImport: autoImport
+      autoImport: autoImport,
+      chooseFilesFirst: chooseFilesFirst
     };
   }
   return draft;
@@ -2029,6 +2198,14 @@ function renderSettings() {
           },
           {
             type: "settings-row",
+            label: "Choose files before downloading",
+            description:
+              "Adds torrents paused, fetches their file list, and waits for you to pick what to download before any data moves. " +
+              "For a magnet this means a brief start to fetch the file list — no files are transferred during that.",
+            control: { type: "toggle", label: "", action: "qbt:set-choose-first", checked: !!d.chooseFilesFirst }
+          },
+          {
+            type: "settings-row",
             label: "Add finished downloads to my library",
             description: "When a download finishes inside one of your collections, rescan it so the tracks appear. Files outside every collection are left alone.",
             control: { type: "toggle", label: "", action: "qbt:set-auto-import", checked: !!d.autoImport }
@@ -2077,6 +2254,7 @@ function loadSettings() {
       pathMapTo = s.pathMapTo || "";
       destCollectionId = s.destCollectionId == null ? "" : String(s.destCollectionId);
       autoImport = s.autoImport !== false;
+      chooseFilesFirst = !!s.chooseFilesFirst;
       previousCategory = s.previousCategory || "";
       draft = null;
     })
@@ -2102,6 +2280,7 @@ function persistSettings() {
       pathMapTo: pathMapTo,
       destCollectionId: destCollectionId,
       autoImport: autoImport,
+      chooseFilesFirst: chooseFilesFirst,
       previousCategory: previousCategory
     })
     .catch(function (e) {
@@ -2128,6 +2307,7 @@ function saveSettings() {
   pathMapTo = (d.pathMapTo || "").trim();
   destCollectionId = d.destCollectionId == null ? "" : String(d.destCollectionId);
   autoImport = !!d.autoImport;
+  chooseFilesFirst = !!d.chooseFilesFirst;
 
   // Any of these can invalidate the session (a new host, new credentials, a
   // different TLS stance), so drop it rather than discovering that on the next
@@ -2503,7 +2683,30 @@ function registerActions() {
 
   api.ui.onAction("qbt:start", function (data) {
     var hash = hashOf(data);
-    if (hash) actOn(startEndpoint(), [hash], "Starting the torrent");
+    if (hash) {
+      // Starting by hand ends the selection hold — the user has decided.
+      delete pendingSelection[hash];
+      actOn(startEndpoint(), [hash], "Starting the torrent");
+    }
+  });
+
+  api.ui.onAction("qbt:start-selected", function (data) {
+    var hash = hashOf(data);
+    if (!hash) return;
+    delete pendingSelection[hash];
+    var files = filesByHash[hash] || [];
+    var kept = 0;
+    for (var i = 0; i < files.length; i++) {
+      if (Number(files[i].priority) !== 0) kept++;
+    }
+    if (files.length && !kept) {
+      // Starting with everything skipped downloads nothing and looks broken.
+      pendingSelection[hash] = true;
+      api.ui.showNotification("Every file is set to skip — include at least one first");
+      render();
+      return;
+    }
+    actOn(startEndpoint(), [hash], "Starting the download");
   });
 
   api.ui.onAction("qbt:stop", function (data) {
@@ -2638,6 +2841,10 @@ function registerActions() {
     currentDraft().destCollectionId = (data && data.value) || "";
     renderSettings();
   });
+  api.ui.onAction("qbt:set-choose-first", function (data) {
+    currentDraft().chooseFilesFirst = !!(data && (data.checked === undefined ? data.value : data.checked));
+    renderSettings();
+  });
   api.ui.onAction("qbt:set-auto-import", function (data) {
     currentDraft().autoImport = !!(data && (data.checked === undefined ? data.value : data.checked));
     renderSettings();
@@ -2765,6 +2972,9 @@ return {
   _parseQbtUri: parseQbtUri,
   _playableFiles: playableFiles,
   _partitionAudio: partitionAudio,
+  _magnetHash: magnetHash,
+  _newHashes: newHashes,
+  _hasMetadata: hasMetadata,
   _setupSteps: setupSteps,
   _looksLikeTorrentSource: looksLikeTorrentSource,
   _magnetDisplayName: magnetDisplayName,

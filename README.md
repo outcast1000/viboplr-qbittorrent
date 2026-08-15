@@ -79,6 +79,19 @@ if you want it.
   probed once per session and the right names are used.
 - **Self-signed HTTPS** needs *Allow self-signed certificates* turned on.
 
+## Choosing files *before* the download starts
+
+Turn on **Choose files before downloading** in settings. Torrents you add are
+then paused, their file list is fetched, and the row waits with *Paused. Choose
+which files you want below, then press Start download.*
+
+Magnets work as well: a magnet is only a hash, and qBittorrent won't fetch a
+stopped torrent's file list — so it's started briefly to get the metadata and
+stopped again the moment it has it. No file data moves during that.
+
+It's off by default, because it adds a decision to every add, which isn't what
+you want when you're grabbing one album.
+
 ## Contents, and choosing what downloads
 
 Press **Files** on any torrent to see everything inside it — not just the

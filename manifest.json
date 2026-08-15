@@ -1,7 +1,7 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, watch progress, and start, stop or remove torrents without leaving the app.",
   "minAppVersion": "1.0.27",

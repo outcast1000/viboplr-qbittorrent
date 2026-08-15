@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.0
+
+**Choose files before anything downloads** — the missing half of 0.9.0, which
+could only skip files after the torrent had already started pulling them.
+
+- New setting, **Choose files before downloading**. With it on, a torrent is
+  added paused, its file list is fetched, and it waits for you.
+- The row says so plainly and its button reads **Start download**, not “Start”.
+- **Magnets work too.** A magnet is only a hash, and qBittorrent won’t fetch the
+  file list for a stopped torrent — so it is started briefly for metadata and
+  stopped again the moment it arrives. No file data moves during that.
+- Starting with every file skipped is refused, since it would download nothing
+  and look broken.
+- Off by default: it adds a decision to every add, which is not what you want
+  when grabbing a single album.
+
 ## 0.9.0
 
 Choose what a torrent actually downloads.
