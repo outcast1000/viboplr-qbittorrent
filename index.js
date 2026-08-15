@@ -61,6 +61,10 @@ var category = "viboplr";
 var restrictToCategory = true;
 var insecure = false;
 var pollMs = 5000;
+// Remote → local prefix rewrite, for a qBittorrent on another machine whose
+// download directory is mounted here under a different root.
+var pathMapFrom = "";
+var pathMapTo = "";
 
 // Draft settings — what the settings panel's inputs currently hold. Kept apart
 // from the live values so a half-typed password never reaches storage and never
@@ -84,6 +88,11 @@ var connected = false;
 var lastError = null;
 var busy = null; // hash currently mid-action, for button disabling
 var pendingDelete = null; // hash awaiting delete confirmation
+
+// Files (per torrent, fetched on demand when a row is expanded).
+var filesByHash = {};
+var expandedHash = null;
+var filesLoading = null;
 
 // UI.
 var activeTab = "downloading";
@@ -443,6 +452,132 @@ function connectionStatus() {
   return { kind: "ok", tone: "success", label: "Connected", detail: "", fix: "" };
 }
 
+// --- Files & playback -------------------------------------------------------
+
+var AUDIO_EXT = /\.(mp3|flac|aac|m4a|wav|opus|wma|ogg|oga|aiff?|ape|wv|tta|dsf|dff|mpc|mka|caf)$/i;
+var VIDEO_EXT = /\.(mp4|m4v|mov|mkv|webm|avi|wmv)$/i;
+
+function mediaKindOf(name) {
+  var s = String(name || "");
+  if (AUDIO_EXT.test(s)) return "audio";
+  if (VIDEO_EXT.test(s)) return "video";
+  return null;
+}
+
+// qBittorrent reports paths in ITS OWN filesystem's style, which is not
+// necessarily this machine's — a Windows client talking to a Linux seedbox is
+// the normal case. So the separator is inferred from the path itself, never
+// from the platform the plugin happens to run on.
+function isWindowsPath(p) {
+  var s = String(p || "");
+  return /^[A-Za-z]:[\\/]/.test(s) || (s.indexOf("\\") >= 0 && s.indexOf("/") < 0);
+}
+
+// Join a torrent's save path with a file's torrent-relative name.
+//
+// Always emits forward slashes: the host does `"file://".length` slicing and
+// hands the rest to mpv / convertFileSrc, both of which take forward slashes on
+// Windows too. A backslash would survive into the URL and break there.
+function joinRemotePath(savePath, name) {
+  var base = String(savePath || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  var rel = String(name || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!base) return rel;
+  if (!rel) return base;
+  return base + "/" + rel;
+}
+
+// Rewrite a remote path into the local one, for a qBittorrent running on another
+// machine whose download directory is mounted here under a different root
+// (/downloads on the seedbox, Z:/torrents here). Prefix substitution only —
+// exactly what the user can reason about and type into two boxes.
+//
+// Case-insensitive when the remote side looks like Windows, since its paths are.
+function applyPathMapping(path, from, to) {
+  var p = String(path || "");
+  var f = String(from || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  var t = String(to || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!f || !t) return p;
+  var subject = isWindowsPath(f) ? p.toLowerCase() : p;
+  var needle = isWindowsPath(f) ? f.toLowerCase() : f;
+  if (subject.indexOf(needle) !== 0) return p;
+  return t + p.substring(f.length);
+}
+
+// Whether qBittorrent is on this machine, and so whether its paths mean anything
+// here. Only used to decide what the UI OFFERS — a wrong guess costs a hidden
+// play button, never a broken play — and the path mapping overrides it.
+function isLikelyLocalHost(url) {
+  // The bracket alternative is load-bearing: an IPv6 literal is written
+  // http://[::1]:8080, and a plain [^:/]+ host match stops at the first colon —
+  // inside the address, not at the port.
+  var m = /^https?:\/\/(\[[^\]]+\]|[^:/]+)/i.exec(String(url || ""));
+  if (!m) return false;
+  var host = m[1].toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0";
+}
+
+// Build a track's display metadata from its filename. Nothing in the plugin API
+// reads tags off an arbitrary file, so this is genuinely all there is — which is
+// why importing into the library (where lofty reads real tags) stays the better
+// path and this one is "hear it now".
+function parseFileTrack(name) {
+  var base = String(name || "").replace(/\\/g, "/");
+  var slash = base.lastIndexOf("/");
+  if (slash >= 0) base = base.substring(slash + 1);
+  base = base.replace(/\.[A-Za-z0-9]{1,5}$/, "");
+
+  var trackNumber = null;
+  var m = /^\s*(\d{1,3})\s*[.\-_)]?\s+(.+)$/.exec(base);
+  if (m) {
+    trackNumber = parseInt(m[1], 10);
+    base = m[2];
+  }
+  base = base.replace(/[_]+/g, " ").replace(/\s{2,}/g, " ").trim();
+
+  var artist = null;
+  var title = base;
+  var dash = /^(.{1,60}?)\s+[-–—]\s+(.+)$/.exec(base);
+  if (dash) {
+    artist = dash[1].trim();
+    title = dash[2].trim();
+  }
+  return { trackNumber: trackNumber, artist: artist || null, title: title || base };
+}
+
+function qbtUri(hash, index) {
+  return "qbt://" + hash + "/" + index;
+}
+
+// The host hands back everything after "qbt://" verbatim, so the id is parsed
+// here rather than assumed to be pre-split.
+function parseQbtUri(id) {
+  var s = String(id || "");
+  var slash = s.lastIndexOf("/");
+  if (slash <= 0) return null;
+  var hash = s.substring(0, slash);
+  var index = parseInt(s.substring(slash + 1), 10);
+  if (!hash || isNaN(index) || index < 0) return null;
+  return { hash: hash, index: index };
+}
+
+// Only fully-downloaded media is offered. A partially-downloaded file would open
+// and then hit EOF partway through, which reads as a corrupt file rather than as
+// an incomplete download — worse than not offering it.
+function playableFiles(files) {
+  var out = [];
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    if (!mediaKindOf(f.name)) continue;
+    if (Number(f.progress) < 1) continue;
+    out.push(f);
+  }
+  out.sort(function (a, b) {
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+  return out;
+}
+
 function encodeForm(fields) {
   var parts = [];
   for (var k in fields) {
@@ -722,6 +857,96 @@ function actOn(path, hashes, label) {
     });
 }
 
+// --- Files ------------------------------------------------------------------
+
+function fetchFiles(hash) {
+  filesLoading = hash;
+  render();
+  return authed("/torrents/files?hash=" + encodeURIComponent(hash))
+    .then(function (resp) {
+      expectOk(resp, "Reading the torrent's files");
+      return resp.json();
+    })
+    .then(function (list) {
+      // `index` is only present from WebAPI 2.8.2 on; before that a file's
+      // position in this array IS its index, which is what the file-priority and
+      // download-selection endpoints take. Falling back to the position keeps
+      // playback working on older servers instead of building qbt://…/NaN.
+      var files = [];
+      for (var i = 0; i < (list || []).length; i++) {
+        var f = list[i] || {};
+        files.push({
+          index: typeof f.index === "number" ? f.index : i,
+          name: f.name,
+          size: f.size,
+          progress: f.progress
+        });
+      }
+      filesByHash[hash] = files;
+      return files;
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not list files:", e);
+      api.ui.showNotification("Couldn't list that torrent's files: " + errText(e));
+      return [];
+    })
+    .then(function (files) {
+      filesLoading = null;
+      render();
+      return files;
+    });
+}
+
+function ensureFiles(hash) {
+  if (filesByHash[hash]) return Promise.resolve(filesByHash[hash]);
+  return fetchFiles(hash);
+}
+
+// Absolute path of one file on THIS machine, or null when it can't be known.
+function localPathFor(torrent, file) {
+  if (!torrent || !file) return null;
+  var save = torrent.save_path || torrent.download_path || "";
+  if (!save) return null;
+  return applyPathMapping(joinRemotePath(save, file.name), pathMapFrom, pathMapTo);
+}
+
+// Are this torrent's files reachable from here at all? Either qBittorrent is on
+// this machine, or the user has told us where its download directory is mounted.
+function filesAreReachable() {
+  if (pathMapFrom && pathMapTo) return true;
+  return isLikelyLocalHost(baseUrl);
+}
+
+function trackForFile(torrent, file) {
+  var parsed = parseFileTrack(file.name);
+  return {
+    path: qbtUri(torrent.hash, file.index),
+    title: parsed.title,
+    artist_name: parsed.artist,
+    album_title: torrent.name || null,
+    track_number: parsed.trackNumber
+  };
+}
+
+function playFiles(hash, startIndex) {
+  var torrent = torrents[hash];
+  if (!torrent) return Promise.resolve();
+  return ensureFiles(hash).then(function (files) {
+    var playable = playableFiles(files);
+    if (!playable.length) {
+      api.ui.showNotification("Nothing finished downloading in this torrent yet");
+      return;
+    }
+    var tracks = [];
+    var start = 0;
+    for (var i = 0; i < playable.length; i++) {
+      if (startIndex != null && playable[i].index === startIndex) start = i;
+      tracks.push(trackForFile(torrent, playable[i]));
+    }
+    api.playback.playTracks(tracks, start, { name: torrent.name || "Torrent" });
+  });
+}
+
 function deleteTorrent(hash, deleteFiles) {
   busy = hash;
   render();
@@ -800,32 +1025,67 @@ function torrentNode(t) {
   }
   facts.push(Number(t.num_seeds || 0) + " seeds");
 
+  var open = expandedHash === t.hash;
+  var reachable = filesAreReachable();
+  var buttons = [];
+
+  // Play is offered only when the files are reachable from this machine —
+  // qBittorrent on a NAS reports ITS paths, which mean nothing here. Hidden
+  // rather than disabled: a permanently dead button on every row is noise, and
+  // the Files list explains the situation once, where it's relevant.
+  if (reachable && Number(t.progress) > 0) {
+    buttons.push({
+      type: "button",
+      label: "Play",
+      action: "qbt:play-torrent",
+      variant: "accent",
+      disabled: rowBusy,
+      data: { hash: t.hash }
+    });
+  }
+  buttons.push({
+    type: "button",
+    label: open ? "Hide files" : "Files",
+    action: "qbt:toggle-files",
+    variant: "secondary",
+    data: { hash: t.hash }
+  });
+  buttons.push({
+    type: "button",
+    label: paused ? "Start" : "Stop",
+    action: paused ? "qbt:start" : "qbt:stop",
+    variant: "secondary",
+    disabled: rowBusy,
+    data: { hash: t.hash }
+  });
+  buttons.push({
+    type: "button",
+    label: "Remove…",
+    action: "qbt:delete-ask",
+    variant: "secondary",
+    disabled: rowBusy,
+    data: { hash: t.hash }
+  });
+
   var children = [
     { type: "text", content: facts.join("  ·  "), className: "muted" },
     { type: "progress-bar", value: pct, max: 100, label: pct.toFixed(1) + "%" },
-    {
-      type: "layout",
-      direction: "horizontal",
-      children: [
-        {
-          type: "button",
-          label: paused ? "Start" : "Stop",
-          action: paused ? "qbt:start" : "qbt:stop",
-          variant: "secondary",
-          disabled: rowBusy,
-          data: { hash: t.hash }
-        },
-        {
-          type: "button",
-          label: "Remove…",
-          action: "qbt:delete-ask",
-          variant: "secondary",
-          disabled: rowBusy,
-          data: { hash: t.hash }
-        }
-      ]
-    }
+    { type: "layout", direction: "horizontal", children: buttons }
   ];
+
+  if (open) {
+    if (!reachable) {
+      children.push({
+        type: "text",
+        className: "ds-banner ds-banner--warning",
+        content:
+          "qBittorrent looks like it's on another machine, so these files aren't on this one. " +
+          "If its download folder is mounted here, set the path mapping in Settings → qBittorrent and they'll play."
+      });
+    }
+    var rows = fileRowsNode(t.hash);
+    if (rows) children.push(rows);
+  }
 
   if (isErrored(t)) {
     children.unshift({ type: "text", content: "This torrent is in an error state in qBittorrent.", className: "error" });
@@ -974,7 +1234,9 @@ function currentDraft() {
       category: category,
       restrictToCategory: restrictToCategory,
       insecure: insecure,
-      pollMs: pollMs
+      pollMs: pollMs,
+      pathMapFrom: pathMapFrom,
+      pathMapTo: pathMapTo
     };
   }
   return draft;
@@ -1080,6 +1342,18 @@ function renderSettings() {
           },
           {
             type: "settings-row",
+            label: "Their download folder",
+            description: "Only needed when qBittorrent runs on another machine. The path IT saves to, e.g. /downloads.",
+            control: { type: "text-input", placeholder: "/downloads", action: "qbt:set-map-from", value: d.pathMapFrom }
+          },
+          {
+            type: "settings-row",
+            label: "…is mounted here as",
+            description: "Where that same folder appears on this machine, e.g. Z:/torrents. Set both and playing files from a remote qBittorrent works.",
+            control: { type: "text-input", placeholder: "Z:/torrents", action: "qbt:set-map-to", value: d.pathMapTo }
+          },
+          {
+            type: "settings-row",
             label: "Refresh interval",
             description: "How often to ask qBittorrent for progress, in seconds (2–60).",
             control: { type: "text-input", placeholder: "5", action: "qbt:set-poll", value: String(Math.round(d.pollMs / 1000)) }
@@ -1106,6 +1380,8 @@ function loadSettings() {
       restrictToCategory = s.restrictToCategory !== false;
       insecure = !!s.insecure;
       pollMs = clampPoll(s.pollMs);
+      pathMapFrom = s.pathMapFrom || "";
+      pathMapTo = s.pathMapTo || "";
       draft = null;
     })
     .catch(function (e) {
@@ -1122,6 +1398,8 @@ function saveSettings() {
   restrictToCategory = !!d.restrictToCategory;
   insecure = !!d.insecure;
   pollMs = clampPoll(d.pollMs);
+  pathMapFrom = (d.pathMapFrom || "").trim();
+  pathMapTo = (d.pathMapTo || "").trim();
 
   // Any of these can invalidate the session (a new host, new credentials, a
   // different TLS stance), so drop it rather than discovering that on the next
@@ -1132,6 +1410,8 @@ function saveSettings() {
   qbtVersion = null;
   rid = 0;
   torrents = {};
+  filesByHash = {};
+  expandedHash = null;
   connected = false;
   lastError = null;
 
@@ -1143,7 +1423,9 @@ function saveSettings() {
       category: category,
       restrictToCategory: restrictToCategory,
       insecure: insecure,
-      pollMs: pollMs
+      pollMs: pollMs,
+      pathMapFrom: pathMapFrom,
+      pathMapTo: pathMapTo
     })
     .catch(function (e) {
       console.error("qBittorrent: could not save settings:", e);
@@ -1251,6 +1533,77 @@ function hashOf(data) {
   return (data && data.hash) || null;
 }
 
+// Resolve qbt://<hash>/<index> to the file on disk. The host slices off exactly
+// "file://" and hands the rest to mpv, so the path goes back RAW — no percent
+// encoding, forward slashes on every platform.
+function registerStreamResolver() {
+  if (!api.playback || typeof api.playback.onResolveStreamByUri !== "function") return;
+  api.playback.onResolveStreamByUri("qbt", function (id) {
+    var ref = parseQbtUri(id);
+    if (!ref) return Promise.resolve(null);
+    var torrent = torrents[ref.hash];
+    // A torrent the poll hasn't seen yet (a queue restored at startup, before
+    // the first refresh) still has to resolve, so fetch it rather than giving up.
+    var ensureTorrent = torrent ? Promise.resolve(torrent) : refresh().then(function () { return torrents[ref.hash]; });
+    return ensureTorrent.then(function (t) {
+      if (!t) throw new Error("That torrent is no longer in qBittorrent");
+      return ensureFiles(ref.hash).then(function (files) {
+        var file = null;
+        for (var i = 0; i < files.length; i++) {
+          if (files[i].index === ref.index) { file = files[i]; break; }
+        }
+        if (!file) throw new Error("That file is no longer in the torrent");
+        var path = localPathFor(t, file);
+        if (!path) throw new Error("qBittorrent didn't report where it saved this torrent");
+        return "file://" + path;
+      });
+    });
+  });
+}
+
+function fileRowsNode(hash) {
+  var torrent = torrents[hash];
+  var files = filesByHash[hash];
+  if (filesLoading === hash && !files) return { type: "loading", message: "Reading files…" };
+  if (!files) return null;
+
+  var media = [];
+  for (var i = 0; i < files.length; i++) {
+    if (mediaKindOf(files[i].name)) media.push(files[i]);
+  }
+  if (!media.length) {
+    return { type: "text", content: "No audio or video files in this torrent.", className: "muted" };
+  }
+
+  media.sort(function (a, b) {
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+
+  var items = [];
+  for (var j = 0; j < media.length; j++) {
+    var f = media[j];
+    var done = Number(f.progress) >= 1;
+    var parsed = parseFileTrack(f.name);
+    var subtitle = formatBytes(f.size);
+    if (!done) subtitle += " · " + Math.round(Number(f.progress || 0) * 100) + "% downloaded";
+    items.push({
+      id: String(f.index),
+      // An unfinished file stays visible but is marked, so the list shows the
+      // whole torrent rather than appearing to be missing tracks.
+      title: (done ? "" : "◌ ") + parsed.title,
+      subtitle: subtitle,
+      album: torrent ? torrent.name : undefined,
+      action: done ? "qbt:play-file" : undefined,
+      // Only a finished, reachable file gets a path — that is what makes the
+      // host's right-click menu and drag-to-queue work on these rows.
+      path: done && filesAreReachable() ? qbtUri(hash, f.index) : null,
+      artistName: parsed.artist,
+      albumTitle: torrent ? torrent.name : null
+    });
+  }
+  return { type: "track-row-list", items: items, numbered: true };
+}
+
 function registerActions() {
   api.ui.onAction("qbt:tab", function (data) {
     activeTab = (data && data.tabId) || (data && data.id) || activeTab;
@@ -1283,6 +1636,27 @@ function registerActions() {
     actOn(stopEndpoint(), hashesInView(), "Stopping the torrents");
   });
 
+  api.ui.onAction("qbt:toggle-files", function (data) {
+    var hash = hashOf(data);
+    if (!hash) return;
+    expandedHash = expandedHash === hash ? null : hash;
+    render();
+    if (expandedHash) ensureFiles(hash);
+  });
+
+  api.ui.onAction("qbt:play-torrent", function (data) {
+    var hash = hashOf(data);
+    if (hash) playFiles(hash, null);
+  });
+
+  api.ui.onAction("qbt:play-file", function (data) {
+    // track-row-list sends the row's id back; the expanded torrent is the one
+    // it belongs to.
+    var index = parseInt((data && (data.itemId != null ? data.itemId : data.id)) || "", 10);
+    if (isNaN(index) || !expandedHash) return;
+    playFiles(expandedHash, index);
+  });
+
   api.ui.onAction("qbt:delete-ask", function (data) {
     pendingDelete = hashOf(data);
     render();
@@ -1310,6 +1684,12 @@ function registerActions() {
   });
   api.ui.onAction("qbt:set-category", function (data) {
     currentDraft().category = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:set-map-from", function (data) {
+    currentDraft().pathMapFrom = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:set-map-to", function (data) {
+    currentDraft().pathMapTo = (data && data.value) || "";
   });
   api.ui.onAction("qbt:set-poll", function (data) {
     currentDraft().pollMs = clampPoll(Number((data && data.value) || 0) * 1000);
@@ -1354,6 +1734,7 @@ function activate(hostApi) {
     api.log("warn", "qBittorrent plugin needs Viboplr " + MIN_HOST_VERSION + "+, running " + api.appVersion, "qbittorrent");
   }
   registerActions();
+  registerStreamResolver();
   render();
   renderSettings();
 
@@ -1395,6 +1776,15 @@ return {
   _isErrored: isErrored,
   _mergeMaindata: mergeMaindata,
   _classifyConnectionError: classifyConnectionError,
+  _mediaKindOf: mediaKindOf,
+  _isWindowsPath: isWindowsPath,
+  _joinRemotePath: joinRemotePath,
+  _applyPathMapping: applyPathMapping,
+  _isLikelyLocalHost: isLikelyLocalHost,
+  _parseFileTrack: parseFileTrack,
+  _qbtUri: qbtUri,
+  _parseQbtUri: parseQbtUri,
+  _playableFiles: playableFiles,
   _setupSteps: setupSteps,
   _looksLikeTorrentSource: looksLikeTorrentSource,
   _magnetDisplayName: magnetDisplayName,

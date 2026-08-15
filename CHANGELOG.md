@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0
+
+Play straight out of a torrent, without importing anything.
+
+- **Files list** per torrent (the Files button): every audio and video file it
+  contains, with the unfinished ones marked and their progress shown.
+- **Play** a whole torrent or any single finished file. They become ordinary
+  queue entries — right-click menu, drag-to-queue and all — resolved through a
+  `qbt://` handler that maps a torrent + file back to the file on disk.
+- **Only finished files are playable.** A half-downloaded file would open and
+  then hit EOF partway through, which reads as a corrupt file rather than an
+  incomplete download.
+- **Metadata comes from the filename** (track number, artist, title), because
+  nothing in the plugin API reads tags off an arbitrary file. Importing into a
+  collection still gives you real tags — this is the "hear it now" path.
+- **Path mapping** for a qBittorrent on another machine: tell it what its
+  download folder is called here and remote files play too. Without it, the
+  Play buttons stay hidden rather than producing paths that mean nothing on
+  this machine, and the Files list says why.
+
 ## 0.2.1
 
 - Its own icon: the qBittorrent “qb” letterform, replacing a generic download

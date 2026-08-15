@@ -70,11 +70,32 @@ if you want it.
   probed once per session and the right names are used.
 - **Self-signed HTTPS** needs *Allow self-signed certificates* turned on.
 
+## Playing from a torrent
+
+Press **Files** on any torrent to see the audio and video inside it. **Play**
+plays the whole torrent, or click a single file to play just that one — they
+become ordinary queue entries, with the usual right-click menu and drag-to-queue.
+
+Three things worth knowing:
+
+- **Only finished files play.** A half-downloaded file would open and then stop
+  partway through, which looks like a corrupt file rather than an incomplete
+  download. Unfinished files are listed with their progress and marked `◌`.
+- **Metadata comes from the filename** — track number, artist and title are
+  parsed from it, because nothing in the plugin API can read tags off an
+  arbitrary file. Importing into a collection gives you real tags; this is the
+  "hear it now" path.
+- **A remote qBittorrent needs a path mapping.** It reports the paths on *its*
+  filesystem, which mean nothing here. If its download folder is mounted on this
+  machine, fill in the two path boxes in settings and playback works. Without
+  that, Play is hidden rather than handing you a broken file, and the Files list
+  explains why.
+
 ## Not here yet
 
-Planned, roughly in order: browsing a torrent's files and playing them straight
-from disk, importing finished music into a local collection, completion
-notifications, and driving qBittorrent's own search plugins from the view.
+Planned, roughly in order: importing finished music into a local collection,
+completion notifications, and driving qBittorrent's own search plugins from the
+view.
 
 This plugin controls a torrent client. It ships no indexers and no content, and
 searching (when it lands) will use whatever search plugins you have installed in
