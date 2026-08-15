@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+Give each Viboplr profile its own qBittorrent category.
+
+- The **Category** setting (Settings → qBittorrent) always accepted any name;
+  it now says what that is for. Point two profiles at one qBittorrent with
+  different categories and neither sees the other’s downloads. Empty tags
+  nothing.
+- **Renaming no longer loses your torrents.** Everything added under the old
+  name kept it and was hidden by the new filter, with no hint where it went.
+  The view now says how many are stranded and offers to move them across — or
+  to leave them, which is the right answer when the rename was to split a
+  second profile off.
+
 ## 0.6.0
 
 **Fixes adding a torrent from search appearing to do nothing.** Two separate

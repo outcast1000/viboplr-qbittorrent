@@ -43,6 +43,15 @@ the list and the Start all / Stop all buttons only ever see torrents in that
 category — they cannot reach anything you manage yourself in qBittorrent. Turn it
 off to manage everything.
 
+**Change the category per Viboplr profile.** Settings → qBittorrent → Category
+takes any name you like, so `viboplr-alex` and `viboplr-work` can share one
+qBittorrent without either profile seeing the other's downloads. Leave it empty
+to tag nothing at all.
+
+Renaming it leaves your earlier downloads under the old name, where the filter
+hides them — so the Torrents view offers to move them across, or to leave them
+be (which is the right answer when the rename was to split a second profile off).
+
 **Remove** removes a torrent from qBittorrent and leaves the downloaded files on
 disk. Deleting the data is deliberately not offered here; do that in qBittorrent
 if you want it.

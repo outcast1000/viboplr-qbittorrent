@@ -112,6 +112,11 @@ var localCollections = [];
 var knownComplete = {};
 var completionsSeeded = false;
 var categoryEnsured = false;
+// The category in force before the user last changed it. Kept so the torrents
+// left behind under the old name can be found and offered a move — otherwise
+// renaming the category makes every previous download vanish from the list with
+// no explanation and no way back except turning the filter off.
+var previousCategory = "";
 
 // UI.
 var activeTab = "downloading";
@@ -602,6 +607,22 @@ function playableFiles(files) {
   out.sort(function (a, b) {
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
+  return out;
+}
+
+// Hashes of every torrent carrying a given category.
+//
+// Reads the FULL torrent map, not the filtered view — the whole point is to find
+// the ones the current filter is hiding.
+function hashesInCategory(torrentMap, cat) {
+  var wanted = String(cat == null ? "" : cat);
+  if (!wanted) return [];
+  var out = [];
+  for (var hash in torrentMap || {}) {
+    if (!Object.prototype.hasOwnProperty.call(torrentMap, hash)) continue;
+    var t = torrentMap[hash];
+    if (t && String(t.category || "") === wanted) out.push(hash);
+  }
   return out;
 }
 
@@ -1674,6 +1695,35 @@ function render() {
     ]
   });
 
+  // Torrents stranded under a previous category name. Offered, not done
+  // automatically: re-tagging someone's torrents is a write to their
+  // qBittorrent, and the rename may well have been for a second profile that
+  // should NOT inherit the first one's downloads.
+  var stranded = restrictToCategory ? hashesInCategory(torrents, previousCategory) : [];
+  if (stranded.length) {
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content:
+        stranded.length +
+        (stranded.length === 1 ? " torrent is" : " torrents are") +
+        " still tagged “" + previousCategory + "”, so they're hidden by the “" + category + "” filter."
+    });
+    children.push({
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        {
+          type: "button",
+          label: "Move " + (stranded.length === 1 ? "it" : "them") + " to “" + category + "”",
+          action: "qbt:move-category",
+          variant: "accent"
+        },
+        { type: "button", label: "Leave them", action: "qbt:forget-category", variant: "secondary" }
+      ]
+    });
+  }
+
   children.push({
     type: "toolbar",
     buttons: [
@@ -1843,7 +1893,10 @@ function renderSettings() {
           {
             type: "settings-row",
             label: "Category",
-            description: "Torrents added from Viboplr are tagged with this category in qBittorrent.",
+            description:
+              "Torrents added from Viboplr are tagged with this in qBittorrent. Give each Viboplr profile its own name " +
+              "(“viboplr-alex”, “viboplr-work”) and one qBittorrent can serve all of them without the profiles seeing each " +
+              "other's downloads. Leave it empty to tag nothing.",
             control: { type: "text-input", placeholder: "viboplr", action: "qbt:set-category", value: d.category }
           },
           {
@@ -1916,6 +1969,7 @@ function loadSettings() {
       pathMapTo = s.pathMapTo || "";
       destCollectionId = s.destCollectionId == null ? "" : String(s.destCollectionId);
       autoImport = s.autoImport !== false;
+      previousCategory = s.previousCategory || "";
       draft = null;
     })
     .catch(function (e) {
@@ -1923,12 +1977,42 @@ function loadSettings() {
     });
 }
 
+// Write the LIVE settings to storage. Separate from saveSettings so state that
+// changes outside the settings panel (clearing a stale category after moving its
+// torrents) is persisted by the same payload rather than a second, drifting one.
+function persistSettings() {
+  return api.storage
+    .set(STORAGE_KEY, {
+      baseUrl: baseUrl,
+      username: username,
+      password: password,
+      category: category,
+      restrictToCategory: restrictToCategory,
+      insecure: insecure,
+      pollMs: pollMs,
+      pathMapFrom: pathMapFrom,
+      pathMapTo: pathMapTo,
+      destCollectionId: destCollectionId,
+      autoImport: autoImport,
+      previousCategory: previousCategory
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not save settings:", e);
+      api.ui.showNotification("Couldn't save those settings: " + errText(e));
+    });
+}
+
 function saveSettings() {
   var d = currentDraft();
+  var outgoingCategory = category;
   baseUrl = normalizeBaseUrl(d.baseUrl);
   username = d.username || "";
   password = d.password || "";
   category = (d.category || "").trim();
+  // Renaming leaves the old torrents tagged with the old name; remember it so
+  // they can be found and moved rather than silently disappearing.
+  if (outgoingCategory && outgoingCategory !== category) previousCategory = outgoingCategory;
+  if (previousCategory === category) previousCategory = "";
   restrictToCategory = !!d.restrictToCategory;
   insecure = !!d.insecure;
   pollMs = clampPoll(d.pollMs);
@@ -1952,24 +2036,7 @@ function saveSettings() {
   connected = false;
   lastError = null;
 
-  return api.storage
-    .set(STORAGE_KEY, {
-      baseUrl: baseUrl,
-      username: username,
-      password: password,
-      category: category,
-      restrictToCategory: restrictToCategory,
-      insecure: insecure,
-      pollMs: pollMs,
-      pathMapFrom: pathMapFrom,
-      pathMapTo: pathMapTo,
-      destCollectionId: destCollectionId,
-      autoImport: autoImport
-    })
-    .catch(function (e) {
-      console.error("qBittorrent: could not save settings:", e);
-      api.ui.showNotification("Couldn't save those settings: " + errText(e));
-    })
+  return persistSettings()
     .then(function () {
       draft = null;
       renderSettings();
@@ -2259,6 +2326,40 @@ function registerActions() {
     refresh();
   });
 
+  api.ui.onAction("qbt:move-category", function () {
+    var hashes = hashesInCategory(torrents, previousCategory);
+    if (!hashes.length) {
+      previousCategory = "";
+      render();
+      return;
+    }
+    ensureCategory()
+      .then(function () {
+        return authed("/torrents/setCategory", {
+          method: "POST",
+          form: { hashes: hashes.join("|"), category: category }
+        });
+      })
+      .then(function (resp) {
+        expectOk(resp, "Moving the torrents");
+        previousCategory = "";
+        persistSettings();
+        api.ui.showNotification("Moved " + hashes.length + " to “" + category + "”");
+        return refresh();
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: could not move torrents to the new category:", e);
+        api.ui.showNotification("Couldn't move them: " + errText(e));
+      });
+  });
+
+  api.ui.onAction("qbt:forget-category", function () {
+    // The torrents stay where they are; we just stop asking.
+    previousCategory = "";
+    persistSettings();
+    render();
+  });
+
   api.ui.onAction("qbt:search", function (data) {
     runSearch((data && data.query) || "");
   });
@@ -2480,6 +2581,7 @@ return {
   _classifyConnectionError: classifyConnectionError,
   _searchQueryForTarget: searchQueryForTarget,
   _rowIndices: rowIndices,
+  _hashesInCategory: hashesInCategory,
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
   _searchResultSubtitle: searchResultSubtitle,
