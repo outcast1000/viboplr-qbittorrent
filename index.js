@@ -37,6 +37,14 @@ var REQUEST_TIMEOUT_MS = 15000;
 var MIN_POLL_MS = 2000;
 var MAX_POLL_MS = 60000;
 
+// The host version that first exposed HTTP response headers to plugins. Below
+// it, reading qBittorrent's session cookie is impossible and the plugin can only
+// work against a WebUI with localhost auth bypass turned on. manifest.json's
+// minAppVersion blocks a gallery install on an older host, but a side-loaded or
+// dev copy can still land on one — so it is checked at runtime and SAID, rather
+// than surfacing later as a baffling "session rejected".
+var MIN_HOST_VERSION = "1.0.27";
+
 // qBittorrent reports "no estimate" as this sentinel rather than null.
 var ETA_INFINITY = 8640000;
 
@@ -64,7 +72,9 @@ var sid = null; // cookie value, or "" when qBittorrent runs cookieless
 var sessionReady = false;
 var loginPromise = null; // single-flight: a burst of requests triggers ONE login
 var cookielessLogin = false;
-var apiVersion = null;
+var apiVersion = null; // WebAPI version, e.g. "2.11.2"
+var qbtVersion = null; // qBittorrent's own version, e.g. "v5.0.4"
+var hostTooOld = false; // this Viboplr predates MIN_HOST_VERSION
 
 // Data.
 var torrents = {};
@@ -304,6 +314,135 @@ function magnetDisplayName(uri) {
   }
 }
 
+// Map a failure to a KIND, so the UI can name the actual fix instead of showing
+// a transport string. Every branch here is a different thing for the user to go
+// and do; that is the only reason a kind exists rather than one "error" state.
+//
+// Order matters: the specific session/auth phrases are this plugin's own error
+// text and must be matched before the generic transport patterns, since "the
+// session was rejected" contains none of them but a proxy error might.
+function classifyConnectionError(message) {
+  var m = String(message || "").toLowerCase();
+  if (!m) return "unknown";
+  if (/temporarily banned|too many failed/.test(m)) return "banned";
+  if (/kept rejecting the session|rejected the session/.test(m)) return "session";
+  if (/rejected the username or password|rejected the username/.test(m)) return "auth";
+  if (/sent no session cookie/.test(m)) return "session";
+  if (/timed out|timeout/.test(m)) return "timeout";
+  // qBittorrent answered, but not as a WebUI would — usually the wrong path
+  // (a reverse proxy subpath left off) or something else on that port.
+  if (/http 404|http 502|http 503/.test(m)) return "notfound";
+  if (/error sending request|connection refused|connection reset|dns|lookup|unreachable|certificate|tls|ssl/.test(m)) {
+    return "unreachable";
+  }
+  return "unknown";
+}
+
+// The steps to get a WebUI running. Shown verbatim wherever setup is the answer,
+// so the instructions can't drift between the empty view and the settings panel.
+function setupSteps() {
+  return [
+    "In qBittorrent, open Tools → Options → Web UI.",
+    "Tick “Web User Interface (Remote control)” and note the port (8080 by default).",
+    "Set a username and password there — leave “Bypass authentication for clients on localhost” off unless you want to skip credentials entirely.",
+    "Back here, enter the address (e.g. http://localhost:8080) with that username and password.",
+    "Press Save & connect."
+  ];
+}
+
+// One place that decides what the user is told, everywhere. Returns
+// { kind, label, detail, fix, tone } — `tone` picks the banner styling and
+// `fix` is always an action, never a restatement of the problem.
+function connectionStatus() {
+  if (hostTooOld) {
+    return {
+      kind: "host",
+      tone: "error",
+      label: "Viboplr " + MIN_HOST_VERSION + " or newer is required",
+      detail:
+        "qBittorrent authenticates with a session cookie, and this version of Viboplr can't hand HTTP response headers to a plugin, so that cookie can't be read.",
+      fix: "Update Viboplr from Settings → General. (A qBittorrent with “Bypass authentication for clients on localhost” switched on will work without it.)"
+    };
+  }
+  if (!baseUrl) {
+    return {
+      kind: "unconfigured",
+      tone: "warning",
+      label: "Not set up yet",
+      detail: "No qBittorrent Web UI address has been entered.",
+      fix: "Open Settings → qBittorrent and follow the setup steps."
+    };
+  }
+  if (lastError) {
+    var kind = classifyConnectionError(lastError);
+    if (kind === "unreachable") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "Can't reach qBittorrent at " + baseUrl,
+        detail: lastError,
+        fix: "Check that qBittorrent is running and its Web UI is enabled (Tools → Options → Web UI), and that the address and port match. For an https WebUI with its own certificate, turn on “Allow self-signed certificates”."
+      };
+    }
+    if (kind === "timeout") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "qBittorrent didn't answer in time",
+        detail: "The address was reachable but nothing replied within " + Math.round(REQUEST_TIMEOUT_MS / 1000) + " seconds.",
+        fix: "Check the port and any firewall between here and the server."
+      };
+    }
+    if (kind === "auth") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "qBittorrent rejected the username or password",
+        detail: "The server is reachable — the credentials are what it turned down.",
+        fix: "Check them under qBittorrent's Tools → Options → Web UI, then Save & connect again."
+      };
+    }
+    if (kind === "banned") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "qBittorrent has temporarily banned this machine",
+        detail: "It bans an IP after repeated failed logins — the credentials are wrong, not the address.",
+        fix: "Fix the password, then wait for the ban to lapse (one hour by default) or restart qBittorrent."
+      };
+    }
+    if (kind === "session") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "The login worked, but the session was rejected",
+        detail: "qBittorrent accepted the credentials and then refused the session cookie that came back — which usually means the cookie never arrived.",
+        fix: "Update Viboplr to " + MIN_HOST_VERSION + " or newer, or turn on “Bypass authentication for clients on localhost” in qBittorrent."
+      };
+    }
+    if (kind === "notfound") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "That address answered, but not as a qBittorrent Web UI",
+        detail: lastError,
+        fix: "Check the address. If qBittorrent sits behind a reverse proxy, include the subpath (e.g. https://example.com/qbt)."
+      };
+    }
+    return {
+      kind: "unknown",
+      tone: "error",
+      label: "qBittorrent returned an error",
+      detail: lastError,
+      fix: "Check the server, then press Refresh. Settings → qBittorrent has the connection details."
+    };
+  }
+  if (!connected) {
+    return { kind: "connecting", tone: "warning", label: "Connecting…", detail: "", fix: "" };
+  }
+  return { kind: "ok", tone: "success", label: "Connected", detail: "", fix: "" };
+}
+
 function encodeForm(fields) {
   var parts = [];
   for (var k in fields) {
@@ -439,6 +578,9 @@ function expectOk(resp, what) {
 // qBittorrent operations
 // ---------------------------------------------------------------------------
 
+// Reads BOTH versions once per session: the WebAPI version decides which
+// endpoint names to use, and qBittorrent's own version is what the user
+// recognises when checking the status panel against what they installed.
 function probeVersion() {
   if (apiVersion) return Promise.resolve(apiVersion);
   return authed("/app/webapiVersion")
@@ -447,12 +589,19 @@ function probeVersion() {
     })
     .then(function (text) {
       apiVersion = String(text || "").trim() || null;
+      return authed("/app/version");
+    })
+    .then(function (resp) {
+      return resp.text();
+    })
+    .then(function (text) {
+      qbtVersion = String(text || "").trim() || null;
       return apiVersion;
     })
     .catch(function (e) {
       // Not fatal: without a version we fall back to the pre-5.0 endpoint names,
       // which is the safer guess for an unknown server.
-      console.error("qBittorrent: could not read the WebAPI version:", e);
+      console.error("qBittorrent: could not read the version:", e);
       return null;
     });
 }
@@ -466,7 +615,9 @@ function stopEndpoint() {
 }
 
 function refresh() {
-  if (!baseUrl) return Promise.resolve();
+  // A host that can't read the login cookie will fail every single poll, so
+  // don't spend requests proving it — the status panel already explains it.
+  if (!baseUrl || hostTooOld) return Promise.resolve();
   return probeVersion()
     .then(function () {
       return authed("/sync/maindata?rid=" + rid);
@@ -600,13 +751,37 @@ function deleteTorrent(hash, deleteFiles) {
 // ---------------------------------------------------------------------------
 
 function statusLine() {
-  if (!baseUrl) return "Not configured";
-  if (lastError) return lastError;
-  if (!connected) return "Connecting…";
+  var s = connectionStatus();
+  if (s.kind !== "ok") return s.label;
   var label = "Connected";
-  if (apiVersion) label += " · WebAPI " + apiVersion;
+  if (qbtVersion) label += " to qBittorrent " + qbtVersion;
   if (restrictToCategory && category) label += " · category “" + category + "”";
   return label;
+}
+
+// The banner the Torrents view carries whenever something needs doing. Says what
+// is wrong AND what to do about it — a bare error string sends the user looking
+// for a settings page it never names.
+function statusBanner() {
+  var s = connectionStatus();
+  if (s.kind === "ok" || s.kind === "connecting") return null;
+  var text = s.label;
+  if (s.detail) text += " — " + s.detail;
+  if (s.fix) text += "  " + s.fix;
+  return {
+    type: "text",
+    className: "ds-banner ds-banner--" + (s.tone === "warning" ? "warning" : "error"),
+    content: text
+  };
+}
+
+function setupGuideNode() {
+  var steps = setupSteps();
+  var children = [];
+  for (var i = 0; i < steps.length; i++) {
+    children.push({ type: "text", content: i + 1 + ". " + steps[i] });
+  }
+  return { type: "section", title: "Setting up qBittorrent", children: children };
 }
 
 function torrentNode(t) {
@@ -690,12 +865,13 @@ function render() {
   }
 
   var children = [];
+  var banner = statusBanner();
+  if (banner) children.push(banner);
 
-  if (!baseUrl) {
-    children.push({
-      type: "text",
-      content: "Point Viboplr at your qBittorrent WebUI in Settings → qBittorrent to get started."
-    });
+  // Nothing configured (or a host that can't do the auth): the view's whole job
+  // is to get the user set up, so it shows the steps rather than an empty list.
+  if (!baseUrl || hostTooOld) {
+    children.push(setupGuideNode());
     api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children });
     return;
   }
@@ -808,10 +984,46 @@ function renderSettings() {
   if (!api) return;
   var d = currentDraft();
 
+  var status = connectionStatus();
+  var statusChildren = [
+    {
+      type: "stats-grid",
+      items: [
+        { label: "Status", value: status.label },
+        { label: "qBittorrent", value: qbtVersion || "—" },
+        { label: "WebAPI", value: apiVersion || "—" },
+        { label: "Viboplr", value: (api.appVersion || "?") + (hostTooOld ? " (too old)" : "") }
+      ]
+    }
+  ];
+  if (status.detail) statusChildren.push({ type: "text", content: status.detail, className: "muted" });
+  if (status.fix) {
+    statusChildren.push({
+      type: "text",
+      content: status.fix,
+      className: "ds-banner ds-banner--" + (status.tone === "warning" ? "warning" : "error")
+    });
+  }
+  // The steps stay on screen until it actually works. They are the answer to
+  // every not-connected state, and hiding them behind a link would put the one
+  // thing the user needs one click further away than the error that sent them
+  // here.
+  if (status.kind !== "ok") {
+    var steps = setupSteps();
+    for (var i = 0; i < steps.length; i++) {
+      statusChildren.push({ type: "text", content: i + 1 + ". " + steps[i] });
+    }
+  }
+
   api.ui.setViewData(SETTINGS_ID, {
     type: "layout",
     direction: "vertical",
     children: [
+      {
+        type: "section",
+        title: "Status",
+        children: statusChildren
+      },
       {
         type: "section",
         title: "Connection",
@@ -917,6 +1129,7 @@ function saveSettings() {
   sid = null;
   sessionReady = false;
   apiVersion = null;
+  qbtVersion = null;
   rid = 0;
   torrents = {};
   connected = false;
@@ -1008,7 +1221,7 @@ function testConnection() {
 // setting, so the cost stays proportional.
 function startPolling() {
   stopPolling();
-  if (!baseUrl || stopped) return;
+  if (!baseUrl || stopped || hostTooOld) return;
   var tick = function () {
     if (stopped) return;
     refresh()
@@ -1133,6 +1346,13 @@ function hashesInView() {
 function activate(hostApi) {
   api = hostApi;
   stopped = false;
+  // manifest.json's minAppVersion already blocks a gallery install on an older
+  // host, but a side-loaded or dev copy bypasses that — so check and say so
+  // plainly, rather than letting it surface as a session error later.
+  hostTooOld = compareVersions(api.appVersion || "0", MIN_HOST_VERSION) < 0;
+  if (hostTooOld) {
+    api.log("warn", "qBittorrent plugin needs Viboplr " + MIN_HOST_VERSION + "+, running " + api.appVersion, "qbittorrent");
+  }
   registerActions();
   render();
   renderSettings();
@@ -1174,6 +1394,8 @@ return {
   _isPaused: isPaused,
   _isErrored: isErrored,
   _mergeMaindata: mergeMaindata,
+  _classifyConnectionError: classifyConnectionError,
+  _setupSteps: setupSteps,
   _looksLikeTorrentSource: looksLikeTorrentSource,
   _magnetDisplayName: magnetDisplayName,
   _encodeForm: encodeForm,

@@ -10,10 +10,27 @@ Requires **Viboplr 1.0.27 or newer**.
 
 1. In qBittorrent: **Tools → Options → Web UI**, tick *Web User Interface
    (Remote control)*, and note the port (8080 by default).
-2. In Viboplr: **Settings → qBittorrent**, enter the WebUI address (e.g.
-   `http://localhost:8080`) plus your username and password, then
-   **Save & connect**. *Test connection* checks what you've typed before saving.
-3. Open **Torrents** in the sidebar.
+2. Set a username and password on that same screen. (Leave *Bypass
+   authentication for clients on localhost* off unless you want to skip
+   credentials entirely — that works too.)
+3. In Viboplr: **Settings → qBittorrent**, enter the WebUI address (e.g.
+   `http://localhost:8080`) plus those credentials, then **Save & connect**.
+   *Test connection* checks what you've typed before saving.
+4. Open **Torrents** in the sidebar.
+
+The same steps are shown in the app — in the Torrents view before anything is
+configured, and in Settings → qBittorrent until the connection works.
+
+## Status
+
+**Settings → qBittorrent** opens with a status panel: the connection state,
+qBittorrent's version, its WebAPI version, and the Viboplr version you're
+running. When something is wrong it names the specific fix rather than showing a
+transport error — an unreachable server, a timeout, wrong credentials, an IP ban
+after repeated failed logins (which changing the password alone won't clear), a
+rejected session, or an address that answers but isn't a Web UI. The Torrents
+view carries the same message as a banner, so a broken connection is visible from
+where you'd notice it.
 
 A reverse-proxied qBittorrent at a subpath (`https://home.example.com/qbt`)
 works — enter the full address including the path.

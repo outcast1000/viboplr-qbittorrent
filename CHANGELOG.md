@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0
+
+Status and setup. Nothing about connecting was discoverable before: a failure
+showed up as a raw transport string, and the steps to get a Web UI running
+weren't written down anywhere in the app.
+
+- **Status panel** in Settings → qBittorrent: connection state, qBittorrent's own
+  version, the WebAPI version, and the running Viboplr version.
+- **Setup instructions** — the five steps to enable and connect a Web UI, shown
+  in the Torrents view when nothing is configured and in the settings panel until
+  the connection actually works.
+- **Failures now name their own fix.** Each kind of problem is identified and
+  given the specific next step: unreachable server, timeout, wrong credentials,
+  an IP ban after repeated failed logins (which a new password alone won't
+  clear), a rejected session, or an address that answers but isn't a Web UI.
+- **A too-old Viboplr is detected and explained** rather than surfacing later as
+  a confusing session error. The plugin needs 1.0.27 for the response headers
+  that carry qBittorrent's login cookie; below that it says so, points at the
+  update, and stops polling instead of failing every few seconds.
+
 ## 0.1.0
 
 First release. Control a qBittorrent WebUI from inside Viboplr.
