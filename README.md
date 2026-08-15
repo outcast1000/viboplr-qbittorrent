@@ -91,11 +91,25 @@ Three things worth knowing:
   that, Play is hidden rather than handing you a broken file, and the Files list
   explains why.
 
+## Getting downloads into your library
+
+Set **Save downloads to** in settings to one of your local collections. Torrents
+added from Viboplr then land there, and when one finishes the collection is
+rescanned so the tracks turn up in your library — with real tags read from the
+files, unlike the filename-derived metadata you get playing straight from a
+torrent.
+
+- A download that finishes **outside** every collection is left alone. Scanning a
+  folder your library doesn't cover would find nothing and look broken.
+- **Add to library** appears on any finished torrent whose files sit inside a
+  collection, if you'd rather import on demand. Turn off *Add finished downloads
+  to my library* to make that the only way.
+- Restarting doesn't re-announce or re-import anything already finished.
+
 ## Not here yet
 
-Planned, roughly in order: importing finished music into a local collection,
-completion notifications, and driving qBittorrent's own search plugins from the
-view.
+Planned: driving qBittorrent's own search plugins from the view, plus a
+"find torrents for this artist/album" action on library items.
 
 This plugin controls a torrent client. It ships no indexers and no content, and
 searching (when it lands) will use whatever search plugins you have installed in

@@ -65,6 +65,10 @@ var pollMs = 5000;
 // download directory is mounted here under a different root.
 var pathMapFrom = "";
 var pathMapTo = "";
+// Collection id to save new torrents into ("" = leave it to qBittorrent).
+var destCollectionId = "";
+// Rescan the owning collection when a download finishes.
+var autoImport = true;
 
 // Draft settings — what the settings panel's inputs currently hold. Kept apart
 // from the live values so a half-typed password never reaches storage and never
@@ -93,6 +97,11 @@ var pendingDelete = null; // hash awaiting delete confirmation
 var filesByHash = {};
 var expandedHash = null;
 var filesLoading = null;
+
+// Local collections, and which torrents we have already seen finish.
+var localCollections = [];
+var knownComplete = {};
+var completionsSeeded = false;
 
 // UI.
 var activeTab = "downloading";
@@ -492,6 +501,14 @@ function joinRemotePath(savePath, name) {
 // exactly what the user can reason about and type into two boxes.
 //
 // Case-insensitive when the remote side looks like Windows, since its paths are.
+// The inverse of applyPathMapping: a path on THIS machine expressed the way
+// qBittorrent would write it. Needed when telling a remote qBittorrent where to
+// save — sending it our local mount point would put the files nowhere useful.
+function remotePathFor(localPath) {
+  if (!pathMapFrom || !pathMapTo) return String(localPath || "").replace(/\\/g, "/");
+  return applyPathMapping(String(localPath || "").replace(/\\/g, "/"), pathMapTo, pathMapFrom);
+}
+
 function applyPathMapping(path, from, to) {
   var p = String(path || "");
   var f = String(from || "").replace(/\\/g, "/").replace(/\/+$/, "");
@@ -575,6 +592,60 @@ function playableFiles(files) {
   out.sort(function (a, b) {
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
+  return out;
+}
+
+// --- Library import ---------------------------------------------------------
+
+// Which local collection a downloaded path belongs to, or null.
+//
+// Longest prefix wins: nested collections are legal (a "Music" folder and a
+// "Music/Live bootlegs" folder), and the shallower one would otherwise always
+// claim files that belong to the deeper, more specific one.
+//
+// Prefix matching is on path SEGMENTS, not raw characters — "/music" must not
+// swallow "/musicals". Case-insensitive when the collection path looks like
+// Windows, since its filesystem is.
+function collectionForPath(filePath, collections) {
+  var path = String(filePath || "").replace(/\\/g, "/");
+  if (!path) return null;
+  var best = null;
+  var bestLen = -1;
+  var list = collections || [];
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    var root = String((c && c.path) || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!root) continue;
+    var win = isWindowsPath(root);
+    var subject = win ? path.toLowerCase() : path;
+    var needle = win ? root.toLowerCase() : root;
+    if (subject.indexOf(needle) !== 0) continue;
+    var nextChar = subject.charAt(needle.length);
+    if (nextChar !== "" && nextChar !== "/") continue;
+    if (needle.length > bestLen) {
+      bestLen = needle.length;
+      best = c;
+    }
+  }
+  return best;
+}
+
+// Hashes that finished since the previous snapshot.
+//
+// `known` is the set of hashes already seen complete. On the FIRST poll of a
+// session everything complete is new to us but nothing actually just happened,
+// so the caller seeds `known` without announcing — otherwise every restart would
+// fire a notification per finished torrent and re-scan the library.
+function detectCompletions(known, torrentList) {
+  var out = [];
+  var list = torrentList || [];
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i];
+    if (!t || !t.hash) continue;
+    if (!isComplete(t)) continue;
+    if (known[t.hash]) continue;
+    out.push(t);
+  }
   return out;
 }
 
@@ -768,6 +839,12 @@ function refresh() {
       rid = merged.rid;
       connected = true;
       lastError = null;
+      // Isolated from the poll's own error handling on purpose: a failed
+      // notification or rescan must not be reported as "can't reach
+      // qBittorrent", which is what sharing the catch below would do.
+      return handleCompletions(visibleTorrents()).catch(function (e) {
+        console.error("qBittorrent: handling completions failed:", e);
+      });
     })
     .catch(function (e) {
       connected = false;
@@ -824,6 +901,12 @@ function addTorrent(source) {
     firstLastPiecePrio: "true"
   };
   if (category) form.category = category;
+  // Saving into a collection folder is what makes the finished download reach
+  // the library at all — without it the files land somewhere the app never
+  // scans. The path sent is the one qBittorrent understands, so a mapping is
+  // applied in reverse.
+  var dest = collectionById(destCollectionId);
+  if (dest && dest.path) form.savepath = remotePathFor(dest.path);
 
   return authed("/torrents/add", { method: "POST", form: form })
     .then(function (resp) {
@@ -855,6 +938,101 @@ function actOn(path, hashes, label) {
       busy = null;
       return refresh();
     });
+}
+
+// --- Library import ---------------------------------------------------------
+
+function loadCollections() {
+  if (!api.collections || typeof api.collections.getLocalCollections !== "function") {
+    return Promise.resolve([]);
+  }
+  return api.collections
+    .getLocalCollections()
+    .then(function (list) {
+      localCollections = list || [];
+      return localCollections;
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not read local collections:", e);
+      return [];
+    });
+}
+
+function collectionById(id) {
+  for (var i = 0; i < localCollections.length; i++) {
+    if (String(localCollections[i].id) === String(id)) return localCollections[i];
+  }
+  return null;
+}
+
+// Where a torrent's content sits on THIS machine, or null when that can't be
+// known (a remote qBittorrent with no path mapping).
+function localContentPath(t) {
+  if (!t) return null;
+  if (!filesAreReachable()) return null;
+  var raw = t.content_path || t.save_path || "";
+  if (!raw) return null;
+  return applyPathMapping(String(raw).replace(/\\/g, "/"), pathMapFrom, pathMapTo);
+}
+
+function collectionForTorrent(t) {
+  var path = localContentPath(t);
+  if (!path) return null;
+  return collectionForPath(path, localCollections);
+}
+
+// Rescan the collections a set of finished torrents landed in.
+//
+// Deduped by collection: three albums finishing together must not queue three
+// scans of the same folder. The host guards a concurrent rescan of one
+// collection anyway, but relying on that would mean the *second* scan is simply
+// dropped — the point here is that one scan covers all three.
+function importFinished(finishedTorrents) {
+  if (!autoImport) return Promise.resolve();
+  if (!api.collections || typeof api.collections.resync !== "function") return Promise.resolve();
+
+  var byId = {};
+  for (var i = 0; i < finishedTorrents.length; i++) {
+    var c = collectionForTorrent(finishedTorrents[i]);
+    if (c) byId[c.id] = c;
+  }
+  var ids = Object.keys(byId);
+  if (!ids.length) return Promise.resolve();
+
+  var chain = Promise.resolve();
+  ids.forEach(function (id) {
+    chain = chain.then(function () {
+      return api.collections
+        .resync(Number(id))
+        .then(function () {
+          api.ui.showNotification("Scanning “" + byId[id].name + "” for the new files");
+        })
+        .catch(function (e) {
+          console.error("qBittorrent: could not rescan collection " + id + ":", e);
+        });
+    });
+  });
+  return chain;
+}
+
+// Announce and import anything that finished since the last poll.
+function handleCompletions(list) {
+  var finished = detectCompletions(knownComplete, list);
+  for (var i = 0; i < finished.length; i++) knownComplete[finished[i].hash] = true;
+
+  // First poll of the session: everything already complete is new to US but
+  // nothing just happened. Seed silently, or a restart would notify (and
+  // rescan) once per finished torrent.
+  if (!completionsSeeded) {
+    completionsSeeded = true;
+    return Promise.resolve();
+  }
+  if (!finished.length) return Promise.resolve();
+
+  for (var j = 0; j < finished.length; j++) {
+    api.ui.showNotification("Finished downloading: " + (finished[j].name || "torrent"));
+  }
+  return importFinished(finished);
 }
 
 // --- Files ------------------------------------------------------------------
@@ -1050,6 +1228,18 @@ function torrentNode(t) {
     variant: "secondary",
     data: { hash: t.hash }
   });
+  // Only when the files actually sit inside a collection — a scan of a folder
+  // the library doesn't cover would do nothing and look broken.
+  if (done && collectionForTorrent(t)) {
+    buttons.push({
+      type: "button",
+      label: "Add to library",
+      action: "qbt:import",
+      variant: "secondary",
+      disabled: rowBusy,
+      data: { hash: t.hash }
+    });
+  }
   buttons.push({
     type: "button",
     label: paused ? "Start" : "Stop",
@@ -1236,7 +1426,9 @@ function currentDraft() {
       insecure: insecure,
       pollMs: pollMs,
       pathMapFrom: pathMapFrom,
-      pathMapTo: pathMapTo
+      pathMapTo: pathMapTo,
+      destCollectionId: destCollectionId,
+      autoImport: autoImport
     };
   }
   return draft;
@@ -1245,6 +1437,13 @@ function currentDraft() {
 function renderSettings() {
   if (!api) return;
   var d = currentDraft();
+
+  var destOptions = [{ value: "", label: "qBittorrent's own default folder" }];
+  for (var ci = 0; ci < localCollections.length; ci++) {
+    var col = localCollections[ci];
+    if (!col.path) continue;
+    destOptions.push({ value: String(col.id), label: col.name + " — " + col.path });
+  }
 
   var status = connectionStatus();
   var statusChildren = [
@@ -1342,6 +1541,26 @@ function renderSettings() {
           },
           {
             type: "settings-row",
+            label: "Save downloads to",
+            description: destOptions.length > 1
+              ? "Torrents added from Viboplr are saved here. Choosing a collection is what lets finished downloads reach your library."
+              : "Add a local music folder under Collections first, then you can save downloads straight into it.",
+            control: {
+              type: "select",
+              label: "",
+              action: "qbt:set-dest",
+              value: String(d.destCollectionId || ""),
+              options: destOptions
+            }
+          },
+          {
+            type: "settings-row",
+            label: "Add finished downloads to my library",
+            description: "When a download finishes inside one of your collections, rescan it so the tracks appear. Files outside every collection are left alone.",
+            control: { type: "toggle", label: "", action: "qbt:set-auto-import", checked: !!d.autoImport }
+          },
+          {
+            type: "settings-row",
             label: "Their download folder",
             description: "Only needed when qBittorrent runs on another machine. The path IT saves to, e.g. /downloads.",
             control: { type: "text-input", placeholder: "/downloads", action: "qbt:set-map-from", value: d.pathMapFrom }
@@ -1382,6 +1601,8 @@ function loadSettings() {
       pollMs = clampPoll(s.pollMs);
       pathMapFrom = s.pathMapFrom || "";
       pathMapTo = s.pathMapTo || "";
+      destCollectionId = s.destCollectionId == null ? "" : String(s.destCollectionId);
+      autoImport = s.autoImport !== false;
       draft = null;
     })
     .catch(function (e) {
@@ -1400,6 +1621,8 @@ function saveSettings() {
   pollMs = clampPoll(d.pollMs);
   pathMapFrom = (d.pathMapFrom || "").trim();
   pathMapTo = (d.pathMapTo || "").trim();
+  destCollectionId = d.destCollectionId == null ? "" : String(d.destCollectionId);
+  autoImport = !!d.autoImport;
 
   // Any of these can invalidate the session (a new host, new credentials, a
   // different TLS stance), so drop it rather than discovering that on the next
@@ -1425,7 +1648,9 @@ function saveSettings() {
       insecure: insecure,
       pollMs: pollMs,
       pathMapFrom: pathMapFrom,
-      pathMapTo: pathMapTo
+      pathMapTo: pathMapTo,
+      destCollectionId: destCollectionId,
+      autoImport: autoImport
     })
     .catch(function (e) {
       console.error("qBittorrent: could not save settings:", e);
@@ -1644,6 +1869,30 @@ function registerActions() {
     if (expandedHash) ensureFiles(hash);
   });
 
+  api.ui.onAction("qbt:import", function (data) {
+    var hash = hashOf(data);
+    var t = hash && torrents[hash];
+    if (!t) return;
+    var c = collectionForTorrent(t);
+    if (!c) {
+      api.ui.showNotification("These files aren't inside one of your collections");
+      return;
+    }
+    if (!api.collections || typeof api.collections.resync !== "function") {
+      api.ui.showNotification("Rescanning a collection needs Viboplr " + MIN_HOST_VERSION + " or newer");
+      return;
+    }
+    api.collections
+      .resync(Number(c.id))
+      .then(function () {
+        api.ui.showNotification("Scanning “" + c.name + "” for the new files");
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: rescan failed:", e);
+        api.ui.showNotification("Couldn't start the scan: " + errText(e));
+      });
+  });
+
   api.ui.onAction("qbt:play-torrent", function (data) {
     var hash = hashOf(data);
     if (hash) playFiles(hash, null);
@@ -1684,6 +1933,14 @@ function registerActions() {
   });
   api.ui.onAction("qbt:set-category", function (data) {
     currentDraft().category = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:set-dest", function (data) {
+    currentDraft().destCollectionId = (data && data.value) || "";
+    renderSettings();
+  });
+  api.ui.onAction("qbt:set-auto-import", function (data) {
+    currentDraft().autoImport = !!(data && (data.checked === undefined ? data.value : data.checked));
+    renderSettings();
   });
   api.ui.onAction("qbt:set-map-from", function (data) {
     currentDraft().pathMapFrom = (data && data.value) || "";
@@ -1739,6 +1996,7 @@ function activate(hostApi) {
   renderSettings();
 
   loadSettings()
+    .then(loadCollections)
     .then(function () {
       render();
       renderSettings();
@@ -1776,6 +2034,8 @@ return {
   _isErrored: isErrored,
   _mergeMaindata: mergeMaindata,
   _classifyConnectionError: classifyConnectionError,
+  _collectionForPath: collectionForPath,
+  _detectCompletions: detectCompletions,
   _mediaKindOf: mediaKindOf,
   _isWindowsPath: isWindowsPath,
   _joinRemotePath: joinRemotePath,

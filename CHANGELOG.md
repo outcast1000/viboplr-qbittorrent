@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+
+Finished downloads reach your library on their own.
+
+- **Save downloads into a collection.** Pick one in settings and torrents added
+  from Viboplr are saved there — which is what makes everything below possible;
+  files that land outside your collections are never seen by the library.
+- **Finished downloads are imported automatically.** When a torrent completes
+  inside one of your collections, that collection is rescanned and the tracks
+  appear. Downloads outside every collection are left alone rather than
+  triggering a scan that would find nothing.
+- **A notification when a download finishes**, naming the torrent.
+- **"Add to library"** on any finished torrent, for importing on demand. It only
+  appears when the files are actually inside a collection.
+- Restarting the app no longer looks like a hundred torrents finishing at once:
+  what was already complete at startup is recorded silently.
+
 ## 0.3.0
 
 Play straight out of a torrent, without importing anything.
