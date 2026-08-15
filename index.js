@@ -106,6 +106,7 @@ var searchError = null;
 var searchPlugins = null; // null = not asked yet, [] = none installed
 var searchJobId = null;
 var searchGen = 0; // guards a late poll against a newer search
+var searchStopped = false; // the user cut it short, so "no results" isn't a verdict
 
 // Local collections, and which torrents we have already seen finish.
 var localCollections = [];
@@ -1130,6 +1131,7 @@ function runSearch(query) {
   searchError = null;
   searchResults = [];
   searchJobId = null;
+  searchStopped = false;
   activeTab = "search";
   render();
 
@@ -1205,6 +1207,23 @@ function pollSearch(id, gen, elapsed) {
       render();
       return disposeSearch(id);
     });
+}
+
+// Stop a running search, keeping whatever came back.
+//
+// Bumping the generation is what actually stops it: the poll loop is a chain of
+// timeouts, and the next one to land sees a newer generation and drops out. The
+// server-side job is disposed of here rather than left to that dropped poll,
+// which by then is deliberately doing nothing.
+function stopSearch() {
+  if (!searchRunning) return Promise.resolve();
+  searchGen++;
+  searchRunning = false;
+  searchStopped = true;
+  var id = searchJobId;
+  searchJobId = null;
+  render();
+  return disposeSearch(id);
 }
 
 function addSearchResult(index) {
@@ -2200,10 +2219,16 @@ function searchTabNodes() {
         ? "Searching… " + searchResults.length + " so far"
         : "Searching " + (searchPlugins ? searchPlugins.length : 0) + " indexers…"
     });
+    // A slow indexer can hold a search open for the full 45s budget, and until
+    // now the only way out was to start a different search.
+    children.push({ type: "button", label: "Stop searching", action: "qbt:search-stop", variant: "secondary" });
   }
 
   if (!searchResults.length) {
-    if (!searchRunning && searchQuery) {
+    if (searchStopped) {
+      // Not "nothing found" — the search was cut short, so it never got to say.
+      children.push({ type: "text", content: "Search stopped before anything came back." });
+    } else if (!searchRunning && searchQuery) {
       children.push({ type: "text", content: "Nothing found for “" + searchQuery + "”." });
     } else if (!searchRunning) {
       children.push({
@@ -2225,7 +2250,11 @@ function searchTabNodes() {
       action: "qbt:search-add"
     });
   }
-  children.push({ type: "text", content: searchResults.length + " results", className: "muted" });
+  children.push({
+    type: "text",
+    content: searchResults.length + " results" + (searchStopped ? " — stopped early" : ""),
+    className: "muted"
+  });
   // `selectable` is what switches the host to its library-parity row list, which
   // is the one that renders hover action buttons. Without a visible button the
   // only way to download was to click the row and hope.
@@ -2362,6 +2391,10 @@ function registerActions() {
 
   api.ui.onAction("qbt:search", function (data) {
     runSearch((data && data.query) || "");
+  });
+
+  api.ui.onAction("qbt:search-stop", function () {
+    stopSearch();
   });
 
   api.ui.onAction("qbt:search-add", function (data) {
@@ -2555,6 +2588,18 @@ function activate(hostApi) {
 function deactivate() {
   stopped = true;
   stopPolling();
+  // A search job outlives the plugin on the server, and qBittorrent caps how
+  // many can exist — so disabling mid-search must not strand one. Fire and
+  // forget: the plugin is going away and cannot wait for the round trip.
+  if (searchJobId != null) {
+    searchGen++;
+    var strandedJob = searchJobId;
+    searchJobId = null;
+    searchRunning = false;
+    disposeSearch(strandedJob).catch(function (e) {
+      console.error("qBittorrent: could not dispose of the search job on deactivate:", e);
+    });
+  }
   // The session dies with the plugin; nothing about it is worth persisting.
   sid = null;
   sessionReady = false;

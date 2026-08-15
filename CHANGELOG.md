@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0
+
+- **A running search can be stopped.** A slow indexer could hold one open for
+  the full 45-second budget, and the only way out was to start a different
+  search. Results already returned are kept.
+- Stopping says so rather than reporting “nothing found” — the search never got
+  far enough to have a verdict.
+- Disabling the plugin mid-search no longer strands a search job on the server.
+
 ## 0.7.0
 
 Give each Viboplr profile its own qBittorrent category.
