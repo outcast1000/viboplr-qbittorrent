@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0
+
+**A real download window**, like qBittorrent’s own add dialog: see what is
+inside a torrent and choose files while *nothing has been added at all*.
+
+- **View contents** now asks qBittorrent for the metadata without adding
+  anything (`torrents/fetchMetadata`). You get the name, the size, the file
+  list, per-file include/skip and an “Only the audio” shortcut — then **Add and
+  start** adds it with your choices already applied, or **Cancel** leaves
+  nothing behind.
+- The size readout tracks your selection, so you can see what you are actually
+  about to download versus the full torrent.
+- **Falls back automatically.** `torrents/fetchMetadata` only exists on
+  qBittorrent master — no release up to 5.2.3 has it — so on those the plugin
+  says so and adds the torrent paused as before. The endpoint is probed once per
+  session.
+
 ## 0.11.2
 
 **Fixes “Added, but it couldn’t be matched to a torrent in the list.”**

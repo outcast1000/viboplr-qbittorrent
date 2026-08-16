@@ -149,11 +149,17 @@ each indexer answers.
 
 Each result has two buttons: **↓ Add to qBittorrent** and **☰ View contents**.
 
-*View contents* shows what's inside before you commit — the file list opens and
-nothing downloads, then you either **Start download** or **Discard**. qBittorrent
-can't read a torrent's file list without adding it (the metadata comes from the
-swarm, or from the .torrent itself), so this adds it paused and Discard removes
-it again. Discard never deletes anything from disk.
+*View contents* opens a **download window**: the torrent's name, size and file
+list, with per-file include/skip and an *Only the audio* shortcut. **Add and
+start** adds it with your choices already applied; **Cancel** leaves nothing
+behind, because nothing was added in the first place.
+
+That uses `torrents/fetchMetadata`, which reads a torrent's contents without
+adding it. It exists on qBittorrent **master only** — no release up to 5.2.3 has
+it. On those, the plugin says so and falls back to adding the torrent **paused**,
+showing the same file list from there, with **Start download** or **Discard**.
+Either way nothing downloads until you decide, and Discard never deletes
+anything from disk.
 
 Right-clicking a track, album or artist in your library offers **Find torrents…**,
 which opens the tab and searches for it. A track searches its *album*, since
