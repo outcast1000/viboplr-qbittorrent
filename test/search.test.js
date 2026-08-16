@@ -83,6 +83,37 @@ test("a result's subtitle carries size, swarm and source", () => {
   assert.match(s, /example\.org/);
 });
 
+test("a search result is identified by URL, not by position", () => {
+  // Results stream in and re-sort by seeders on every poll, so an index captured
+  // when a row was drawn can point at a different result — or past the end — by
+  // the time it is clicked.
+  assert.equal(
+    plugin._searchResultId({ fileUrl: "https://x/y.torrent", fileName: "Album" }),
+    "https://x/y.torrent",
+  );
+});
+
+test("a result with no download link still gets an id", () => {
+  // It needs one to be clickable at all; the click then explains itself rather
+  // than silently doing nothing.
+  assert.equal(plugin._searchResultId({ descrLink: "https://x/page", fileName: "Album" }), "https://x/page");
+  assert.equal(plugin._searchResultId({ fileName: "Album" }), "Album");
+  assert.equal(plugin._searchResultId(null), "");
+});
+
+test("rowIds keeps ids as strings", () => {
+  // rowIndices would parseInt a URL into NaN and drop the click.
+  assert.deepEqual(plugin._rowIds({ selectedIds: ["https://x/y.torrent"] }), ["https://x/y.torrent"]);
+  assert.deepEqual(plugin._rowIds({ itemId: "https://x/y.torrent" }), ["https://x/y.torrent"]);
+  assert.deepEqual(plugin._rowIds({ selectedIds: ["a", "b"] }), ["a", "b"]);
+});
+
+test("rowIds yields nothing when there is nothing to act on", () => {
+  assert.deepEqual(plugin._rowIds({}), []);
+  assert.deepEqual(plugin._rowIds(null), []);
+  assert.deepEqual(plugin._rowIds({ itemId: "" }), []);
+});
+
 test("a subtitle survives a result missing everything", () => {
   // Indexers vary in what they report; a missing field must not blank the row.
   const s = plugin._searchResultSubtitle({});

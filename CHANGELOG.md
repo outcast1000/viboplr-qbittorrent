@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.10.1
+
+**Fixes clicking a search result doing nothing**, especially with “Choose files
+before downloading” on. Three silent failures, all of which looked identical
+from the outside:
+
+- **The new torrent was looked for too early.** qBittorrent registers it a
+  moment after answering the add, so the first look found nothing and gave up —
+  leaving a paused torrent with no banner and no explanation. It now waits for
+  it to appear.
+- **Search rows were keyed by list position.** Results stream in and re-sort by
+  seeders on every poll, so a click during a live search could hit a different
+  result or nothing at all. Rows are keyed by URL now.
+- **A result with no download link did nothing at all.** It now says so, and
+  opens the result’s page if it has one.
+- If qBittorrent puts the torrent outside your category, that is now called out
+  rather than leaving it invisible in the very list holding the Start button.
+
 ## 0.10.0
 
 **Choose files before anything downloads** — the missing half of 0.9.0, which

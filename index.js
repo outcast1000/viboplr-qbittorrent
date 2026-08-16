@@ -1072,7 +1072,11 @@ function shallowHashSet(map) {
 // from the swarm, and qBittorrent won't do that for a torrent that is stopped.
 // So a magnet is started briefly, purely to fetch metadata, and stopped again
 // the moment it has it. No file data is downloaded during metaDL.
-function beginSelection(knownBefore, expectedHash) {
+var ATTACH_ATTEMPTS = 8;
+var ATTACH_POLL_MS = 1000;
+
+function beginSelection(knownBefore, expectedHash, attempt) {
+  var tries = attempt || 0;
   var hash = expectedHash && torrents[expectedHash] ? expectedHash : null;
   if (!hash) {
     var fresh = newHashes(knownBefore, torrents);
@@ -1082,12 +1086,41 @@ function beginSelection(knownBefore, expectedHash) {
     // pausing a stranger's download.
     if (fresh.length === 1) hash = fresh[0];
   }
-  if (!hash) return Promise.resolve();
+
+  if (!hash) {
+    // qBittorrent accepts the add and registers the torrent a moment later, so
+    // the first look routinely finds nothing. Without this retry the torrent
+    // arrived paused with no banner and no explanation — which is exactly what
+    // "I clicked download and nothing happened" looks like.
+    if (tries < ATTACH_ATTEMPTS) {
+      return delay(ATTACH_POLL_MS)
+        .then(refresh)
+        .then(function () {
+          return beginSelection(knownBefore, expectedHash, tries + 1);
+        });
+    }
+    api.ui.showNotification(
+      "Added, but it couldn't be matched to a torrent in the list. It's paused — find it and press Start when you've chosen files."
+    );
+    render();
+    return Promise.resolve();
+  }
 
   pendingSelection[hash] = true;
   expandedHash = hash;
-  render();
+  activeTab = "downloading";
 
+  // Added, paused, and filtered out of the very list that carries the Start
+  // button: without this the torrent is unreachable from the UI that is
+  // supposed to be waiting for a decision.
+  var t = torrents[hash];
+  if (restrictToCategory && category && String((t && t.category) || "") !== category) {
+    api.ui.showNotification(
+      "Added, but qBittorrent didn't put it in “" + category + "” — turn off “Only manage my own category” to see it"
+    );
+  }
+
+  render();
   return waitForMetadata(hash, 0);
 }
 
@@ -1385,9 +1418,44 @@ function stopSearch() {
   return disposeSearch(id);
 }
 
-function addSearchResult(index) {
-  var r = searchResults[index];
-  if (!r || !r.fileUrl) return;
+// A stable identity for a search result.
+//
+// NOT its position: results stream in and are re-sorted by seeders on every
+// poll, so an index captured when the row was drawn can point at a different
+// result — or past the end — by the time it is clicked. That made clicking
+// during a live search either silently do nothing or add the wrong torrent.
+function searchResultId(r) {
+  if (!r) return "";
+  return String(r.fileUrl || r.descrLink || r.fileName || "");
+}
+
+function findSearchResult(id) {
+  for (var i = 0; i < searchResults.length; i++) {
+    if (searchResultId(searchResults[i]) === String(id)) return searchResults[i];
+  }
+  return null;
+}
+
+function addSearchResult(id) {
+  var r = findSearchResult(id);
+  if (!r) {
+    // The list moved under the click (a poll landed) or the search was rerun.
+    api.ui.showNotification("That result is no longer in the list — search again");
+    return;
+  }
+  if (!r.fileUrl) {
+    // Some indexers return a description page and no download link. Silently
+    // doing nothing was indistinguishable from the plugin being broken.
+    if (r.descrLink && typeof api.network.openUrl === "function") {
+      api.ui.showNotification("That result has no download link — opening its page instead");
+      api.network.openUrl(r.descrLink).catch(function (e) {
+        console.error("qBittorrent: could not open the result's page:", e);
+      });
+    } else {
+      api.ui.showNotification("That result has no download link");
+    }
+    return;
+  }
   addTorrent(r.fileUrl);
 }
 
@@ -1608,6 +1676,20 @@ function trackForFile(torrent, file) {
 
 // The selectable row list sends `selectedIds` (an array, one entry for an
 // overlay button, several when acting on a selection) plus `itemId`. Take both.
+// The raw row ids, for lists whose ids aren't numbers (search results are keyed
+// by URL).
+function rowIds(data) {
+  var out = [];
+  var ids = data && data.selectedIds;
+  if (ids && ids.length) {
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] != null && ids[i] !== "") out.push(String(ids[i]));
+    }
+  }
+  if (!out.length && data && data.itemId != null && data.itemId !== "") out.push(String(data.itemId));
+  return out;
+}
+
 function rowIndices(data) {
   var out = [];
   var ids = data && data.selectedIds;
@@ -2513,7 +2595,7 @@ function searchTabNodes() {
   for (var i = 0; i < searchResults.length; i++) {
     var r = searchResults[i];
     items.push({
-      id: String(i),
+      id: searchResultId(r),
       title: r.fileName || "(untitled)",
       subtitle: searchResultSubtitle(r),
       action: "qbt:search-add"
@@ -2677,8 +2759,13 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:search-add", function (data) {
-    var indices = rowIndices(data);
-    for (var i = 0; i < indices.length; i++) addSearchResult(indices[i]);
+    // Search rows are keyed by URL, not by index — see searchResultId.
+    var ids = rowIds(data);
+    if (!ids.length) {
+      api.ui.showNotification("Couldn't tell which result that was — try again");
+      return;
+    }
+    for (var i = 0; i < ids.length; i++) addSearchResult(ids[i]);
   });
 
   api.ui.onAction("qbt:start", function (data) {
@@ -2956,6 +3043,8 @@ return {
   _classifyConnectionError: classifyConnectionError,
   _searchQueryForTarget: searchQueryForTarget,
   _rowIndices: rowIndices,
+  _rowIds: rowIds,
+  _searchResultId: searchResultId,
   _hashesInCategory: hashesInCategory,
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
