@@ -52,6 +52,44 @@ test("hasMetadata is true once a size is known", () => {
   assert.equal(plugin._hasMetadata({ state: "pausedDL", total_size: 999 }), true);
 });
 
+test("normalizeTorrentName ignores the punctuation indexers disagree on", () => {
+  // "Artist - Album [FLAC]" from a tracker vs "Artist-Album-FLAC" in qBittorrent
+  // is the same release.
+  assert.equal(
+    plugin._normalizeTorrentName("Artist - Album [FLAC] (2001)"),
+    plugin._normalizeTorrentName("artist.album.flac.2001"),
+  );
+});
+
+test("findTorrentByName matches an added torrent by its name", () => {
+  const map = {
+    aaa: { name: "Some Other Thing 2020" },
+    bbb: { name: "Artist - Album [FLAC]" },
+  };
+  assert.equal(plugin._findTorrentByName(map, "Artist.Album.FLAC"), "bbb");
+});
+
+test("findTorrentByName refuses an ambiguous match", () => {
+  // Two candidates means we cannot tell which torrent the user just added, and
+  // attaching a pause-and-wait flow to the wrong one is worse than not attaching.
+  const map = {
+    a: { name: "Greatest Hits Volume 1" },
+    b: { name: "Greatest Hits Volume 2" },
+  };
+  assert.equal(plugin._findTorrentByName(map, "Greatest Hits Volume"), null);
+});
+
+test("findTorrentByName refuses a name too short to be distinctive", () => {
+  // A short prefix can match half a library.
+  assert.equal(plugin._findTorrentByName({ a: { name: "Live" } }, "Live"), null);
+  assert.equal(plugin._findTorrentByName({ a: { name: "x" } }, ""), null);
+});
+
+test("findTorrentByName copes with an empty list", () => {
+  assert.equal(plugin._findTorrentByName({}, "Artist - Album [FLAC]"), null);
+  assert.equal(plugin._findTorrentByName(null, "Artist - Album [FLAC]"), null);
+});
+
 test("hasMetadata is false for a torrent that is gone or empty", () => {
   assert.equal(plugin._hasMetadata(null), false);
   assert.equal(plugin._hasMetadata({ state: "stoppedDL", size: 0 }), false);

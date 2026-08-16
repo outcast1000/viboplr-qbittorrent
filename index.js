@@ -114,6 +114,7 @@ var metadataElapsed = {};
 // True from pressing Add/View contents until the torrent has been matched to a
 // row. Before that there is no row to put a message on, so the view carries one.
 var preparingAdd = false;
+var preparingElapsed = 0;
 
 // Search.
 var searchQuery = "";
@@ -623,6 +624,32 @@ function magnetHash(uri) {
   return h.toLowerCase();
 }
 
+// Loose name comparison for matching an added torrent to what was asked for.
+// Indexers and qBittorrent rarely agree on punctuation ("Artist - Album [FLAC]"
+// vs "Artist-Album-FLAC"), so everything but letters and digits goes.
+function normalizeTorrentName(s) {
+  return String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// Find a torrent by name, but only when the answer is unambiguous.
+//
+// This is the third way of identifying what was just added, and it catches what
+// the other two miss: a torrent already in the list (nothing "new" appeared), and
+// a list diff confused by a concurrent poll.
+function findTorrentByName(map, name) {
+  var target = normalizeTorrentName(name);
+  // A short name can prefix-match half the list; refuse rather than guess.
+  if (target.length < 8) return null;
+  var hits = [];
+  for (var hash in map || {}) {
+    if (!Object.prototype.hasOwnProperty.call(map, hash)) continue;
+    var n = normalizeTorrentName(map[hash] && map[hash].name);
+    if (!n) continue;
+    if (n === target || n.indexOf(target) === 0 || target.indexOf(n) === 0) hits.push(hash);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
 // Hashes present after an add that weren't there before.
 //
 // How a newly added torrent is identified at all: /torrents/add answers "Ok."
@@ -1089,11 +1116,16 @@ function shallowHashSet(map) {
 // from the swarm, and qBittorrent won't do that for a torrent that is stopped.
 // So a magnet is started briefly, purely to fetch metadata, and stopped again
 // the moment it has it. No file data is downloaded during metaDL.
-var ATTACH_ATTEMPTS = 8;
+// 25s, because the wait is not just qBittorrent registering a torrent: given an
+// http(s) link it answers "Ok." on ACCEPTING the URL and then goes and fetches
+// the .torrent from the tracker, which can be slow. Eight seconds cut that off
+// while it was still working.
+var ATTACH_ATTEMPTS = 25;
 var ATTACH_POLL_MS = 1000;
 
-function beginSelection(knownBefore, expectedHash, attempt, peek) {
+function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
   var tries = attempt || 0;
+  preparingElapsed = tries;
   var hash = expectedHash && torrents[expectedHash] ? expectedHash : null;
   if (!hash) {
     var fresh = newHashes(knownBefore, torrents);
@@ -1103,6 +1135,9 @@ function beginSelection(knownBefore, expectedHash, attempt, peek) {
     // pausing a stranger's download.
     if (fresh.length === 1) hash = fresh[0];
   }
+  // Last resort: the name. Catches a torrent that was ALREADY in the list (so
+  // nothing is "new") and a diff muddled by a concurrent poll.
+  if (!hash && nameHint) hash = findTorrentByName(torrents, nameHint);
 
   if (!hash) {
     // qBittorrent accepts the add and registers the torrent a moment later, so
@@ -1113,12 +1148,25 @@ function beginSelection(knownBefore, expectedHash, attempt, peek) {
       return delay(ATTACH_POLL_MS)
         .then(refresh)
         .then(function () {
-          return beginSelection(knownBefore, expectedHash, tries + 1, peek);
+          return beginSelection(knownBefore, expectedHash, tries + 1, peek, nameHint);
         });
     }
     preparingAdd = false;
+    api.log(
+      "warn",
+      "add not matched after " + tries + "s — expectedHash=" + (expectedHash || "none") +
+        " nameHint=" + (nameHint || "none") + " torrents=" + Object.keys(torrents).length,
+      "qbittorrent"
+    );
+    // The honest reading: for an http(s) link, "Ok." meant qBittorrent accepted
+    // the URL, not that it got a torrent from it. A private tracker that needs a
+    // login, or a link that is really a web page, fails silently at that point —
+    // so telling the user to "find it in the list" sent them looking for
+    // something that may not exist.
     api.ui.showNotification(
-      "Added, but it couldn't be matched to a torrent in the list. It's paused — find it and press Start when you've chosen files."
+      expectedHash
+        ? "qBittorrent never registered that torrent. It may still be finding peers — check the list in a moment."
+        : "qBittorrent accepted the link but no torrent appeared. That usually means it couldn't download the .torrent file — private trackers need a login. Try the magnet link instead if the result has one."
     );
     render();
     return Promise.resolve();
@@ -1210,6 +1258,9 @@ function addTorrent(source, opts) {
   var uri = String(source || "").trim();
   var peek = !!(opts && opts.peek);
   var holdForSelection = peek || chooseFilesFirst;
+  // What the thing is called, for matching it once qBittorrent has it. The
+  // search result knows; a magnet carries it as dn.
+  var nameHint = (opts && opts.name) || magnetDisplayName(source) || "";
   if (!looksLikeTorrentSource(uri)) {
     api.ui.showNotification("That doesn't look like a magnet link or a .torrent URL");
     return Promise.resolve();
@@ -1230,6 +1281,7 @@ function addTorrent(source, opts) {
   }
   if (holdForSelection) {
     preparingAdd = true;
+    preparingElapsed = 0;
     render();
   }
   var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
@@ -1272,7 +1324,7 @@ function addTorrent(source, opts) {
       activeTab = "downloading";
       render();
       return refresh().then(function () {
-        if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek);
+        if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint);
       });
     })
     .catch(function (e) {
@@ -1496,7 +1548,7 @@ function addSearchResult(id, opts) {
     }
     return;
   }
-  addTorrent(r.fileUrl, opts);
+  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName });
 }
 
 // --- Library import ---------------------------------------------------------
@@ -2124,7 +2176,15 @@ function render() {
   // run several seconds, and until now it showed nothing at all — the toast that
   // announced the add had already dismissed itself.
   if (preparingAdd) {
-    children.push({ type: "loading", message: "Adding to qBittorrent — waiting for it to appear…" });
+    children.push({
+      type: "loading",
+      // Past ten seconds the likely reason is that qBittorrent is off fetching the
+      // .torrent from a tracker, which is worth saying rather than leaving a
+      // spinner to imply the app has hung.
+      message: preparingElapsed >= 10
+        ? "Still waiting for qBittorrent to pick it up (" + preparingElapsed + "s) — it may be fetching the .torrent from the tracker."
+        : "Adding to qBittorrent — waiting for it to appear…"
+    });
   }
 
   // Torrents stranded under a previous category name. Offered, not done
@@ -3178,6 +3238,8 @@ return {
   _partitionAudio: partitionAudio,
   _magnetHash: magnetHash,
   _newHashes: newHashes,
+  _normalizeTorrentName: normalizeTorrentName,
+  _findTorrentByName: findTorrentByName,
   _hasMetadata: hasMetadata,
   _setupSteps: setupSteps,
   _looksLikeTorrentSource: looksLikeTorrentSource,

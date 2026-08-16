@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.2
+
+**Fixes “Added, but it couldn’t be matched to a torrent in the list.”**
+
+- **The wait was too short.** Given an http link, qBittorrent answers “Ok.” on
+  accepting the URL and then goes off to fetch the .torrent from the tracker.
+  Eight seconds cut that off while it was still working; it now waits 25, with
+  a counter and an explanation once it passes ten.
+- **The torrent is now also matched by name**, not only by info hash or by
+  spotting a new entry — which catches a torrent already in your list, and one
+  the list diff missed.
+- **The failure message no longer misleads.** For an http link, “Ok.” never
+  meant a torrent was obtained, so telling you it was “paused, find it in the
+  list” sent you looking for something that may not exist. It now names the
+  usual cause — a private tracker that needs a login, or a link that is really a
+  web page — and suggests the magnet instead.
+
 ## 0.11.1
 
 **Says what it is doing while a torrent is being looked up.** The wait was
