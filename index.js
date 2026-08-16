@@ -57,6 +57,9 @@ var api = null;
 var baseUrl = "";
 var username = "";
 var password = "";
+// Optional. qBittorrent 5.2+ accepts an API key instead of a login; when set it
+// replaces the username/password entirely.
+var apiKey = "";
 var category = "viboplr";
 var restrictToCategory = true;
 var insecure = false;
@@ -399,6 +402,7 @@ function magnetDisplayName(uri) {
 function classifyConnectionError(message) {
   var m = String(message || "").toLowerCase();
   if (!m) return "unknown";
+  if (/rejected the api key/.test(m)) return "apikey";
   if (/temporarily banned|too many failed/.test(m)) return "banned";
   if (/kept rejecting the session|rejected the session/.test(m)) return "session";
   if (/rejected the username or password|rejected the username/.test(m)) return "auth";
@@ -466,6 +470,15 @@ function connectionStatus() {
         label: "qBittorrent didn't answer in time",
         detail: "The address was reachable but nothing replied within " + Math.round(REQUEST_TIMEOUT_MS / 1000) + " seconds.",
         fix: "Check the port and any firewall between here and the server."
+      };
+    }
+    if (kind === "apikey") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "qBittorrent rejected the API key",
+        detail: "The server is reachable — the key is what it turned down. API keys need qBittorrent 5.2 or newer.",
+        fix: "Check the key under qBittorrent's Tools → Options → Web UI, or clear it here to sign in with a username and password instead."
       };
     }
     if (kind === "auth") {
@@ -917,7 +930,11 @@ function apiUrl(path) {
 function rawRequest(path, opts) {
   var o = opts || {};
   var headers = {};
-  if (sid) headers["Cookie"] = sessionCookieName + "=" + sid;
+  // An API key is sent on every request and needs no session at all — that is the
+  // point of it. qBittorrent FORBIDS it on auth/* endpoints, so nothing here may
+  // ever pair a key with a login.
+  if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+  else if (sid) headers["Cookie"] = sessionCookieName + "=" + sid;
   var body;
   if (o.form) {
     headers["Content-Type"] = "application/x-www-form-urlencoded";
@@ -981,6 +998,8 @@ function login() {
 }
 
 function ensureSession() {
+  // With an API key there is no session to establish.
+  if (apiKey) return Promise.resolve(null);
   if (sessionReady) return Promise.resolve(sid);
   return login();
 }
@@ -992,6 +1011,11 @@ function authed(path, opts) {
     })
     .then(function (resp) {
       if (resp.status !== 403) return resp;
+      // With an API key there is no session to renew: a 403 is the key being
+      // refused, and retrying would just ask again with the same key.
+      if (apiKey) {
+        throw new Error("qBittorrent rejected the API key");
+      }
       // Session lapsed. One re-login, one retry — then believe the answer.
       sessionReady = false;
       return login()
@@ -2515,6 +2539,7 @@ function currentDraft() {
       baseUrl: baseUrl,
       username: username,
       password: password,
+      apiKey: apiKey,
       category: category,
       restrictToCategory: restrictToCategory,
       insecure: insecure,
@@ -2548,7 +2573,8 @@ function renderSettings() {
         { label: "Status", value: status.label },
         { label: "qBittorrent", value: qbtVersion || "—" },
         { label: "WebAPI", value: apiVersion || "—" },
-        { label: "Viboplr", value: (api.appVersion || "?") + (hostTooOld ? " (too old)" : "") }
+        { label: "Viboplr", value: (api.appVersion || "?") + (hostTooOld ? " (too old)" : "") },
+        { label: "Sign-in", value: apiKey ? "API key" : username ? "Username" : "None" }
       ]
     }
   ];
@@ -2600,6 +2626,14 @@ function renderSettings() {
             label: "Password",
             description: "Stored in Viboplr's plugin database in plain text — prefer a dedicated WebUI account over your main one.",
             control: { type: "text-input", action: "qbt:set-pass", password: true, value: d.password }
+          },
+          {
+            type: "settings-row",
+            label: "API key (optional)",
+            description:
+              "qBittorrent 5.2+ only. Create one under Tools → Options → Web UI and paste it here — it replaces the username " +
+              "and password, needs no login, and can't be locked out by the failed-login ban. Leave empty to sign in normally.",
+            control: { type: "text-input", action: "qbt:set-apikey", password: true, value: d.apiKey }
           },
           {
             type: "settings-row",
@@ -2701,6 +2735,7 @@ function loadSettings() {
       baseUrl = normalizeBaseUrl(s.baseUrl || "");
       username = s.username || "";
       password = s.password || "";
+      apiKey = s.apiKey || "";
       category = s.category === undefined ? "viboplr" : s.category;
       restrictToCategory = s.restrictToCategory !== false;
       insecure = !!s.insecure;
@@ -2727,6 +2762,7 @@ function persistSettings() {
       baseUrl: baseUrl,
       username: username,
       password: password,
+      apiKey: apiKey,
       category: category,
       restrictToCategory: restrictToCategory,
       insecure: insecure,
@@ -2750,6 +2786,7 @@ function saveSettings() {
   baseUrl = normalizeBaseUrl(d.baseUrl);
   username = d.username || "";
   password = d.password || "";
+  apiKey = (d.apiKey || "").trim();
   category = (d.category || "").trim();
   // Renaming leaves the old torrents tagged with the old name; remember it so
   // they can be found and moved rather than silently disappearing.
@@ -2804,15 +2841,26 @@ function testConnection() {
   // it shares these globals, and a tick landing mid-test would run against
   // half-applied credentials and report a failure that isn't real.
   stopPolling();
-  var prev = { baseUrl: baseUrl, username: username, password: password, insecure: insecure, sid: sid, ready: sessionReady };
+  var prev = {
+    baseUrl: baseUrl,
+    username: username,
+    password: password,
+    apiKey: apiKey,
+    insecure: insecure,
+    sid: sid,
+    ready: sessionReady
+  };
   baseUrl = probeUrl;
   username = d.username || "";
   password = d.password || "";
+  apiKey = (d.apiKey || "").trim();
   insecure = !!d.insecure;
   sid = null;
   sessionReady = false;
 
-  return login()
+  // An API key has no login to test — sending one to auth/* is forbidden — so
+  // the request itself is the test.
+  return (apiKey ? Promise.resolve(null) : login())
     .then(function () {
       return authed("/app/version");
     })
@@ -2835,6 +2883,7 @@ function testConnection() {
       baseUrl = prev.baseUrl;
       username = prev.username;
       password = prev.password;
+      apiKey = prev.apiKey;
       insecure = prev.insecure;
       sid = prev.sid;
       sessionReady = prev.ready;
@@ -3492,6 +3541,9 @@ function registerActions() {
   });
   api.ui.onAction("qbt:set-pass", function (data) {
     currentDraft().password = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:set-apikey", function (data) {
+    currentDraft().apiKey = (data && data.value) || "";
   });
   api.ui.onAction("qbt:set-category", function (data) {
     currentDraft().category = (data && data.value) || "";

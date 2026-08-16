@@ -25,6 +25,12 @@ test("a slow server is 'timeout', distinct from unreachable", () => {
   assert.equal(classify("operation timed out"), "timeout");
 });
 
+test("a refused API key is its own kind, not 'auth'", () => {
+  // Different fix entirely: there is no password to check and no login to
+  // retry, and the key needs qBittorrent 5.2+ in the first place.
+  assert.equal(classify("qBittorrent rejected the API key"), "apikey");
+});
+
 test("bad credentials are 'auth'", () => {
   assert.equal(classify("qBittorrent rejected the username or password"), "auth");
 });

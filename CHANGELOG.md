@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.0
+
+**Sign in with an API key** (qBittorrent 5.2+), as an alternative to a username
+and password.
+
+- New **API key** field in Settings → qBittorrent. Create one in qBittorrent
+  under Tools → Options → Web UI and paste it in; it replaces the credentials.
+- No login step at all — the key rides on every request — so there is no session
+  to expire, no cookie whose name can change between versions, and nothing that
+  qBittorrent's failed-login IP ban can lock you out of.
+- A refused key says exactly that, rather than being reported as a bad password
+  or as a lapsed session. There is no password to check and no login to retry, so
+  it would have sent you to the wrong place.
+- The Status panel shows which sign-in is in use.
+
 ## 0.12.1
 
 **Fixes login failing on qBittorrent 5.2 and newer.**

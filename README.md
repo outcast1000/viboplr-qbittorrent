@@ -35,6 +35,16 @@ where you'd notice it.
 A reverse-proxied qBittorrent at a subpath (`https://home.example.com/qbt`)
 works — enter the full address including the path.
 
+### API key (qBittorrent 5.2+)
+
+Instead of a username and password you can paste an **API key**, created in
+qBittorrent under Tools → Options → Web UI. When one is set it replaces the
+credentials entirely: it's sent on every request, there's no login step, and it
+can't be locked out by qBittorrent's failed-login IP ban.
+
+Worth preferring if your qBittorrent supports it — the session cookie's name has
+already changed once between versions, and a key sidesteps that machinery.
+
 ## How it decides what to touch
 
 Torrents added from Viboplr are tagged with a **category** (`viboplr` by
