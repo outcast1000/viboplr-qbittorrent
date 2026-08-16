@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+**Tracks are named by the file, not by the filename.**
+
+A queue entry from a torrent was pure filename guesswork: `parseFileTrack` saw
+`03 - Björk - Jóga.flac` and nothing else, so a release numbered but not named
+arrived with no artist at all, and every album was the raw torrent name —
+`Radiohead - In Rainbows (2007) [FLAC 24-96]`.
+
+- **Embedded tags now win**, via the host's new `api.system.readAudioTags`
+  (Viboplr 1.0.28+). Title, artist, album, track number and — new — **duration**
+  come off the file itself.
+- **Merged per field, not all-or-nothing.** A file tagged with an artist but no
+  track number still takes its number from the `03 - ` in front, and a file with
+  no album tag still falls back to the torrent name. `album_artist` is only ever
+  the second choice for artist: on a compilation it says "Various Artists" while
+  the per-track artist is the one worth showing.
+- **The file list says it too.** Tags are read once when a torrent's contents
+  arrive, so the rows themselves show real titles and artists — not just the
+  queue entries built from them later. Rendering never triggers a read, so a
+  2000-file torrent doesn't probe 2000 files.
+- **Nothing here can break playback.** A host too old for the API, a seedbox
+  whose files aren't reachable from this machine, and an untagged release all
+  fall back to exactly the filename parse this plugin shipped with.
+
 ## 0.17.0
 
 **Search results are a list again, and the fields are in the order you read

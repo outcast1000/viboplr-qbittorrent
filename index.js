@@ -2169,6 +2169,15 @@ function fetchFiles(hash) {
     })
     .then(function (list) {
       filesByHash[hash] = parseFileList(list);
+      // Tags for this torrent's finished media, once, in the background. The
+      // user is looking at this file list — reading the tags now is what makes
+      // the ROWS say what the files are, not just the queue entries built from
+      // them later. Never awaited: the list renders on the filenames and
+      // corrects itself when the tags land.
+      var torrent = torrents[hash];
+      if (torrent) {
+        readTagsForFiles(torrent, playableFiles(filesByHash[hash])).then(render);
+      }
       return filesByHash[hash];
     })
     .catch(function (e) {
@@ -2466,15 +2475,114 @@ function filesAreReachable() {
   return isLikelyLocalHost(baseUrl);
 }
 
-function trackForFile(torrent, file) {
+// ---------------------------------------------------------------------------
+// Embedded tags
+//
+// A filename is a guess; the file's own tags are the answer. `parseFileTrack`
+// can only ever see "03 - Björk - Jóga.flac", so a release named by its track
+// numbers alone reached the queue with no artist at all and the raw torrent name
+// — "Radiohead - In Rainbows (2007) [FLAC 24-96]" — as its album.
+//
+// All of it is best-effort. A host too old to read tags, a seedbox whose files
+// aren't reachable from here, and an untagged release all fall back to the
+// filename parse, which is what this plugin shipped with.
+// ---------------------------------------------------------------------------
+
+// Absolute path -> tags object, or null for "asked, and there was nothing".
+// Cached for the session because a file's tags cannot change under us — the
+// bytes are written once — and the same file is re-queued often.
+var tagsByPath = {};
+
+function canReadTags() {
+  return !!(api.system && typeof api.system.readAudioTags === "function");
+}
+
+function tagsFor(torrent, file) {
+  var path = localPathFor(torrent, file);
+  return (path && tagsByPath[path]) || null;
+}
+
+// Reads already in flight, keyed by path. Opening a torrent's contents starts a
+// read for the whole list; pressing Play a second later asks for a subset of the
+// same files, and without this both would probe them.
+var tagsPending = {};
+
+// Read tags for whichever of `files` we haven't asked about yet. Resolves when
+// the cache is filled; the caller then builds tracks off it synchronously.
+function readTagsForFiles(torrent, files) {
+  // No host support, or the files aren't on this machine to be read.
+  if (!canReadTags() || !filesAreReachable() || !torrent) return Promise.resolve();
+  var list = files || [];
+  var wanted = [];
+  var waits = [];
+  for (var i = 0; i < list.length; i++) {
+    var path = localPathFor(torrent, list[i]);
+    if (!path || Object.prototype.hasOwnProperty.call(tagsByPath, path)) continue;
+    if (tagsPending[path]) waits.push(tagsPending[path]);
+    else wanted.push(path);
+  }
+  if (wanted.length) {
+    // One call for the whole set: the host probes on a worker thread, and a
+    // call per file would be a round trip per file for one click.
+    var job = api.system.readAudioTags(wanted)
+      .then(function (results) {
+        for (var j = 0; j < wanted.length; j++) {
+          tagsByPath[wanted[j]] = (results && results[j]) || null;
+        }
+      })
+      .catch(function (e) {
+        // Never fatal — the filename parse is the fallback. Deliberately NOT
+        // cached as a miss: a failure here is the host or the mount, not the
+        // file, so the next play should be allowed to try again.
+        console.error("qBittorrent: could not read tags for a torrent's files:", e);
+      })
+      .then(function () {
+        for (var k = 0; k < wanted.length; k++) delete tagsPending[wanted[k]];
+      });
+    for (var m = 0; m < wanted.length; m++) tagsPending[wanted[m]] = job;
+    waits.push(job);
+  }
+  return waits.length ? Promise.all(waits) : Promise.resolve();
+}
+
+// Tags win field by field, the filename parse fills the gaps. Per field, not
+// all-or-nothing: a release tagged with an artist but no track number should
+// still take its number off the "03 - " in front.
+function mergeFileTrack(torrent, file, tags) {
   var parsed = parseFileTrack(file.name);
+  var t = tags || {};
   return {
     path: qbtUri(torrent.hash, file.index),
-    title: parsed.title,
-    artist_name: parsed.artist,
-    album_title: torrent.name || null,
-    track_number: parsed.trackNumber
+    title: firstText([t.title, parsed.title]),
+    // album_artist is the second choice, not the first: on a compilation it is
+    // "Various Artists" while the per-track artist is the one worth showing.
+    artist_name: firstText([t.artist, t.album_artist, parsed.artist]),
+    album_title: firstText([t.album, torrent.name]),
+    track_number: firstNum([t.track_number, parsed.trackNumber]),
+    // Nothing supplied this before. A queue entry with no length shows no seek
+    // bar and never scrobbles, and it comes free with the tag read.
+    duration_secs: firstNum([t.duration_secs])
   };
+}
+
+function firstText(values) {
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+function firstNum(values) {
+  for (var i = 0; i < values.length; i++) {
+    var n = Number(values[i]);
+    if (values[i] != null && isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function trackForFile(torrent, file) {
+  return mergeFileTrack(torrent, file, tagsFor(torrent, file));
 }
 
 // The selectable row list sends `selectedIds` (an array, one entry for an
@@ -2509,25 +2617,43 @@ function rowIndices(data) {
   return out;
 }
 
-function tracksForIndices(hash, indices) {
-  var torrent = torrents[hash];
-  if (!torrent) return [];
+// The files these row indices name, in the order they were given, skipping
+// anything unfinished — same rule as the Play button, since a partial file stops
+// partway and reads as corrupt.
+function filesForIndices(hash, indices) {
   var files = filesByHash[hash] || [];
   var byIndex = {};
   for (var i = 0; i < files.length; i++) byIndex[files[i].index] = files[i];
-  var tracks = [];
+  var out = [];
   for (var j = 0; j < indices.length; j++) {
     var f = byIndex[indices[j]];
-    // Skip anything unfinished: same rule as the Play button, since a partial
-    // file stops partway and reads as corrupt.
-    if (f && Number(f.progress) >= 1 && mediaKindOf(f.name)) tracks.push(trackForFile(torrent, f));
+    if (f && Number(f.progress) >= 1 && mediaKindOf(f.name)) out.push(f);
   }
+  return out;
+}
+
+function tracksForIndices(hash, indices) {
+  var torrent = torrents[hash];
+  if (!torrent) return [];
+  var files = filesForIndices(hash, indices);
+  var tracks = [];
+  for (var i = 0; i < files.length; i++) tracks.push(trackForFile(torrent, files[i]));
   return tracks;
+}
+
+// Fill the tag cache for the files these indices name, then build. Every queue
+// path waits for this — the file list's own background read may not have landed
+// yet, and metadata has to be settled when the entry is created: an entry that
+// re-titled itself later would rewrite a list the user is already reading.
+function tracksForIndicesTagged(hash, indices) {
+  return readTagsForFiles(torrents[hash], filesForIndices(hash, indices))
+    .then(function () { return tracksForIndices(hash, indices); });
 }
 
 function enqueueFiles(hash, indices) {
   return ensureFiles(hash).then(function () {
-    var tracks = tracksForIndices(hash, indices);
+    return tracksForIndicesTagged(hash, indices);
+  }).then(function (tracks) {
     if (!tracks.length) {
       api.ui.showNotification("Nothing there that's finished downloading");
       return;
@@ -2553,13 +2679,15 @@ function playFiles(hash, startIndex) {
       api.ui.showNotification("Nothing finished downloading in this torrent yet");
       return;
     }
-    var tracks = [];
-    var start = 0;
-    for (var i = 0; i < playable.length; i++) {
-      if (startIndex != null && playable[i].index === startIndex) start = i;
-      tracks.push(trackForFile(torrent, playable[i]));
-    }
-    api.playback.playTracks(tracks, start, { name: torrent.name || "Torrent" });
+    return readTagsForFiles(torrent, playable).then(function () {
+      var tracks = [];
+      var start = 0;
+      for (var i = 0; i < playable.length; i++) {
+        if (startIndex != null && playable[i].index === startIndex) start = i;
+        tracks.push(trackForFile(torrent, playable[i]));
+      }
+      api.playback.playTracks(tracks, start, { name: torrent.name || "Torrent" });
+    });
   });
 }
 
@@ -3887,10 +4015,14 @@ function fileRowsNode(hash) {
     var done = numOr(f.progress, 0) >= 1;
     var skipped = numOr(f.priority, 1) === 0;
     var parsed = parseFileTrack(f.name);
+    // The file's own tags when they're already cached — the read was started
+    // when this list arrived. Read-only on purpose: rendering must never kick
+    // off a probe, or scrolling a 2000-file torrent would probe 2000 files.
+    var tags = kind && done && torrent ? tagsFor(torrent, f) : null;
     // A non-media file keeps its real filename: "cover" and "01" are what the
     // track parser would leave, which is useless when deciding whether to skip
     // something.
-    var label = kind ? parsed.title : baseName(f.name);
+    var label = kind ? firstText([tags && tags.title, parsed.title, baseName(f.name)]) : baseName(f.name);
     // …prefixed by the folder it lives in. parseFileTrack strips the path, so
     // the row was showing leaves only: two "01"s from CD1 and CD2 were the same
     // row twice, and a folder of scans was indistinguishable from tracks at the
@@ -3939,8 +4071,8 @@ function fileRowsNode(hash) {
       // Only a finished, reachable, PLAYABLE file gets a path — that is what
       // makes the host's right-click menu and drag-to-queue work on these rows.
       path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
-      artistName: kind ? parsed.artist : null,
-      albumTitle: kind && torrent ? torrent.name : null
+      artistName: kind ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
+      albumTitle: kind && torrent ? firstText([tags && tags.album, torrent.name]) : null
     });
   }
   // `selectable` selects the host's library-parity row list: hover Play /
@@ -4233,17 +4365,21 @@ function registerActions() {
     // torrent's contents, most of which is usually not music, and "play this
     // one" is the only reading of a button on a single file. Whole-torrent
     // playback is what the file list's All + Play does.
-    var tracks = tracksForIndices(expandedHash, indices);
-    if (!tracks.length) {
-      api.ui.showNotification(
-        indices.length === 1
-          ? "That file hasn't finished downloading yet"
-          : "Nothing there that's finished downloading"
-      );
-      return;
-    }
-    var t = torrents[expandedHash];
-    api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
+    var hash = expandedHash;
+    tracksForIndicesTagged(hash, indices).then(function (tracks) {
+      if (!tracks.length) {
+        api.ui.showNotification(
+          indices.length === 1
+            ? "That file hasn't finished downloading yet"
+            : "Nothing there that's finished downloading"
+        );
+        return;
+      }
+      var t = torrents[hash];
+      api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
+    }).catch(function (e) {
+      console.error("qBittorrent: could not play the selected files:", e);
+    });
   });
 
   api.ui.onAction("qbt:file-download", function (data) {
@@ -4454,6 +4590,9 @@ return {
   _applyPathMapping: applyPathMapping,
   _isLikelyLocalHost: isLikelyLocalHost,
   _parseFileTrack: parseFileTrack,
+  _mergeFileTrack: mergeFileTrack,
+  _firstText: firstText,
+  _firstNum: firstNum,
   _fileFolder: fileFolder,
   _commonFolder: commonFolder,
   _folderSegments: folderSegments,

@@ -236,10 +236,14 @@ Three things worth knowing:
 - **Only finished files play.** A half-downloaded file would open and then stop
   partway through, which looks like a corrupt file rather than an incomplete
   download. Unfinished files are listed with their progress and marked `◌`.
-- **Metadata comes from the filename** — track number, artist and title are
-  parsed from it, because nothing in the plugin API can read tags off an
-  arbitrary file. Importing into a collection gives you real tags; this is the
-  "hear it now" path.
+- **Metadata comes from the file's own tags**, with the filename filling the
+  gaps. Title, artist, album, track number and duration are read straight off
+  the finished file; anything it doesn't carry falls back to what the filename
+  says (track number and artist out of `03 - Artist - Title.flac`, the torrent
+  name as the album). Per field, so a release tagged with an artist but no track
+  number still gets its number from the filename. Reading tags needs Viboplr
+  1.0.28 or newer — on an older app everything falls back to the filename, which
+  is how this plugin worked before.
 - **A remote qBittorrent needs a path mapping.** It reports the paths on *its*
   filesystem, which mean nothing here. If its download folder is mounted on this
   machine, fill in the two path boxes in settings and playback works. Without
@@ -250,9 +254,9 @@ Three things worth knowing:
 
 Set **Save downloads to** in settings to one of your local collections. Torrents
 added from Viboplr then land there, and when one finishes the collection is
-rescanned so the tracks turn up in your library — with real tags read from the
-files, unlike the filename-derived metadata you get playing straight from a
-torrent.
+rescanned so the tracks turn up in your library — with the full tag set, artwork
+and everything else a scan does, which is more than the play-from-torrent path
+reads.
 
 - A download that finishes **outside** every collection is left alone. Scanning a
   folder your library doesn't cover would find nothing and look broken.

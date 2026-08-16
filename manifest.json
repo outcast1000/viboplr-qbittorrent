@@ -23,6 +23,10 @@
       "reason": "Play completed files straight out of a torrent"
     },
     {
+      "api": "system.readAudioTags",
+      "reason": "Read title, artist and album out of a finished file instead of guessing from its name"
+    },
+    {
       "api": "collections.resync",
       "reason": "Rescan your library when a download finishes inside it"
     }

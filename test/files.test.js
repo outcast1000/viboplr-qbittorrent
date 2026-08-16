@@ -98,6 +98,82 @@ test("parseFileTrack keeps a year in the title rather than reading it as a track
   assert.equal(r.title, "Song");
 });
 
+const TORRENT = { hash: "abc123", name: "Radiohead - In Rainbows (2007) [FLAC 24-96]" };
+const FILE = { index: 3, name: "Disc 1/03 - Nude.flac" };
+
+test("mergeFileTrack prefers the file's own tags over the filename", () => {
+  // The whole point: a tagged file should reach the queue as what it says it
+  // is, not as whatever the release folder's naming scheme left behind.
+  const t = plugin._mergeFileTrack(TORRENT, FILE, {
+    title: "Nude",
+    artist: "Radiohead",
+    album: "In Rainbows",
+    track_number: 3,
+    duration_secs: 255.3,
+  });
+  assert.deepEqual(t, {
+    path: "qbt://abc123/3",
+    title: "Nude",
+    artist_name: "Radiohead",
+    album_title: "In Rainbows",
+    track_number: 3,
+    duration_secs: 255.3,
+  });
+});
+
+test("mergeFileTrack merges per field rather than all-or-nothing", () => {
+  // Tagged with an artist but no track number: the number is still there in the
+  // filename, and dropping it would reorder an album in the queue.
+  const t = plugin._mergeFileTrack(TORRENT, FILE, { artist: "Radiohead", duration_secs: 255.3 });
+  assert.equal(t.artist_name, "Radiohead");
+  assert.equal(t.title, "Nude");
+  assert.equal(t.track_number, 3);
+  // No album tag, so the torrent name stands — same as before tags existed.
+  assert.equal(t.album_title, TORRENT.name);
+});
+
+test("mergeFileTrack falls back to the filename parse with no tags at all", () => {
+  // An untagged release, an unreachable seedbox and a host too old to read tags
+  // all arrive here, and all must behave exactly as the plugin did before.
+  assert.deepEqual(plugin._mergeFileTrack(TORRENT, FILE, null), {
+    path: "qbt://abc123/3",
+    title: "Nude",
+    artist_name: null,
+    album_title: TORRENT.name,
+    track_number: 3,
+    duration_secs: null,
+  });
+});
+
+test("mergeFileTrack takes album_artist only as a second choice", () => {
+  // On a compilation album_artist is "Various Artists" while the per-track
+  // artist is the one worth showing, so it must never outrank it.
+  const comp = plugin._mergeFileTrack(TORRENT, FILE, {
+    artist: "Portishead",
+    album_artist: "Various Artists",
+  });
+  assert.equal(comp.artist_name, "Portishead");
+  // With no track artist it is better than nothing.
+  const only = plugin._mergeFileTrack(TORRENT, FILE, { album_artist: "Various Artists" });
+  assert.equal(only.artist_name, "Various Artists");
+});
+
+test("mergeFileTrack ignores blank and zero tag values", () => {
+  // Taggers write empty frames and a literal 0 track number; both would
+  // otherwise beat a filename that actually knows the answer.
+  const t = plugin._mergeFileTrack(TORRENT, FILE, {
+    title: "   ",
+    artist: "",
+    track_number: 0,
+    duration_secs: 0,
+  });
+  assert.equal(t.title, "Nude");
+  assert.equal(t.artist_name, null);
+  assert.equal(t.track_number, 3);
+  // A zero duration is "unknown", not a zero-length track.
+  assert.equal(t.duration_secs, null);
+});
+
 test("qbt URIs round-trip", () => {
   const uri = plugin._qbtUri("abc123", 7);
   assert.equal(uri, "qbt://abc123/7");
