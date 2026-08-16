@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.15.0
+
+**Adding a search result actually works now.** Verified end to end against a live
+qBittorrent: search → add → downloading.
+
+- **Results whose link is a description page now resolve.** Most indexers return
+  an HTML page rather than a `.torrent`, and qBittorrent can turn one into the
+  other — but only if it is told which search plugin produced the result. It
+  wasn't, so qBittorrent fetched the page, failed to parse it as a torrent
+  (`expected value … in bencoded string`) and discarded it — *after* answering
+  "Ok." to the add. Hence "Added to qBittorrent" and nothing there.
+- **An add that produces nothing now says so**, instead of reporting the
+  acknowledgement as success, and points at qBittorrent's log for the reason.
+- **A search plugin's own error rows are shown as warnings**, not as fake
+  torrents. A misconfigured indexer (a Jackett API-key error, say) reports its
+  failure as a result row complete with a "download" link; offering that as a
+  torrent was nonsense, and hiding it entirely would leave the indexer silently
+  missing from every search.
+
 ## 0.14.2
 
 **Fixes clicking a search result doing nothing.** Each result is now its own

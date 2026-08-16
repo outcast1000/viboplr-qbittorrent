@@ -782,6 +782,23 @@ function siteLabel(url) {
   return m ? m[1] : "";
 }
 
+// A qBittorrent search plugin reports its OWN failures as if they were results:
+// a row whose fileName is the error text, with -1 for size and swarm and its
+// help page as the link. Rendering those as torrents invites the user to
+// "download" a configuration error.
+function realSearchResults() {
+  var out = [];
+  for (var i = 0; i < searchResults.length; i++) {
+    if (!isPluginNotice(searchResults[i])) out.push(searchResults[i]);
+  }
+  return out;
+}
+
+function isPluginNotice(r) {
+  if (!r) return true;
+  return Number(r.fileSize) < 0 && Number(r.nbSeeders) < 0 && Number(r.nbLeechers) < 0;
+}
+
 // Seeders first — for a torrent it is the difference between a download and a
 // dead entry, and every indexer's own default sort. Ties break on size so the
 // order is stable rather than dependent on which indexer answered first.
@@ -1254,6 +1271,12 @@ function addTorrent(source, opts) {
   // What the thing is called, for matching it once qBittorrent has it. The
   // search result knows; a magnet carries it as dn.
   var nameHint = (opts && opts.name) || magnetDisplayName(source) || "";
+  // The search plugin that produced this result. Indexers routinely return a
+  // DESCRIPTION PAGE as the download link, and only their own plugin knows how
+  // to turn that into a .torrent — qBittorrent does the resolving, but only if
+  // told which plugin to use. Without it, it fetches the HTML, fails to bdecode
+  // it, and discards it, having already answered "Ok." to the add.
+  var downloader = (opts && opts.downloader) || "";
   if (!looksLikeTorrentSource(uri)) {
     api.ui.showNotification("That doesn't look like a magnet link or a .torrent URL");
     return Promise.resolve();
@@ -1278,8 +1301,11 @@ function addTorrent(source, opts) {
     render();
   }
   var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
+  // The plain add verifies its own outcome, so it needs the same snapshot.
+  var plainBefore = holdForSelection ? null : shallowHashSet(torrents);
   var expectedHash = holdForSelection ? magnetHash(uri) : null;
   if (category) form.category = category;
+  if (downloader) form.downloader = downloader;
   // Saving into a collection folder is what makes the finished download reach
   // the library at all — without it the files land somewhere the app never
   // scans. The path sent is the one qBittorrent understands, so a mapping is
@@ -1318,6 +1344,19 @@ function addTorrent(source, opts) {
       render();
       return refresh().then(function () {
         if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint);
+        // "Ok." only means qBittorrent ACCEPTED the request. For a URL it then
+        // fetches and parses in the background, and a page that isn't a torrent
+        // is discarded silently — so the plugin has to check that something
+        // actually turned up rather than reporting success on an acknowledgement.
+        return waitForAddedTorrent(plainBefore, expectedHash, nameHint, 0).then(function (hash) {
+          if (hash) return null;
+          api.log("warn", "add produced no torrent: " + uri, "qbittorrent");
+          api.ui.showNotification(
+            "qBittorrent accepted the link but no torrent appeared — it may not be a real .torrent file. " +
+              "Check qBittorrent's log (View → Log) for the reason."
+          );
+          return null;
+        });
       });
     })
     .catch(function (e) {
@@ -1708,7 +1747,7 @@ function addSearchResult(id, opts) {
     }
     return;
   }
-  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName });
+  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName, downloader: r.engineName });
 }
 
 // --- Library import ---------------------------------------------------------
@@ -3052,9 +3091,22 @@ function searchTabNodes() {
 
   children.push({
     type: "text",
-    content: searchResults.length + " results" + (searchStopped ? " — stopped early" : ""),
+    content: realSearchResults().length + " results" + (searchStopped ? " — stopped early" : ""),
     className: "muted"
   });
+
+  // Plugin error rows first, as warnings rather than fake torrents — an indexer
+  // that is misconfigured is worth saying out loud, since otherwise its results
+  // are simply missing with no explanation.
+  for (var n = 0; n < searchResults.length; n++) {
+    if (!isPluginNotice(searchResults[n])) continue;
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content: (searchResults[n].engineName ? searchResults[n].engineName + ": " : "") +
+        String(searchResults[n].fileName || "This search plugin reported a problem")
+    });
+  }
 
   // One section per result, with buttons that are ALWAYS visible.
   //
@@ -3065,6 +3117,7 @@ function searchTabNodes() {
   // was reported as. Buttons you can see beat a compact list.
   for (var i = 0; i < searchResults.length; i++) {
     var r = searchResults[i];
+    if (isPluginNotice(r)) continue;
     var id = searchResultId(r);
     children.push({
       type: "section",
