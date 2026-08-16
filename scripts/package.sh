@@ -11,7 +11,11 @@ FILE_URL="https://github.com/outcast1000/viboplr-qbittorrent/releases/latest/dow
 # Changelog: lines under the top-most "## " heading in CHANGELOG.md, if present.
 CHANGELOG=""
 if [ -f CHANGELOG.md ]; then
-  CHANGELOG=$(awk '/^## /{if(seen)exit; seen=1; next} seen{print}' CHANGELOG.md | sed '/^$/d' | head -50)
+  # Truncate with awk, not `head`: head closes the pipe at its limit, sed takes
+  # SIGPIPE, and `set -o pipefail` turns that into a failed release. It only bit
+  # once the changelog grew past the limit — every release before that had fewer
+  # lines than head asked for, so nothing ever closed the pipe early.
+  CHANGELOG=$(awk '/^## /{if(seen)exit; seen=1; next} seen{print}' CHANGELOG.md | sed '/^$/d' | awk 'NR<=50')
 fi
 
 rm -f qbittorrent.zip
