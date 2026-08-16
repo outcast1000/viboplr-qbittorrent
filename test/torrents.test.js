@@ -1,0 +1,327 @@
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { loadPlugin } = require("./harness/sandbox.js");
+
+const plugin = loadPlugin();
+
+// --- the row -----------------------------------------------------------------
+
+test("a torrent row leads with the name and keeps the size on the detail line", () => {
+  // The name is what you read the list for. Size sits with the file count
+  // rather than in a trailing column — the two answer one question together,
+  // and a column pulled them to opposite ends of the row.
+  const row = plugin._torrentRow({
+    hash: "abc",
+    name: "Some Artist - Album (1998) [FLAC]",
+    state: "downloading",
+    progress: 0.42,
+    total_size: 1024 * 1024 * 500,
+    dlspeed: 2048,
+    eta: 300,
+  });
+  assert.equal(row.id, "abc");
+  assert.equal(row.title, "Some Artist - Album (1998) [FLAC]");
+  assert.match(row.subtitle, /^Downloading/);
+  assert.match(row.subtitle, /500 MB/);
+  assert.equal(row.duration, undefined, "size is still in a trailing column too");
+});
+
+test("size is the torrent's real weight, not what happens to be selected", () => {
+  // `size` is the WANTED size and reads 0 B while nothing is picked; only
+  // `total_size` says what the torrent actually weighs.
+  const row = plugin._torrentRow({
+    hash: "abc", name: "x", state: "stoppedDL", progress: 0,
+    size: 0, total_size: 910 * 1024 * 1024,
+  });
+  assert.match(row.subtitle, /910 MB/);
+});
+
+test("size lands immediately after the file count", () => {
+  // They answer "how much is this?" together, so they read together.
+  const row = plugin._torrentRow({
+    hash: "abc", name: "x", state: "downloading", progress: 0.5,
+    total_size: 1024 * 1024 * 500, dlspeed: 1, eta: 60,
+  });
+  const parts = row.subtitle.split("  ·  ");
+  // No file count is known here, so size follows the status directly; with a
+  // count present it follows the count. Either way nothing comes between them.
+  assert.equal(parts[1], "500 MB");
+});
+
+test("a torrent row's status leads the subtitle", () => {
+  const rows = {
+    downloading: plugin._torrentRow({ hash: "a", name: "x", state: "downloading", progress: 0.5 }),
+    seeding: plugin._torrentRow({ hash: "b", name: "x", state: "stalledUP", progress: 1 }),
+    paused: plugin._torrentRow({ hash: "c", name: "x", state: "stoppedDL", progress: 0.2 }),
+  };
+  assert.match(rows.downloading.subtitle, /^Downloading/);
+  assert.match(rows.seeding.subtitle, /^Seeding/);
+  assert.match(rows.paused.subtitle, /^Paused/);
+});
+
+test("a torrent row shows transfer facts that match its direction", () => {
+  // A finished torrent has no ETA and no download speed worth printing; an
+  // unfinished one has no ratio worth printing.
+  const down = plugin._torrentRow({ hash: "a", name: "x", state: "downloading", progress: 0.5, dlspeed: 2048, eta: 300 });
+  assert.match(down.subtitle, /ETA 5m/);
+  assert.ok(!/ratio/.test(down.subtitle), down.subtitle);
+  const done = plugin._torrentRow({ hash: "b", name: "x", state: "stalledUP", progress: 1, ratio: 1.25 });
+  assert.match(done.subtitle, /ratio 1\.25/);
+  assert.ok(!/ETA/.test(done.subtitle), done.subtitle);
+});
+
+test("a magnet with no name yet still names the row", () => {
+  // Rendering a bare hash as the title is what an un-named row used to do, and
+  // a 40-character hex string tells the user nothing about what they added.
+  const row = plugin._torrentRow({
+    hash: "abc",
+    state: "metaDL",
+    progress: 0,
+    magnet_uri: "magnet:?xt=urn:btih:abc&dn=Some+Release+Name",
+  });
+  assert.equal(row.title, "Some Release Name");
+});
+
+test("a torrent row opens its contents on double-click", () => {
+  // Without a per-row action the host's selectable list only SELECTS on click.
+  // For a container, "open it" is the natural double-click — Play is the first
+  // overlay button instead.
+  assert.equal(plugin._torrentRow({ hash: "a", name: "x", state: "downloading" }).action, "qbt:show-files");
+});
+
+// --- the percentage badge ----------------------------------------------------
+
+test("the percentage floors rather than rounds", () => {
+  // 99.7% must not read as a finished download.
+  assert.equal(plugin._torrentPercent({ progress: 0.997 }), "99%");
+  assert.equal(plugin._torrentPercent({ progress: 1 }), "100%");
+  assert.equal(plugin._torrentPercent({ progress: 0 }), "0%");
+});
+
+test("a missing or absurd progress reads as 0%, not NaN%", () => {
+  assert.equal(plugin._torrentPercent({}), "0%");
+  assert.equal(plugin._torrentPercent({ progress: -1 }), "0%");
+  assert.equal(plugin._torrentPercent({ progress: 4 }), "100%");
+  assert.equal(plugin._torrentPercent(null), "0%");
+});
+
+test("the badge colour is the state, not the percentage", () => {
+  // 90% stopped and 90% downloading are the same number and completely
+  // different situations, and which rows are moving is what you scan for.
+  const moving = plugin._progressBand({ state: "downloading", progress: 0.9 }, false);
+  const stopped = plugin._progressBand({ state: "stoppedDL", progress: 0.9 }, false);
+  assert.notEqual(moving.fill, stopped.fill);
+});
+
+test("every torrent state maps to a distinguishable band", () => {
+  const band = plugin._progressBand;
+  const done = band({ state: "stalledUP", progress: 1 }, false);
+  const error = band({ state: "missingFiles", progress: 0.5 }, false);
+  const moving = band({ state: "downloading", progress: 0.5 }, false);
+  const stopped = band({ state: "stoppedDL", progress: 0.5 }, false);
+  const stalled = band({ state: "stalledDL", progress: 0.5 }, false);
+  const fills = new Set([done.fill, error.fill, moving.fill, stopped.fill].map(String));
+  assert.equal(fills.size, 4);
+  // Stalled is not moving, so it must not wear the "in progress" colour.
+  assert.notEqual(stalled.fill, moving.fill);
+  // A magnet fetching metadata IS working, so it does.
+  assert.equal(band({ state: "metaDL", progress: 0 }, false).fill, moving.fill);
+});
+
+test("a torrent waiting on the user is not filed with the ones they stopped", () => {
+  // Both are stopped in qBittorrent's eyes; only one of them needs a decision.
+  const awaiting = plugin._progressBand({ state: "stoppedDL", progress: 0 }, true);
+  const stopped = plugin._progressBand({ state: "stoppedDL", progress: 0 }, false);
+  assert.notEqual(awaiting.fill, stopped.fill);
+});
+
+test("a complete torrent is green whatever its state string says", () => {
+  const done = plugin._progressBand({ state: "stalledUP", progress: 1 }, false);
+  assert.equal(plugin._progressBand({ state: "pausedUP", progress: 1 }, false).fill, done.fill);
+  assert.equal(plugin._progressBand({ state: "queuedUP", progress: 1 }, false).fill, done.fill);
+});
+
+// --- file tiles --------------------------------------------------------------
+
+test("a deselected file reads 'skip', not a percentage that will never move", () => {
+  const skip = plugin._fileIconFor({ name: "extra.mkv", priority: 0, progress: 0 });
+  assert.match(decodeURIComponent(skip), />skip</);
+  // And it is not the colour of a file that IS downloading.
+  assert.notEqual(skip, plugin._fileIconFor({ name: "extra.mkv", priority: 1, progress: 0 }));
+});
+
+test("a file's tile carries its own progress", () => {
+  const running = { state: "downloading" };
+  assert.match(decodeURIComponent(plugin._fileIconFor({ name: "a.flac", priority: 1, progress: 1 }, running)), />100%</);
+  assert.match(decodeURIComponent(plugin._fileIconFor({ name: "a.flac", priority: 1, progress: 0.45 }, running)), />45%</);
+  // Floored, for the same reason a torrent's is.
+  assert.match(decodeURIComponent(plugin._fileIconFor({ name: "a.flac", priority: 1, progress: 0.999 }, running)), />99%</);
+});
+
+// --- the contents panel ------------------------------------------------------
+
+test("the contents panel survives its torrent being removed underneath it", () => {
+  // Removed here or in qBittorrent while the panel was open. Rendering an empty
+  // panel with no explanation and no way back is the failure this guards.
+  const nodes = plugin._torrentDetailNodes("not-a-real-hash");
+  assert.ok(nodes.length >= 2);
+  assert.match(nodes[0].content, /no longer in qBittorrent/);
+  const back = nodes.find((n) => n.type === "button" && n.action === "qbt:close-files");
+  assert.ok(back, "no way back to the list");
+});
+
+test("a torrent parked with nothing selected is not coloured as complete", () => {
+  // The shape qBittorrent really reports for it: 100% and seeding, because
+  // nothing is wanted so nothing is missing. Green here would tell the user
+  // their download had finished when not a byte of it exists — which is why the
+  // awaiting check has to sit ABOVE the completion check in progressBand.
+  const parked = { hash: "p", state: "stalledUP", progress: 1 };
+  const reallyDone = { hash: "d", state: "stalledUP", progress: 1 };
+  assert.notEqual(
+    plugin._progressBand(parked, true).fill,
+    plugin._progressBand(reallyDone, false).fill,
+  );
+  // And it wears the same colour as anything else waiting on the user.
+  assert.equal(
+    plugin._progressBand(parked, true).fill,
+    plugin._progressBand({ hash: "h", state: "stoppedDL", progress: 0 }, true).fill,
+  );
+});
+
+// --- per-file state ----------------------------------------------------------
+
+test("a deselected file is never described as downloading", () => {
+  const running = { state: "downloading" };
+  assert.equal(plugin._fileState({ priority: 0, progress: 0 }, running), "skipped");
+  assert.equal(plugin._fileStatusText({ priority: 0, progress: 0 }, running), "Not selected for download");
+  // Including when it is partly on disk already — deselecting a half-downloaded
+  // file stops it, and the remainder is not coming.
+  assert.equal(plugin._fileState({ priority: 0, progress: 0.45 }, running), "skipped");
+  assert.equal(plugin._fileStatusText({ priority: 0, progress: 0.45 }, running), "Not selected for download");
+});
+
+test("a priority that arrives as a string still means deselected", () => {
+  // THE bug: `typeof f.priority === "number"` rejected "0" and fell through to
+  // the default of 1, so a file the user had deselected came back marked for
+  // download and its row read "Downloading 0%" about a file that would never
+  // move. Where a default is needed the SAFE direction has to win.
+  assert.equal(plugin._fileState({ priority: "0", progress: 0 }, { state: "downloading" }), "skipped");
+  assert.equal(plugin._numOr("0", 1), 0);
+  assert.equal(plugin._numOr("0.42", 0), 0.42);
+  // And a genuinely absent field still falls back rather than becoming NaN.
+  assert.equal(plugin._numOr(undefined, 1), 1);
+  assert.equal(plugin._numOr(null, 1), 1);
+  assert.equal(plugin._numOr("", 1), 1);
+  assert.equal(plugin._numOr("nonsense", 1), 1);
+});
+
+test("a selected file in a stopped torrent is not 'Downloading'", () => {
+  // "Downloading" is a claim about the transfer, not about the file. A stopped
+  // torrent transfers nothing, so every one of its files reading
+  // "Downloading 0%" was simply untrue.
+  const file = { priority: 1, progress: 0 };
+  assert.equal(plugin._fileState(file, { state: "stoppedDL" }), "waiting");
+  assert.equal(plugin._fileStatusText(file, { state: "stoppedDL" }), "Selected  ·  0%");
+  assert.equal(plugin._fileState(file, { state: "pausedDL" }), "waiting");
+  assert.equal(plugin._fileState(file, { state: "missingFiles" }), "waiting");
+  // Running, and it is the real thing.
+  assert.equal(plugin._fileState(file, { state: "downloading" }), "downloading");
+  assert.match(plugin._fileStatusText(file, { state: "downloading" }), /^Downloading/);
+});
+
+test("with no torrent to ask, a file makes no claim about the transfer", () => {
+  assert.equal(plugin._fileState({ priority: 1, progress: 0.3 }, null), "waiting");
+});
+
+test("a finished file reads Downloaded whatever the torrent is doing", () => {
+  for (const state of ["downloading", "stoppedDL", "stalledUP"]) {
+    assert.equal(plugin._fileState({ priority: 1, progress: 1 }, { state }), "done");
+  }
+});
+
+test("the four file states are four different colours", () => {
+  const f = (priority, progress) => ({ name: "a.flac", priority, progress });
+  const fills = [
+    plugin._fileIconFor(f(0, 0), { state: "downloading" }),
+    plugin._fileIconFor(f(1, 1), { state: "downloading" }),
+    plugin._fileIconFor(f(1, 0.4), { state: "stoppedDL" }),
+    plugin._fileIconFor(f(1, 0.4), { state: "downloading" }),
+  ];
+  assert.equal(new Set(fills).size, 4, "two file states look identical");
+});
+
+// --- swarm / torrent info formatters -----------------------------------------
+
+test("availability of -1 is unknown, not zero copies", () => {
+  // qBittorrent sends -1 before it has worked it out. Rendering that as 0.00
+  // would say no reachable peer has the whole torrent, which is a verdict.
+  assert.equal(plugin._formatAvailability(-1), "—");
+  assert.equal(plugin._formatAvailability(undefined), "—");
+  assert.equal(plugin._formatAvailability(0), "0.00");
+  assert.equal(plugin._formatAvailability(2.3456), "2.35");
+  assert.equal(plugin._formatAvailability("1.5"), "1.50");
+});
+
+test("a duration is never the ETA sentinel", () => {
+  // formatEta returns ∞ past 100 days; a torrent seeding for four months has a
+  // real answer and "∞" is not it.
+  assert.equal(plugin._formatDuration(120 * 86400), "120d 0h");
+  assert.equal(plugin._formatDuration(90000), "1d 1h");
+  assert.equal(plugin._formatDuration(3900), "1h 5m");
+  assert.equal(plugin._formatDuration(300), "5m");
+  assert.equal(plugin._formatDuration(45), "45s");
+  assert.equal(plugin._formatDuration(0), "—");
+  assert.equal(plugin._formatDuration(undefined), "—");
+});
+
+test("ages read in the coarsest unit that is still true", () => {
+  const now = 1_700_000_000_000;
+  const ago = (secs) => plugin._formatAge(now / 1000 - secs, now);
+  assert.equal(ago(10), "just now");
+  assert.equal(ago(600), "10 min ago");
+  assert.equal(ago(3600), "an hour ago");
+  assert.equal(ago(86400), "yesterday");
+  assert.equal(ago(3 * 86400), "3 days ago");
+  assert.equal(ago(60 * 86400), "2 months ago");
+  assert.equal(ago(400 * 86400), "a year ago");
+  // Never asked, never happened.
+  assert.equal(plugin._formatAge(0, now), "—");
+  assert.equal(plugin._formatAge(undefined, now), "—");
+});
+
+// --- swarm on the row --------------------------------------------------------
+
+test("a row shows connected AND total for both swarms", () => {
+  // Either figure alone misleads: 2 connected is a routing problem if 300 exist
+  // and a dead release if 2 do.
+  const row = plugin._torrentRow({
+    hash: "a", name: "x", state: "downloading", progress: 0.5,
+    num_seeds: 12, num_complete: 40, num_leechs: 3, num_incomplete: 9,
+  });
+  assert.match(row.subtitle, /12\/40 seeds/);
+  assert.match(row.subtitle, /3\/9 leechers/);
+});
+
+test("a bare count agrees with itself", () => {
+  // "1 leechers" — the plural slipped through until a real render showed it.
+  // With a total it stays plural, because "1/9 seeds" reads as a ratio.
+  assert.equal(plugin._swarmText(1, -1, "leecher", "leechers"), "1 leecher");
+  assert.equal(plugin._swarmText(1, 9, "seed", "seeds"), "1/9 seeds");
+  assert.equal(plugin._swarmText(0, -1, "seed", "seeds"), "0 seeds");
+});
+
+test("an unreported swarm size is omitted, not faked", () => {
+  // qBittorrent sends -1 for "the tracker hasn't said". "12 of -1" is nonsense
+  // and "12 of 0" claims fewer exist than you are already connected to.
+  const seeds = (c, t) => plugin._swarmText(c, t, "seed", "seeds");
+  assert.equal(seeds(12, -1), "12 seeds");
+  assert.equal(seeds(12, undefined), "12 seeds");
+  assert.equal(seeds(12, 40), "12/40 seeds");
+  assert.equal(plugin._swarmText(0, 0, "leecher", "leechers"), "0/0 leechers");
+  // Inconsistent data (more connected than exist) drops the total rather than
+  // printing something self-contradictory.
+  assert.equal(seeds(12, 3), "12 seeds");
+  // A missing connected count is zero, not NaN.
+  assert.equal(seeds(undefined, 40), "0/40 seeds");
+  assert.equal(seeds(-1, 40), "0/40 seeds");
+});

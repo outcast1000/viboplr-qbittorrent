@@ -78,3 +78,51 @@ test("the plugin no longer tells anyone to enter a username or password", () => 
   assert.doesNotMatch(joined, /username/i);
   assert.doesNotMatch(joined, /password/i);
 });
+
+// --- single list ordering (replaced the Downloading/Completed/All tabs) ---
+
+test("a torrent waiting on the user sorts above everything else", () => {
+  // It is the only row that makes no progress until it is touched, so it must
+  // not be buried under a screen of active downloads.
+  assert.ok(
+    plugin._statusRank({ state: "stoppedDL", progress: 0 }, true) <
+      plugin._statusRank({ state: "downloading", progress: 0.5 }, false),
+  );
+});
+
+test("errors outrank anything still moving", () => {
+  assert.ok(
+    plugin._statusRank({ state: "missingFiles" }, false) <
+      plugin._statusRank({ state: "downloading", progress: 0.5 }, false),
+  );
+});
+
+test("finished torrents sort last, where the Completed tab used to be", () => {
+  const done = plugin._statusRank({ state: "stalledUP", progress: 1 }, false);
+  for (const t of [
+    { state: "downloading", progress: 0.5 },
+    { state: "queuedDL", progress: 0 },
+    { state: "stalledDL", progress: 0.1 },
+    { state: "stoppedDL", progress: 0.2 },
+  ]) {
+    assert.ok(plugin._statusRank(t, false) < done, JSON.stringify(t));
+  }
+});
+
+test("active beats stalled beats paused", () => {
+  const active = plugin._statusRank({ state: "downloading", progress: 0.5 }, false);
+  const stalled = plugin._statusRank({ state: "stalledDL", progress: 0.5 }, false);
+  const paused = plugin._statusRank({ state: "stoppedDL", progress: 0.5 }, false);
+  assert.ok(active < stalled);
+  assert.ok(stalled < paused);
+});
+
+test("fetching metadata ranks with the active downloads, not with the stalled", () => {
+  // metaDL is qBittorrent working on the torrent; it just has nothing to show
+  // for it yet.
+  assert.equal(
+    plugin._statusRank({ state: "metaDL", progress: 0 }, false),
+    plugin._statusRank({ state: "downloading", progress: 0.1 }, false),
+  );
+});
+

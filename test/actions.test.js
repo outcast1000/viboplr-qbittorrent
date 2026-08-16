@@ -60,7 +60,8 @@ test("the handler set covers the core buttons", () => {
     "qbt:search",
     "qbt:search-add",
     "qbt:search-view",
-    "qbt:toggle-files",
+    "qbt:show-files",
+    "qbt:close-files",
     "qbt:play-torrent",
     "qbt:play-file",
     "qbt:enqueue-file",
@@ -70,7 +71,10 @@ test("the handler set covers the core buttons", () => {
     "qbt:discard-peek",
     "qbt:delete-ask",
     "qbt:import",
-    "qbt:only-audio",
+    "qbt:file-download",
+    "qbt:file-skip",
+    "qbt:file-filter",
+    "qbt:file-filter-clear",
     "qbt:save",
   ]) {
     assert.ok(registered.has(id), `missing handler: ${id}`);

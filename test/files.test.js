@@ -130,8 +130,8 @@ test("playableFiles copes with an empty or absent list", () => {
   assert.deepEqual(plugin._playableFiles(undefined), []);
 });
 
-test("partitionAudio separates the tracks from everything else", () => {
-  const { audio, others } = plugin._partitionAudio([
+test("partitionByKind separates audio, video and everything else", () => {
+  const { audio, video, other, all } = plugin._partitionByKind([
     { index: 0, name: "01 Song.flac" },
     { index: 1, name: "cover.jpg" },
     { index: 2, name: "02 Song.flac" },
@@ -139,29 +139,175 @@ test("partitionAudio separates the tracks from everything else", () => {
     { index: 4, name: "info.nfo" },
   ]);
   assert.deepEqual(audio, [0, 2]);
-  // Video counts as "other": on a music release the video extra is usually the
-  // bulk of the download and the thing being skipped.
-  assert.deepEqual(others, [1, 3, 4]);
+  // Video is its own group now: the Download toolbar offers it as a choice,
+  // where the old audio-only split lumped it in with the scans and the .nfo.
+  assert.deepEqual(video, [3]);
+  assert.deepEqual(other, [1, 4]);
+  assert.deepEqual(all, [0, 1, 2, 3, 4]);
 });
 
-test("partitionAudio keeps file index 0 and ignores entries with no index", () => {
+test("partitionByKind keeps file index 0 and ignores entries with no index", () => {
   // Index 0 is a real file; a truthiness check would drop the first track of
   // every torrent.
-  const { audio, others } = plugin._partitionAudio([
+  const { audio, all } = plugin._partitionByKind([
     { index: 0, name: "a.flac" },
     { name: "no-index.flac" },
     null,
   ]);
   assert.deepEqual(audio, [0]);
-  assert.deepEqual(others, []);
+  assert.deepEqual(all, [0]);
 });
 
-test("partitionAudio on an all-audio torrent leaves nothing to skip", () => {
-  // The caller uses this to decide whether to offer the bulk button at all.
-  const { audio, others } = plugin._partitionAudio([
+test("partitionByKind on an all-audio torrent leaves the other groups empty", () => {
+  // The toolbar disables a button whose group is empty, so this decides whether
+  // Video is offered at all.
+  const { audio, video, other } = plugin._partitionByKind([
     { index: 0, name: "a.flac" },
     { index: 1, name: "b.flac" },
   ]);
   assert.deepEqual(audio, [0, 1]);
-  assert.deepEqual(others, []);
+  assert.deepEqual(video, []);
+  assert.deepEqual(other, []);
+});
+
+
+
+// --- the contents filter -----------------------------------------------------
+
+test("the filter matches anywhere in the path, case-insensitively", () => {
+  const m = plugin._matchesFilter;
+  assert.equal(m("01 - Some Song.FLAC", "flac"), true);
+  assert.equal(m("Extras/Making Of.mkv", "EXTRAS"), true);
+  // The full path, not just the basename — "extras" has to find a whole folder,
+  // which on a release full of scans and samples is what you select or skip in
+  // one go.
+  assert.equal(m("extras/bonus.mkv", "extras"), true);
+  assert.equal(m("01 - Song.flac", "mkv"), false);
+});
+
+test("windows separators match the same way", () => {
+  // Built from a char code so no editor or shell can quietly turn the backslash
+  // into an escape — `"extras\bonus.mkv"` is a BACKSPACE, and the test that
+  // contained it passed for a reason unrelated to path separators.
+  const BACKSLASH = String.fromCharCode(92);
+  assert.equal(plugin._matchesFilter("extras" + BACKSLASH + "bonus.mkv", "extras/"), true);
+  assert.equal(plugin._matchesFilter("extras" + BACKSLASH + "bonus.mkv", "extras"), true);
+});
+
+test("every space-separated term must match", () => {
+  // So "live flac" narrows rather than widening, which is what a filter box is
+  // for — an OR would return more results the more you typed.
+  const m = plugin._matchesFilter;
+  assert.equal(m("Live At Wembley.flac", "live flac"), true);
+  assert.equal(m("Studio Take.flac", "live flac"), false);
+  assert.equal(m("Live At Wembley.mkv", "live flac"), false);
+});
+
+test("an empty or whitespace filter shows everything", () => {
+  const m = plugin._matchesFilter;
+  assert.equal(m("anything.flac", ""), true);
+  assert.equal(m("anything.flac", "   "), true);
+  assert.equal(m("anything.flac", null), true);
+  assert.equal(m("anything.flac", undefined), true);
+});
+
+test("filterFiles keeps the matches and never mutates the input", () => {
+  const files = [
+    { index: 0, name: "01.flac" },
+    { index: 1, name: "extras/clip.mkv" },
+    { index: 2, name: "02.flac" },
+  ];
+  const kept = plugin._filterFiles(files, "flac");
+  assert.deepEqual(kept.map((f) => f.index), [0, 2]);
+  assert.equal(files.length, 3);
+  // An empty filter returns a copy, not the caller's array.
+  const all = plugin._filterFiles(files, "");
+  assert.deepEqual(all.map((f) => f.index), [0, 1, 2]);
+  assert.notEqual(all, files);
+});
+
+// --- folders in the row title ------------------------------------------------
+
+test("a file's folder becomes part of its row title", () => {
+  // parseFileTrack strips the path, so the row used to show leaves only: two
+  // "01"s from CD1 and CD2 were the same row twice, and a folder of scans was
+  // indistinguishable from tracks at the torrent's root.
+  assert.equal(plugin._fileFolder("CD1/01 - Song.flac"), "CD1");
+  assert.equal(plugin._fileFolder("extras/scans/front.jpg"), "extras / scans");
+  assert.equal(plugin._fileFolder("01 - Song.flac"), "");
+  assert.equal(plugin._fileFolder(""), "");
+  assert.equal(plugin._fileFolder(null), "");
+});
+
+test("either separator works — the path comes from the .torrent, not this machine", () => {
+  const B = String.fromCharCode(92);
+  assert.equal(plugin._fileFolder("extras" + B + "bonus.mkv"), "extras");
+  assert.equal(plugin._baseName("extras" + B + "bonus.mkv"), "bonus.mkv");
+});
+
+test("empty path segments don't become empty crumbs", () => {
+  // A leading slash or a doubled one would otherwise render as " / extras".
+  assert.equal(plugin._fileFolder("/extras/a.flac"), "extras");
+  assert.equal(plugin._fileFolder("a//b/c.flac"), "a / b");
+});
+
+test("baseName keeps a file that has no folder", () => {
+  assert.equal(plugin._baseName("cover.jpg"), "cover.jpg");
+  assert.equal(plugin._baseName(""), "");
+});
+
+// --- the torrent's own wrapper folder ----------------------------------------
+
+test("the folder every file shares is not repeated on every row", () => {
+  // Almost every torrent wraps its contents in one directory named after the
+  // release. The hero title above the list already says it, so repeating it on
+  // each row is a column of the same words that pushes the distinguishing part
+  // off the end.
+  const files = [
+    { name: "Artist - Album [FLAC]/CD1/01.flac" },
+    { name: "Artist - Album [FLAC]/CD2/01.flac" },
+    { name: "Artist - Album [FLAC]/folder.jpg" },
+  ];
+  const common = plugin._commonFolder(files);
+  assert.deepEqual(common, ["Artist - Album [FLAC]"]);
+  assert.equal(plugin._fileFolder(files[0].name, common), "CD1");
+  assert.equal(plugin._fileFolder(files[2].name, common), "");
+});
+
+test("everything under one folder strips down to bare filenames", () => {
+  // Nothing distinguishes the rows by folder, so the crumb is pure noise.
+  const files = [
+    { name: "Release/Album/01.flac" },
+    { name: "Release/Album/02.flac" },
+  ];
+  assert.deepEqual(plugin._commonFolder(files), ["Release", "Album"]);
+  assert.equal(plugin._fileFolder(files[0].name, plugin._commonFolder(files)), "");
+});
+
+test("a file at the root means nothing is stripped from the others", () => {
+  // There is no shared wrapper, so removing a segment from the nested files
+  // would be inventing one.
+  const files = [
+    { name: "readme.nfo" },
+    { name: "CD1/01.flac" },
+  ];
+  assert.deepEqual(plugin._commonFolder(files), []);
+  assert.equal(plugin._fileFolder("CD1/01.flac", []), "CD1");
+});
+
+test("a single wrapped file still loses its wrapper", () => {
+  const files = [{ name: "Some Release/track.flac" }];
+  assert.deepEqual(plugin._commonFolder(files), ["Some Release"]);
+  assert.equal(plugin._fileFolder(files[0].name, plugin._commonFolder(files)), "");
+});
+
+test("commonFolder copes with an empty or absent list", () => {
+  assert.deepEqual(plugin._commonFolder([]), []);
+  assert.deepEqual(plugin._commonFolder(undefined), []);
+});
+
+test("a folder that merely starts the same is not a shared folder", () => {
+  // Segment-wise, not string-prefix: "CD1" and "CD10" share no folder.
+  const files = [{ name: "CD1/a.flac" }, { name: "CD10/b.flac" }];
+  assert.deepEqual(plugin._commonFolder(files), []);
 });

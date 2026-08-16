@@ -41,6 +41,15 @@ var MAX_POLL_MS = 60000;
 // dev copy can still land on one — so it is checked at runtime and SAID, rather
 // than surfacing later as a baffling "session rejected".
 var MIN_HOST_VERSION = "1.0.27";
+// The host release that classifies a non-http stream candidate properly instead
+// of assuming every candidate is a network stream. Below it, reporting a
+// `file://` candidate breaks playback outright — see the stream resolver.
+//
+// Everything else this plugin gained alongside it degrades on its own: an older
+// host ignores `openOnClick`, `plain`, `buttons`, `selectionPresets` and a row's
+// `actions` subset, which costs polish and not function. Only this one needs a
+// gate, so only this one has one.
+var HOST_FILE_CANDIDATE = "1.0.28";
 
 // The qBittorrent this plugin requires. API keys arrived in 5.2 and this is the
 // build the plugin is developed against — below it the only sign-in it has does
@@ -94,12 +103,14 @@ var hostTooOld = false; // this Viboplr predates MIN_HOST_VERSION
 
 // Data.
 var torrents = {};
+// Kept because /sync/maindata sends it as a delta that mergeMaindata has to
+// carry forward — nothing renders it since the list's stats row was removed.
 var serverState = {};
 var rid = 0;
 var connected = false;
 var lastError = null;
 var busy = null; // hash currently mid-action, for button disabling
-var pendingDelete = null; // hash awaiting delete confirmation
+var pendingDelete = null; // hashes awaiting delete confirmation
 
 // Files (per torrent, fetched on demand when a row is expanded).
 var filesByHash = {};
@@ -113,6 +124,14 @@ var metadataFetching = {};
 // Added only to look inside. Same paused hold, different framing: nothing has
 // been decided, so discarding is the expected outcome, not the exception.
 var peekedTorrents = {};
+// Peeked torrents that are now RUNNING with every file deselected, so that
+// including a file starts it downloading on the spot rather than after a second
+// "Start download" press. See armPeek().
+var armedPeek = {};
+// Which tab the contents panel is showing. Global rather than per torrent: it is
+// a lens on the panel, not a property of the torrent, and carrying it across
+// means opening the next torrent shows what you were last looking at.
+var detailTab = "files";
 // Seconds spent waiting on each torrent's metadata. A magnet can take a minute,
 // and a counter that climbs is the one honest answer to "is this still working?"
 // — the same reason the host's download modal always shows elapsed time.
@@ -144,7 +163,7 @@ var categoryEnsured = false;
 var previousCategory = "";
 
 // UI.
-var activeTab = "downloading";
+var activeTab = "torrents";
 var pollTimer = null;
 var stopped = false;
 
@@ -187,6 +206,15 @@ function compareVersions(a, b) {
 function supportsStartStop(version) {
   if (!version) return false;
   return compareVersions(version, "2.11") >= 0;
+}
+
+// A JSON number that may have arrived as a numeric string. `null`/`""`/absent
+// and anything unparseable fall back, but "0" and "0.42" are honoured — the
+// whole point is that a real zero must not be mistaken for a missing field.
+function numOr(v, fallback) {
+  if (v === null || v === undefined || v === "") return fallback;
+  var n = Number(v);
+  return isFinite(n) ? n : fallback;
 }
 
 function formatBytes(n) {
@@ -274,6 +302,39 @@ function isComplete(t) {
 
 function isPaused(t) {
   return /^(paused|stopped)/.test(String((t && t.state) || ""));
+}
+
+// Every file in this torrent is set to "don't download".
+//
+// This is the state "View contents" deliberately parks a torrent in, and it is
+// also reachable by deselecting everything by hand — so the test is on the
+// FILES, not on the flag that got us there. Unknown files answer false, which
+// leaves every caller behaving exactly as it did before this existed.
+function nothingSelected(t) {
+  var files = t && filesByHash[t.hash];
+  if (!files || !files.length) return false;
+  for (var i = 0; i < files.length; i++) {
+    if (numOr(files[i].priority, 1) !== 0) return false;
+  }
+  return true;
+}
+
+// "Nothing will happen to this torrent until the user decides something" —
+// either we are holding it for a decision, or it wants no files at all.
+function needsChoice(t) {
+  return !!(t && (pendingSelection[t.hash] || nothingSelected(t)));
+}
+
+// isComplete() answers what qBittorrent thinks. This answers what the user
+// would call finished, and the two differ in one important case: a torrent with
+// every file deselected has nothing left to want, so qBittorrent reports it
+// 100% complete and starts seeding it. True, and completely misleading — not a
+// byte has been downloaded. Anything that announces, imports, counts or colours
+// a finished torrent must ask this one instead.
+function isFinished(t) {
+  if (!t) return false;
+  if (pendingSelection[t.hash] || nothingSelected(t)) return false;
+  return isComplete(t);
 }
 
 function isErrored(t) {
@@ -501,6 +562,351 @@ function mediaKindOf(name) {
   return null;
 }
 
+// What a torrent NAME says it holds. A different question from mediaKindOf,
+// which reads a file extension: a search result is a RELEASE name, and the only
+// evidence in one is the tags people put there — "1080p x265", "[FLAC 24bit]",
+// "320kbps". Both halves are boundary-anchored on non-alphanumerics rather than
+// \b, so "24k" can't read as the "4K" tag and "Wave" can't read as "WAV".
+var VIDEO_TAGS = /(?:^|[^a-z0-9])(?:2160p|1440p|1080[pi]|720p|576p|480p|4k|8k|uhd|hdr|x26[45]|h ?\.?26[45]|hevc|avc|xvid|divx|blu-?ray|bdrip|brrip|bdremux|remux|web-?rip|hdtv|pdtv|dvd-?rip|dvd[59r]|hdrip|camrip|telesync|mkv|avi|webm|mp4|m4v|s\d{1,2}e\d{1,2})(?:[^a-z0-9]|$)/i;
+var AUDIO_TAGS = /(?:^|[^a-z0-9])(?:flac|mp3|aac|alac|wav|aiff?|ogg|opus|m4a|m4b|ape|wma|dsd|dsf|dff|mqa|lossless|hi-?res|vinyl|cd-?rip|discography|\d{2,4} ?kbps|(?:16|24) ?-? ?bits?|\d{2,3}(?:\.\d)? ?khz)(?:[^a-z0-9]|$)/i;
+
+// Video wins a tie on purpose. "Live At Wembley 1080p BluRay FLAC" is a video
+// file whose audio track happens to be FLAC; calling it audio would promise an
+// album and hand over four gigabytes of concert footage.
+function classifyTorrentMedia(name) {
+  var s = String(name || "");
+  if (VIDEO_TAGS.test(s)) return "video";
+  if (AUDIO_TAGS.test(s)) return "audio";
+  // A single-file torrent is usually named after the file itself, so its
+  // extension is the last thing worth asking.
+  return mediaKindOf(s);
+}
+
+// The row thumbnail. The host draws INITIALS from the row title when a row has
+// no image, which for a release name is two arbitrary letters repeated down the
+// whole list — it occupies the most eye-catching part of the row and says
+// nothing. A glyph for what the torrent actually is goes there instead.
+//
+// A data-URI SVG is the only thing a plugin can put in an image slot, so the
+// colour is baked in rather than following the skin. It is therefore a mid-grey
+// that stays legible on both light and dark surfaces, and it sits on the host's
+// own themed `--bg-surface` tile. The viewBox is inset by 4 units because the
+// host's `object-fit: cover` would otherwise crop the glyph to the tile edges.
+var ICON_COLOR = "#8b9096";
+
+// A musical note, a film strip, and a plain sheet for "the name doesn't say".
+// Feather geometry, drawn in a 24x24 box and scaled into the tile below.
+var MEDIA_GLYPHS = {
+  audio: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  video:
+    '<rect x="2" y="2" width="20" height="20" rx="2.2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/>',
+  unknown: '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/>'
+};
+
+// Seeder bands. The seeder count is the one number that decides whether a
+// torrent downloads at all or sits at 0 B/s forever, so it is ON the tile and
+// colour-coded: while scrolling a list you read a colour, you do not read the
+// third value of a subtitle sentence. Thresholds are the user's: >100 healthy,
+// >10 thin, at or below that effectively dead.
+//
+// Each band carries its own text colour rather than sharing one, because the
+// yellow that reads as yellow needs dark text and the other two need light —
+// picking one for all three makes at least one badge unreadable.
+var SEED_BANDS = [
+  { over: 100, fill: "#1a7f37", text: "#ffffff" },
+  { over: 10, fill: "#e3b341", text: "#1a1a1a" },
+  { over: -1, fill: "#bf2c37", text: "#ffffff" }
+];
+// Not a fourth band: "the indexer didn't say" is not a verdict on the swarm,
+// and colouring it red would condemn results that may be perfectly healthy.
+var SEED_UNKNOWN = { fill: "#6b7075", text: "#ffffff" };
+
+function seedBand(seeds) {
+  if (seeds === null || seeds === undefined) return SEED_UNKNOWN;
+  for (var i = 0; i < SEED_BANDS.length; i++) {
+    if (seeds > SEED_BANDS[i].over) return SEED_BANDS[i];
+  }
+  return SEED_BANDS[SEED_BANDS.length - 1];
+}
+
+// Four characters is all that fits legibly across a 40px tile, so anything past
+// 999 is thousands. The exact figure is still in the subtitle for whoever wants
+// it — the badge only has to answer "is this worth clicking?".
+function formatSeedCount(seeds) {
+  if (seeds === null || seeds === undefined) return "?";
+  if (seeds < 1000) return String(seeds);
+  if (seeds < 10000) return (Math.floor(seeds / 100) / 10).toFixed(1) + "k";
+  return Math.round(seeds / 1000) + "k";
+}
+
+// Progress bands for the Torrents list. The colour is the torrent's STATE, not
+// its percentage: 90% stopped and 90% downloading are the same number and
+// completely different situations, and the one thing you scan a list of
+// transfers for is which rows are actually moving.
+var PROGRESS_BANDS = {
+  error: { fill: "#bf2c37", text: "#ffffff" },
+  done: { fill: "#1a7f37", text: "#ffffff" },
+  moving: { fill: "#1f6feb", text: "#ffffff" },
+  waiting: { fill: "#e3b341", text: "#1a1a1a" },
+  stopped: { fill: "#6b7075", text: "#ffffff" }
+};
+
+function progressBand(t, awaiting) {
+  if (isErrored(t)) return PROGRESS_BANDS.error;
+  // Above the completion check, not below it: a torrent with nothing selected
+  // reports 100% complete, and green would tell the user their download had
+  // finished when not a byte of it exists. Grey would file it with the ones
+  // they stopped on purpose; this one is waiting on them.
+  if (awaiting) return PROGRESS_BANDS.waiting;
+  if (isComplete(t)) return PROGRESS_BANDS.done;
+  if (isPaused(t)) return PROGRESS_BANDS.stopped;
+  if (/^(downloading|forcedDL|metaDL|forcedMetaDL)$/.test(String((t && t.state) || ""))) return PROGRESS_BANDS.moving;
+  return PROGRESS_BANDS.waiting; // queued, stalled, checking, moving, allocating
+}
+
+function torrentPercent(t) {
+  var v = Number((t && t.progress) || 0);
+  if (!isFinite(v) || v < 0) v = 0;
+  if (v > 1) v = 1;
+  // Floor, not round: 99.7% must not read as a finished download.
+  return Math.floor(v * 100) + "%";
+}
+
+// The tile: the media glyph over a colour-coded badge. A data-URI SVG is the
+// only thing a plugin can put in an image slot, so every colour here is baked in
+// rather than following the skin — the glyph grey is chosen to stay legible on
+// both light and dark surfaces, and the badge is opaque so its own contrast
+// holds whatever the host's `--bg-surface` is underneath.
+//
+// 32x32 units over a 40px tile. The glyph is scaled to 0.79 and sits above y=20;
+// the badge owns the bottom 11 units (~14px), enough for bold 8-unit digits —
+// four characters' worth, which is what caps both "1.2k" and "100%".
+function mediaTileSvg(kind, label, band) {
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+    '<g transform="translate(6.5 1) scale(0.79)" fill="none" stroke="' +
+    ICON_COLOR +
+    '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    (MEDIA_GLYPHS[kind] || MEDIA_GLYPHS.unknown) +
+    "</g>" +
+    '<rect x="0" y="21" width="32" height="11" fill="' +
+    band.fill +
+    '"/><text x="16" y="29.3" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="8" font-weight="700" fill="' +
+    band.text +
+    '">' +
+    label +
+    "</text></svg>"
+  );
+}
+
+// Built on demand but cached: both lists re-render on every poll, and a tile
+// depends only on these three values.
+var tileCache = {};
+
+function tileIcon(kind, label, band) {
+  var key = (kind || "unknown") + ":" + label + ":" + band.fill;
+  if (!tileCache[key]) tileCache[key] = "data:image/svg+xml," + encodeURIComponent(mediaTileSvg(kind, label, band));
+  return tileCache[key];
+}
+
+// Search results: seeder count, banded by health.
+function mediaIconFor(kind, seeds) {
+  return tileIcon(kind, formatSeedCount(seeds), seedBand(seeds));
+}
+
+// Torrents: percentage downloaded, banded by state. A torrent awaiting a choice
+// reads 0% whatever qBittorrent says — with nothing selected it reports 100%,
+// having downloaded none of it.
+function torrentIconFor(t, awaiting) {
+  return tileIcon(
+    classifyTorrentMedia(t && t.name),
+    awaiting ? "0%" : torrentPercent(t),
+    progressBand(t, awaiting)
+  );
+}
+
+// What one file inside a torrent is doing. Four states, and the distinction
+// that was missing is the last one: whether a selected file is actually
+// DOWNLOADING depends on the torrent, not on the file. A file in a stopped
+// torrent is selected and going nowhere, and calling that "Downloading 0%" is
+// a claim about the transfer that is simply untrue.
+function fileState(f, torrent) {
+  if (numOr(f && f.priority, 1) === 0) return "skipped";
+  if (numOr(f && f.progress, 0) >= 1) return "done";
+  // No torrent to ask (the contents of something already removed) — describe
+  // the file, not a transfer we can't vouch for.
+  if (!torrent || isPaused(torrent) || isErrored(torrent)) return "waiting";
+  return "downloading";
+}
+
+function filePercent(f) {
+  return Math.floor(numOr(f && f.progress, 0) * 100) + "%";
+}
+
+function fileStatusText(f, torrent) {
+  switch (fileState(f, torrent)) {
+    case "skipped":
+      return "Not selected for download";
+    case "done":
+      return "Downloaded";
+    case "waiting":
+      return "Selected  ·  " + filePercent(f);
+    default:
+      return "Downloading  ·  " + filePercent(f);
+  }
+}
+
+// How long something has been running. Deliberately not formatEta, which
+// returns its ∞ sentinel past 100 days — a torrent that has been seeding for
+// four months has a real answer and "∞" is not it.
+function formatDuration(secs) {
+  var v = numOr(secs, 0);
+  if (v <= 0) return "—";
+  var days = Math.floor(v / 86400);
+  var hours = Math.floor((v % 86400) / 3600);
+  var mins = Math.floor((v % 3600) / 60);
+  if (days) return days + "d " + hours + "h";
+  if (hours) return hours + "h " + mins + "m";
+  if (mins) return mins + "m";
+  return Math.floor(v) + "s";
+}
+
+// "12/40 seeds" — connected out of what the tracker says exists. Both halves,
+// because either alone misleads: 2 connected is either a routing problem or a
+// dead release depending on whether there are 300 out there or 2.
+//
+// The total is omitted rather than faked when qBittorrent doesn't have it: it
+// sends -1 for "the tracker hasn't said", and "12 of -1" is nonsense while
+// "12 of 0" claims fewer exist than you are already talking to.
+function swarmText(connected, total, one, many) {
+  var c = numOr(connected, 0);
+  if (c < 0) c = 0;
+  var tot = numOr(total, -1);
+  // "12/40 seeds" reads as a ratio and stays plural; a bare count agrees with
+  // itself, so a lone connection is "1 leecher".
+  if (tot >= c) return c + "/" + tot + " " + many;
+  return c + " " + (c === 1 ? one : many);
+}
+
+// qBittorrent reports -1 when it hasn't worked availability out yet, which must
+// not render as a torrent nobody can complete.
+function formatAvailability(v) {
+  var n = numOr(v, -1);
+  if (n < 0) return "—";
+  return n.toFixed(2);
+}
+
+// How long ago, in the coarsest unit that is still true. An exact timestamp is
+// not what anyone asks of a download — "3 days ago" is.
+function formatAge(unixSeconds, nowMs) {
+  var ts = numOr(unixSeconds, 0);
+  if (ts <= 0) return "—";
+  var secs = Math.floor(((nowMs || Date.now()) - ts * 1000) / 1000);
+  if (secs < 0) secs = 0;
+  if (secs < 90) return "just now";
+  var mins = Math.round(secs / 60);
+  if (mins < 60) return mins + " min ago";
+  var hours = Math.round(mins / 60);
+  if (hours < 24) return hours === 1 ? "an hour ago" : hours + " hours ago";
+  var days = Math.round(hours / 24);
+  if (days < 30) return days === 1 ? "yesterday" : days + " days ago";
+  var months = Math.round(days / 30);
+  if (months < 12) return months === 1 ? "a month ago" : months + " months ago";
+  var years = Math.round(months / 12);
+  return years === 1 ? "a year ago" : years + " years ago";
+}
+
+// Per-torrent file filter text. Keyed by hash to match the host input's own
+// `stateKey` memory — a single shared string would show one torrent's filter
+// text over another torrent's file list the moment you opened a second one.
+var fileFilters = {};
+
+function filterFor(hash) {
+  return fileFilters[hash] || "";
+}
+
+// Space-separated terms, ALL of which must appear, matched case-insensitively
+// against the file's full path. The path and not just the basename, so "extras"
+// finds a whole folder — which on a release full of scans and samples is the
+// thing you actually want to select or skip in one go.
+function matchesFilter(name, query) {
+  var q = String(query == null ? "" : query).trim().toLowerCase();
+  if (!q) return true;
+  var hay = String(name || "").replace(/\\/g, "/").toLowerCase();
+  var terms = q.split(/\s+/);
+  for (var i = 0; i < terms.length; i++) {
+    if (hay.indexOf(terms[i]) === -1) return false;
+  }
+  return true;
+}
+
+function filterFiles(files, query) {
+  var list = files || [];
+  if (!String(query == null ? "" : query).trim()) return list.slice();
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (matchesFilter(list[i].name, query)) out.push(list[i]);
+  }
+  return out;
+}
+
+// The files the contents panel is currently SHOWING. The single source of truth
+// for both the list and the Download toolbar above it — the buttons act on what
+// you can see, so a button labelled "Audio (3)" must be reading the same three
+// files the list is drawing.
+function filesInView(hash) {
+  return filterFiles(filesByHash[hash], filterFor(hash));
+}
+
+// Files grouped by what they are, for the Audio / Video selection buttons.
+// Returns index arrays, which is what /torrents/filePrio takes.
+function partitionByKind(files) {
+  var out = { audio: [], video: [], other: [], all: [] };
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    if (!f || typeof f.index !== "number") continue;
+    out.all.push(f.index);
+    var kind = mediaKindOf(f.name);
+    if (kind === "audio") out.audio.push(f.index);
+    else if (kind === "video") out.video.push(f.index);
+    else out.other.push(f.index);
+  }
+  return out;
+}
+
+// How much of a torrent the user has actually asked for. The counterpart to the
+// file list's per-row state, summarised for the toolbar above it.
+function selectionSummary(files) {
+  var list = files || [];
+  var picked = 0;
+  var bytes = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (numOr(list[i].priority, 1) === 0) continue;
+    picked++;
+    bytes += numOr(list[i].size, 0);
+  }
+  return { picked: picked, total: list.length, bytes: bytes };
+}
+
+// Files inside a torrent. The badge answers the question the contents list
+// exists for — is this file coming, and how much of it is here — so a file the
+// user deselected reads "skip" in grey rather than sitting at a percentage that
+// will never move.
+function fileIconFor(f, torrent) {
+  var kind = mediaKindOf(f && f.name) || "unknown";
+  switch (fileState(f, torrent)) {
+    case "skipped":
+      return tileIcon(kind, "skip", PROGRESS_BANDS.stopped);
+    case "done":
+      return tileIcon(kind, "100%", PROGRESS_BANDS.done);
+    case "waiting":
+      return tileIcon(kind, filePercent(f), PROGRESS_BANDS.waiting);
+    default:
+      return tileIcon(kind, filePercent(f), PROGRESS_BANDS.moving);
+  }
+}
+
 // qBittorrent reports paths in ITS OWN filesystem's style, which is not
 // necessarily this machine's — a Windows client talking to a Linux seedbox is
 // the normal case. So the separator is inferred from the path itself, never
@@ -565,6 +971,62 @@ function isLikelyLocalHost(url) {
 // reads tags off an arbitrary file, so this is genuinely all there is — which is
 // why importing into the library (where lofty reads real tags) stays the better
 // path and this one is "hear it now".
+// A torrent's paths are relative and may use either separator — qBittorrent
+// reports whatever the .torrent carries, not this machine's style.
+function baseName(name) {
+  var rel = String(name || "").replace(/\\/g, "/");
+  var parts = rel.split("/");
+  return parts[parts.length - 1] || rel;
+}
+
+// The folder segments of a file's path, without the filename.
+function folderSegments(name) {
+  var rel = String(name || "").replace(/\\/g, "/");
+  var slash = rel.lastIndexOf("/");
+  if (slash < 0) return [];
+  var segs = rel.substring(0, slash).split("/");
+  var out = [];
+  for (var i = 0; i < segs.length; i++) if (segs[i]) out.push(segs[i]);
+  return out;
+}
+
+// The folders EVERY file shares. Almost every torrent wraps its contents in one
+// directory named after the release, so that segment was repeated on every row
+// while the hero title above already said it — a column of the same words, and
+// the part that actually distinguishes two files pushed off the end.
+//
+// Computed across all files, not the filtered view: a filter must narrow the
+// list, not silently re-title what is left.
+function commonFolder(files) {
+  var list = files || [];
+  if (!list.length) return [];
+  var common = null;
+  for (var i = 0; i < list.length; i++) {
+    var segs = folderSegments(list[i].name);
+    if (common === null) {
+      common = segs;
+      continue;
+    }
+    var n = 0;
+    while (n < common.length && n < segs.length && common[n] === segs[n]) n++;
+    common = common.slice(0, n);
+    // A file at the root means there is no shared wrapper at all, and nothing
+    // may be stripped from the others.
+    if (!common.length) return [];
+  }
+  return common || [];
+}
+
+// The folder a file sits in, RELATIVE to `common`, as a readable prefix
+// ("CD1", "extras / scans"). Empty for a file that sits directly in it.
+function fileFolder(name, common) {
+  var segs = folderSegments(name);
+  var skip = (common || []).length;
+  var out = [];
+  for (var i = skip; i < segs.length; i++) out.push(segs[i]);
+  return out.join(" / ");
+}
+
 function parseFileTrack(name) {
   var base = String(name || "").replace(/\\/g, "/");
   var slash = base.lastIndexOf("/");
@@ -666,22 +1128,6 @@ function hasMetadata(t) {
   return Number(t.size || 0) > 0 || Number(t.total_size || 0) > 0;
 }
 
-// Split a torrent's files into the audio and everything else, by file index.
-// Video counts as "other": on a music release a video extra is usually the bulk
-// of the download and the thing being skipped.
-function partitionAudio(files) {
-  var audio = [];
-  var others = [];
-  var list = files || [];
-  for (var i = 0; i < list.length; i++) {
-    var f = list[i];
-    if (!f || typeof f.index !== "number") continue;
-    if (mediaKindOf(f.name) === "audio") audio.push(f.index);
-    else others.push(f.index);
-  }
-  return { audio: audio, others: others };
-}
-
 // Only fully-downloaded media is offered. A partially-downloaded file would open
 // and then hit EOF partway through, which reads as a corrupt file rather than as
 // an incomplete download — worse than not offering it.
@@ -779,14 +1225,49 @@ function sortSearchResults(results) {
   return list;
 }
 
+// Indexers send -1 for "didn't report", and plenty omit the field entirely.
+// Either way it is unknown, not zero — "0 seeders" is a verdict on the torrent
+// and would send the user past a perfectly live result.
+function swarmCount(n) {
+  if (n === null || n === undefined || n === "") return null;
+  var v = Number(n);
+  if (!isFinite(v) || v < 0) return null;
+  return v;
+}
+
+// The swarm line. Size is NOT here — it has its own trailing column, because
+// size is the number you compare down a list of results, and a column does that
+// where a mid-sentence value doesn't. Seeders lead: for a torrent they are the
+// difference between a download and a dead entry. Leechers follow, always, even
+// at zero, so the fields sit in the same place on every row.
 function searchResultSubtitle(r) {
-  var bits = [formatBytes(r && r.fileSize)];
-  bits.push(Number((r && r.nbSeeders) || 0) + " seeders");
-  var leech = Number((r && r.nbLeechers) || 0);
-  if (leech) bits.push(leech + " leechers");
+  var bits = [];
+  var seeds = swarmCount(r && r.nbSeeders);
+  var leech = swarmCount(r && r.nbLeechers);
+  bits.push(seeds === null ? "swarm unknown" : seeds + " seeders");
+  if (leech !== null) bits.push(leech + " leechers");
   var site = siteLabel(r && r.siteUrl);
   if (site) bits.push(site);
   return bits.join("  ·  ");
+}
+
+// One row of the results list. The name is what the user is reading the list
+// for, so it is the row title and gets the full width; size takes the trailing
+// column; the swarm and the indexer ride the subtitle underneath.
+function searchResultRow(r) {
+  return {
+    id: searchResultId(r),
+    title: (r && r.fileName) || "(untitled)",
+    subtitle: searchResultSubtitle(r),
+    duration: formatBytes(r && r.fileSize),
+    // Audio / video / unknown read off the release name, over a colour-coded
+    // seeder badge — see mediaIconFor.
+    imageUrl: mediaIconFor(classifyTorrentMedia(r && r.fileName), swarmCount(r && r.nbSeeders)),
+    // Double-click and Enter download, matching the primary overlay button.
+    // A row whose plain interactions did nothing at all is what this list was
+    // reported as broken for the first time round.
+    action: "qbt:search-add"
+  };
 }
 
 // --- Library import ---------------------------------------------------------
@@ -982,6 +1463,10 @@ function refresh() {
       // Isolated from the poll's own error handling on purpose: a failed
       // notification or rescan must not be reported as "can't reach
       // qBittorrent", which is what sharing the catch below would do.
+      // Same isolation: a background file count or file-list refresh that fails
+      // must not be reported as "can't reach qBittorrent".
+      ensureFileCounts();
+      refreshOpenFiles();
       return handleCompletions(visibleTorrents()).catch(function (e) {
         console.error("qBittorrent: handling completions failed:", e);
       });
@@ -1010,20 +1495,27 @@ function visibleTorrents() {
     list.push(t);
   }
   list.sort(function (a, b) {
+    var ra = statusRank(a, needsChoice(a));
+    var rb = statusRank(b, needsChoice(b));
+    if (ra !== rb) return ra - rb;
     return Number(b.added_on || 0) - Number(a.added_on || 0);
   });
   return list;
 }
 
-function tabTorrents(tab) {
-  var all = visibleTorrents();
-  if (tab === "all") return all;
-  var out = [];
-  for (var i = 0; i < all.length; i++) {
-    var done = isComplete(all[i]);
-    if (tab === "completed" ? done : !done) out.push(all[i]);
-  }
-  return out;
+// Ordering for the one list that replaced the Downloading/Completed/All tabs.
+// With no tabs to pick a subset, the ordering IS the triage: a torrent waiting
+// on the user's decision first (it is the only row that stops making progress
+// until it is touched), then failures, then whatever is actually moving, with
+// finished torrents last — which is where the old Completed tab now lives.
+// Recency breaks ties, as it did before.
+function statusRank(t, awaiting) {
+  if (awaiting) return 0;
+  if (isErrored(t)) return 1;
+  if (isComplete(t)) return 5;
+  if (/^(downloading|forcedDL|metaDL|forcedMetaDL)$/.test(String((t && t.state) || ""))) return 2;
+  if (isPaused(t)) return 4;
+  return 3; // queued, stalled, checking, moving, allocating
 }
 
 // qBittorrent does NOT create a category on demand — adding with an unknown one
@@ -1154,7 +1646,7 @@ function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
   // "Remove" rather than only offering Start.
   if (peek) peekedTorrents[hash] = true;
   expandedHash = hash;
-  activeTab = "downloading";
+  activeTab = "torrents";
 
   // Added, paused, and filtered out of the very list that carries the Start
   // button: without this the torrent is unreachable from the UI that is
@@ -1187,12 +1679,26 @@ function waitForMetadata(hash, elapsed) {
       var settle = wasFetching && !isPaused(t)
         ? actOn(stopEndpoint(), [hash], "Pausing for file selection")
         : Promise.resolve();
-      return settle.then(function () {
-        return fetchFiles(hash);
-      }).then(function () {
-        api.ui.showNotification("Ready — choose which files to download, then press Start");
-        render();
-      });
+      return settle
+        .then(function () {
+          return fetchFiles(hash);
+        })
+        .then(function () {
+          // A peek is only a look, so it does not sit there paused waiting for a
+          // Start press: it is left running with nothing selected, and the first
+          // file the user includes starts arriving immediately. A torrent held
+          // by "Choose files before downloading" is a download the user has
+          // already committed to, so that one keeps its explicit Start.
+          return peekedTorrents[hash] ? armPeek(hash) : false;
+        })
+        .then(function (armed) {
+          api.ui.showNotification(
+            armed
+              ? "Nothing is downloading — pick the files you want and they'll start straight away"
+              : "Ready — choose which files to download, then press Start"
+          );
+          render();
+        });
     }
     if (elapsed >= METADATA_MAX_MS) {
       // Give up waiting rather than holding a paused torrent forever: the user
@@ -1306,7 +1812,7 @@ function addTorrent(source, opts) {
       );
       // Show where it went. Adding from the Search tab otherwise leaves the user
       // looking at search results with no sign anything happened.
-      activeTab = "downloading";
+      activeTab = "torrents";
       render();
       return refresh().then(function () {
         if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint);
@@ -1626,7 +2132,14 @@ function importFinished(finishedTorrents) {
 
 // Announce and import anything that finished since the last poll.
 function handleCompletions(list) {
-  var finished = detectCompletions(knownComplete, list);
+  // A torrent with nothing selected has finished downloading nothing at all, so
+  // announcing it and rescanning the library for it would be pure noise — and
+  // it is a state this plugin puts torrents in deliberately (see armPeek).
+  // Filtered here rather than inside detectCompletions so that stays a pure
+  // function of its two arguments.
+  var real = [];
+  for (var k = 0; k < list.length; k++) if (isFinished(list[k])) real.push(list[k]);
+  var finished = detectCompletions(knownComplete, real);
   for (var i = 0; i < finished.length; i++) knownComplete[finished[i].hash] = true;
 
   // First poll of the session: everything already complete is new to US but
@@ -1655,27 +2168,8 @@ function fetchFiles(hash) {
       return resp.json();
     })
     .then(function (list) {
-      // `index` is only present from WebAPI 2.8.2 on; before that a file's
-      // position in this array IS its index, which is what the file-priority and
-      // download-selection endpoints take. Falling back to the position keeps
-      // playback working on older servers instead of building qbt://…/NaN.
-      var files = [];
-      for (var i = 0; i < (list || []).length; i++) {
-        var f = list[i] || {};
-        files.push({
-          index: typeof f.index === "number" ? f.index : i,
-          name: f.name,
-          size: f.size,
-          progress: f.progress,
-          // 0 means "don't download this one". Everything else is a download
-          // priority (1 normal, 6 high, 7 maximum) — the plugin only ever sets
-          // 0 or 1, but it must not flatten a priority the user set in
-          // qBittorrent itself, so the raw value is kept.
-          priority: typeof f.priority === "number" ? f.priority : 1
-        });
-      }
-      filesByHash[hash] = files;
-      return files;
+      filesByHash[hash] = parseFileList(list);
+      return filesByHash[hash];
     })
     .catch(function (e) {
       console.error("qBittorrent: could not list files:", e);
@@ -1689,12 +2183,159 @@ function fetchFiles(hash) {
     });
 }
 
+// `index` is only present from WebAPI 2.8.2 on; before that a file's position in
+// this array IS its index, which is what the file-priority and
+// download-selection endpoints take. Falling back to the position keeps playback
+// working on older servers instead of building qbt://…/NaN.
+//
+// Coerced with Number(), NOT gated on `typeof === "number"`. A field that
+// arrives as the string "0" — which happens through proxies and on older builds
+// — failed that check and fell through to the default, so a file the user had
+// deselected came back marked for download and the row said "Downloading 0%"
+// about a file that would never move. Where a default is needed, it is the SAFE
+// direction that has to win, and for `index` there is no safe default at all: a
+// wrong index sends /torrents/filePrio at the wrong file.
+function parseFileList(list) {
+  var files = [];
+  for (var i = 0; i < (list || []).length; i++) {
+    var f = list[i] || {};
+    files.push({
+      index: numOr(f.index, i),
+      name: f.name,
+      size: numOr(f.size, 0),
+      progress: numOr(f.progress, 0),
+      // 0 means "don't download this one". Everything else is a download
+      // priority (1 normal, 6 high, 7 maximum) — the plugin only ever sets 0
+      // or 1, but it must not flatten a priority the user set in qBittorrent
+      // itself, so the raw value is kept.
+      priority: numOr(f.priority, 1)
+    });
+  }
+  return files;
+}
+
+// Per-file progress does NOT arrive with the poll: /sync/maindata describes
+// TORRENTS, and the file list is a separate endpoint that was only ever read on
+// open and after a priority change. So while the contents panel was open every
+// file's progress was frozen at whatever it was when you opened it — a file you
+// downloaded while watching sat at "Downloading 0%" for ever, Play refused it
+// because the cached progress never reached 1, and its row never got a `path`,
+// which killed drag-to-queue and the context menu with it.
+//
+// One request per poll, and only for the torrent whose contents are open.
+var quietFilesInFlight = {};
+
+function refreshOpenFiles() {
+  var hash = expandedHash;
+  if (!connected || !hash || !torrents[hash]) return;
+  // Never while the visible fetch is running: that one owns `filesLoading` and
+  // the spinner, and two writers would race over the same cache entry.
+  if (filesLoading === hash || quietFilesInFlight[hash]) return;
+  quietFilesInFlight[hash] = true;
+  authed("/torrents/files?hash=" + encodeURIComponent(hash))
+    .then(function (resp) {
+      expectOk(resp, "Reading the torrent's files");
+      return resp.json();
+    })
+    .then(function (list) {
+      var next = parseFileList(list);
+      // Only re-render when something actually moved. The panel redraws on
+      // every poll anyway, but rebuilding the row list — and its tiles — for an
+      // unchanged list is work for nothing.
+      if (fileListSignature(next) !== fileListSignature(filesByHash[hash])) {
+        filesByHash[hash] = next;
+        render();
+      }
+    })
+    .catch(function (e) {
+      // Quiet: the panel keeps the list it has. A background refresh nobody
+      // asked for must not raise a notification over a working view.
+      console.error("qBittorrent: could not refresh the open torrent's files:", e);
+    })
+    .then(function () {
+      delete quietFilesInFlight[hash];
+    });
+}
+
+function fileListSignature(files) {
+  var list = files || [];
+  var parts = [];
+  for (var i = 0; i < list.length; i++) {
+    parts.push(list[i].index + ":" + list[i].progress + ":" + list[i].priority);
+  }
+  return parts.join("|");
+}
+
 // Include or exclude files from the download (qBittorrent's per-file priority;
 // 0 = don't download).
 //
 // Only ever sets 0 or 1: this is a two-state control, and writing a high/maximum
 // priority the user had set in qBittorrent back down to normal would quietly
 // undo their own tuning.
+// The bare priority POST. Separate from setFilePriority because arming a peek
+// needs to set priorities without narrating it ("14 files won't be downloaded"
+// is not news when the user asked to look inside), and needs the failure to
+// propagate so it can fall back rather than claim a state it didn't reach.
+function postFilePriority(hash, indices, priority) {
+  if (!indices.length) return Promise.resolve();
+  return authed("/torrents/filePrio", {
+    method: "POST",
+    form: { hash: hash, id: indices.join("|"), priority: priority }
+  }).then(function (resp) {
+    expectOk(resp, priority === 0 ? "Skipping those files" : "Including those files");
+  });
+}
+
+// "View contents" leaves the torrent RUNNING with every file deselected, so the
+// moment the user includes a file it starts arriving — no second Start press,
+// which was a step that did nothing except stand between the user and the thing
+// they had just chosen.
+//
+// Order matters and is the whole safety of it: deselect first, start second.
+// Starting a torrent whose files are still at their default priority downloads
+// the entire release, which is exactly what "View contents" must never do.
+function armPeek(hash) {
+  var files = filesByHash[hash] || [];
+  if (!files.length) return Promise.resolve(false);
+  var all = [];
+  for (var i = 0; i < files.length; i++) all.push(files[i].index);
+  return postFilePriority(hash, all, 0)
+    .then(function () {
+      return fetchFiles(hash);
+    })
+    .then(function () {
+      // Verify rather than assume: qBittorrent silently keeps a completed
+      // file's priority, and starting a torrent that still wants something
+      // would download it behind the user's back.
+      if (!nothingSelected(torrents[hash])) throw new Error("qBittorrent kept some files selected");
+      return actOn(startEndpoint(), [hash], "Getting ready");
+    })
+    .then(function () {
+      armedPeek[hash] = true;
+      return true;
+    })
+    .catch(function (e) {
+      // Fall back to the old hold: stopped, everything selected, waiting for an
+      // explicit Start. Strictly worse, but honest — and the banner for that
+      // state still tells the user what to do.
+      console.error("qBittorrent: could not arm the peeked torrent:", e);
+      delete armedPeek[hash];
+      return false;
+    });
+}
+
+// Releasing the arm: the user has chosen something, so this is now an ordinary
+// download. The start is deliberate belt-and-braces — a torrent that wanted
+// nothing may have been stopped by qBittorrent's own on-completion rules, and
+// then including a file would have selected it without downloading it.
+function releasePeek(hash) {
+  if (!armedPeek[hash]) return Promise.resolve();
+  delete armedPeek[hash];
+  delete pendingSelection[hash];
+  delete peekedTorrents[hash];
+  return actOn(startEndpoint(), [hash], "Starting the download");
+}
+
 function setFilePriority(hash, indices, priority) {
   if (!indices.length) return Promise.resolve();
   busy = hash;
@@ -1729,6 +2370,12 @@ function setFilePriority(hash, indices, priority) {
       return fetchFiles(hash);
     })
     .then(function () {
+      // Including a file in an armed peek is the decision the whole hold was
+      // waiting for, so it ends here rather than at a separate button. Skipping
+      // a file is not a decision to download anything, so it does not.
+      return priority === 0 ? null : releasePeek(hash);
+    })
+    .then(function () {
       return refresh();
     });
 }
@@ -1736,6 +2383,72 @@ function setFilePriority(hash, indices, priority) {
 function ensureFiles(hash) {
   if (filesByHash[hash]) return Promise.resolve(filesByHash[hash]);
   return fetchFiles(hash);
+}
+
+// The torrents list endpoint does NOT report how many files a torrent holds, so
+// the count is fetched once per torrent and cached for the session — a file list
+// cannot change once qBittorrent has the metadata.
+//
+// Deliberately NOT fetchFiles(): that one drives the contents panel's spinner
+// and reports its failures out loud, both of which would be wrong for a
+// background count nobody asked for. Bounded per cycle so a category with fifty
+// torrents doesn't open fifty sockets on the first poll.
+var fileCountByHash = {};
+var countInFlight = {};
+var COUNT_FETCH_PER_CYCLE = 4;
+
+function fileCountOf(t) {
+  if (!t) return null;
+  var files = filesByHash[t.hash];
+  if (files) return files.length;
+  var n = fileCountByHash[t.hash];
+  // -1 is the "asked and it failed" marker, which is unknown as far as the row
+  // is concerned but must not be asked again.
+  return typeof n === "number" && n >= 0 ? n : null;
+}
+
+function ensureFileCounts() {
+  if (!connected) return;
+  var list = visibleTorrents();
+  var started = 0;
+  for (var i = 0; i < list.length && started < COUNT_FETCH_PER_CYCLE; i++) {
+    var t = list[i];
+    // Tested on `undefined` rather than on fileCountOf(), so a failed fetch is
+    // not retried on every poll for the rest of the session — that would be a
+    // request loop against a torrent qBittorrent has already refused to
+    // describe, for a field the row can simply omit.
+    if (filesByHash[t.hash] || fileCountByHash[t.hash] !== undefined || countInFlight[t.hash]) continue;
+    // A magnet still asking the swarm what is in it has no file list to count.
+    if (!hasMetadata(t)) continue;
+    countInFlight[t.hash] = true;
+    started++;
+    fetchFileCount(t.hash);
+  }
+}
+
+function fetchFileCount(hash) {
+  return authed("/torrents/files?hash=" + encodeURIComponent(hash))
+    .then(function (resp) {
+      expectOk(resp, "Counting the torrent's files");
+      return resp.json();
+    })
+    .then(function (list) {
+      var n = (list || []).length;
+      // A torrent with no files does not exist — an empty answer means
+      // qBittorrent isn't ready to describe it, so record the "don't ask again"
+      // marker rather than a count of 0. Printing "0 files" on a row would be
+      // stating a fact that cannot be true.
+      fileCountByHash[hash] = n > 0 ? n : -1;
+      render();
+    })
+    .catch(function (e) {
+      // Quiet on purpose — see above. The row simply omits the count.
+      console.error("qBittorrent: could not count a torrent's files:", e);
+      fileCountByHash[hash] = -1;
+    })
+    .then(function () {
+      delete countInFlight[hash];
+    });
 }
 
 // Absolute path of one file on THIS machine, or null when it can't be known.
@@ -1850,25 +2563,36 @@ function playFiles(hash, startIndex) {
   });
 }
 
-function deleteTorrent(hash, deleteFiles) {
-  busy = hash;
+function deleteTorrents(hashes, deleteFiles) {
+  var list = [].concat(hashes || []);
+  if (!list.length) return Promise.resolve();
+  busy = list.length === 1 ? list[0] : "*";
   render();
   return authed("/torrents/delete", {
     method: "POST",
-    form: { hashes: hash, deleteFiles: deleteFiles ? "true" : "false" }
+    form: { hashes: list.join("|"), deleteFiles: deleteFiles ? "true" : "false" }
   })
     .then(function (resp) {
       expectOk(resp, "Removing the torrent");
-      // Drop it locally rather than waiting a poll cycle — the row vanishing IS
-      // the feedback for a destructive action.
-      delete torrents[hash];
-      delete pendingSelection[hash];
-      delete peekedTorrents[hash];
-      delete filesByHash[hash];
+      // Drop them locally rather than waiting a poll cycle — the row vanishing
+      // IS the feedback for a destructive action.
+      for (var i = 0; i < list.length; i++) {
+        delete torrents[list[i]];
+        delete pendingSelection[list[i]];
+        delete peekedTorrents[list[i]];
+        delete filesByHash[list[i]];
+        delete fileCountByHash[list[i]];
+        delete armedPeek[list[i]];
+        delete fileFilters[list[i]];
+        // The contents panel is showing a torrent that no longer exists.
+        if (expandedHash === list[i]) expandedHash = null;
+      }
     })
     .catch(function (e) {
       console.error("qBittorrent: delete failed:", e);
-      api.ui.showNotification("Couldn't remove that torrent: " + errText(e));
+      api.ui.showNotification(
+        list.length === 1 ? "Couldn't remove that torrent: " + errText(e) : "Couldn't remove those torrents: " + errText(e)
+      );
     })
     .then(function () {
       busy = null;
@@ -1915,49 +2639,276 @@ function setupGuideNode() {
   return { type: "section", title: "Setting up qBittorrent", children: children };
 }
 
-function torrentNode(t) {
-  var pct = Math.round(Math.min(1, Math.max(0, Number(t.progress) || 0)) * 1000) / 10;
-  var paused = isPaused(t);
-  var done = isComplete(t);
-  var rowBusy = busy === t.hash || busy === "*";
+// What the row says this torrent is doing. qBittorrent's own state string is
+// wrong twice over for a torrent nobody has chosen files for: it reads
+// "Seeding" or "Complete" because nothing is wanted so nothing is missing, and
+// for a held one it reads "Paused" when the pause is ours, not the user's.
+function torrentStatusText(t, pending) {
+  if (nothingSelected(t)) return "Choose files to start";
+  if (pending) return "Waiting for you";
+  return torrentStateLabel(t && t.state);
+}
 
-  var facts = [torrentStateLabel(t.state), formatBytes(t.size)];
-  if (!done) {
-    facts.push("↓ " + formatSpeed(t.dlspeed));
-    facts.push("ETA " + formatEta(t.eta));
-  } else {
-    facts.push("↑ " + formatSpeed(t.upspeed));
-    facts.push("ratio " + (Number(t.ratio) || 0).toFixed(2));
+// One row per torrent, in the same shape the Search tab uses — for the same
+// reason. Sections gave every torrent a title bar, a paragraph, a progress bar
+// and up to six full-width buttons, so three transfers filled the screen and
+// nothing could be compared against anything else.
+//
+// The tile carries the percentage (colour-coded by state), the trailing column
+// carries the size, and the subtitle leads with the status and the file count.
+function torrentRow(t) {
+  var pending = needsChoice(t);
+  var bits = [torrentStatusText(t, pending)];
+
+  var count = fileCountOf(t);
+  if (count !== null) bits.push(count + (count === 1 ? " file" : " files"));
+
+  // Size sits next to the file count, because the two answer one question
+  // together — "how much is this?" — and reading them apart meant crossing the
+  // whole row. It is `total_size`, the torrent's real weight; `size` is only
+  // what is currently selected and reads 0 B on a torrent nobody has picked
+  // files for.
+  bits.push(formatBytes(t.total_size || t.size));
+
+  // A torrent nobody has chosen files for has no speed and no ETA worth
+  // printing — "↓ — · ETA ∞" is four characters of noise on the one row that
+  // needs its instruction read.
+  if (!pending) {
+    if (isFinished(t)) {
+      bits.push("↑ " + formatSpeed(t.upspeed));
+      bits.push("ratio " + (Number(t.ratio) || 0).toFixed(2));
+    } else {
+      bits.push("↓ " + formatSpeed(t.dlspeed));
+      bits.push("ETA " + formatEta(t.eta));
+    }
   }
-  facts.push(Number(t.num_seeds || 0) + " seeds");
+  // Both swarms, both halves. This is what decides whether a torrent will ever
+  // finish, so it earns the width even though it makes the line long.
+  bits.push(swarmText(t.num_seeds, t.num_complete, "seed", "seeds"));
+  bits.push(swarmText(t.num_leechs, t.num_incomplete, "leecher", "leechers"));
 
-  var open = expandedHash === t.hash;
-  var reachable = filesAreReachable();
-  var awaiting = !!pendingSelection[t.hash];
-  var peeked = !!peekedTorrents[t.hash];
-  var buttons = [];
+  return {
+    id: t.hash,
+    title: t.name || magnetDisplayName(t.magnet_uri) || t.hash,
+    subtitle: bits.join("  ·  "),
+    // No trailing column. Size used to live there, which is where a *search*
+    // result still keeps it — there you are comparing sizes down a list of
+    // candidate releases, so a column earns its place. Here you are reading one
+    // torrent at a time, and the column only pulled the figure away from the
+    // file count it belongs with.
+    imageUrl: torrentIconFor(t, pending),
+    // Double-click and Enter open the contents. For a container that is what
+    // "open it" means — Play is the first overlay button, and playing a torrent
+    // you have not looked inside is the rarer intent of the two.
+    action: "qbt:show-files"
+  };
+}
 
-  // A torrent held for selection leads with the one thing to do next, and its
-  // Start button says what it starts — "Start" alone reads as "resume", which is
-  // not what is being decided here.
-  if (awaiting) {
-    buttons.push({
-      type: "button",
-      label: metadataFetching[t.hash] || !filesByHash[t.hash] ? "Waiting for the file list…" : "Start download",
-      action: "qbt:start-selected",
-      variant: "accent",
-      // Nothing to choose from yet, so nothing to confirm yet.
-      disabled: rowBusy || !!metadataFetching[t.hash] || !filesByHash[t.hash],
-      data: { hash: t.hash }
+// The facts the Info tab prints, as label/value pairs. Pure and exported, so
+// the set can be asserted without rendering: it is the one place a field is
+// silently dropped by a typo in a property name.
+function torrentInfoLines(t) {
+  if (!t) return [];
+  var done = isFinished(t);
+  var pending = needsChoice(t);
+  var out = [{ heading: "Transfer" }];
+
+  out.push({ label: "Status", value: torrentStatusText(t, pending) });
+  out.push({ label: "Progress", value: pending ? "0%" : torrentPercent(t) });
+  out.push({ label: "Size", value: formatBytes(t.total_size || t.size) });
+  out.push({ label: "Downloaded", value: formatBytes(t.downloaded) });
+  out.push({ label: "Uploaded", value: formatBytes(t.uploaded) });
+  // Speeds and a time-left only while something is ACTUALLY moving. Gating on
+  // "not finished" was not enough: a stopped torrent is neither finished nor
+  // transferring, so it printed "Download speed: —" and "Time left: ∞", which
+  // reads as a fault rather than as a torrent the user paused.
+  var halted = isPaused(t) || isErrored(t) || pending;
+  if (!done && !halted) {
+    out.push({ label: "Download speed", value: formatSpeed(t.dlspeed) });
+    out.push({ label: "Time left", value: formatEta(t.eta) });
+  }
+  // Upload keeps going while seeding, so it survives `done` — but not a stop.
+  if (!halted) out.push({ label: "Upload speed", value: formatSpeed(t.upspeed) });
+  out.push({ label: "Ratio", value: numOr(t.ratio, 0).toFixed(2) });
+  out.push({ label: "Active for", value: formatDuration(t.time_active) });
+  out.push({ label: "Added", value: formatAge(t.added_on) });
+  if (numOr(t.completion_on, 0) > 0) out.push({ label: "Completed", value: formatAge(t.completion_on) });
+
+  // The swarm decides whether a torrent will ever finish, so it gets its own
+  // block rather than being folded in among the byte counters.
+  out.push({ heading: "Swarm" });
+  out.push({ label: "Seeds", value: swarmDetail(t.num_seeds, t.num_complete) });
+  out.push({ label: "Leechers", value: swarmDetail(t.num_leechs, t.num_incomplete) });
+  out.push({ label: "Availability", value: formatAvailability(t.availability) });
+  out.push({ label: "Trackers", value: numOr(t.trackers_count, 0) });
+  out.push({ label: "Last full copy seen", value: formatAge(t.seen_complete) });
+  out.push({ label: "Last activity", value: formatAge(t.last_activity) });
+
+  out.push({ heading: "Files and location" });
+  var count = fileCountOf(t);
+  if (count !== null) {
+    var picked = selectionSummary(filesByHash[t.hash]);
+    out.push({
+      label: "Files",
+      value: picked.total
+        ? picked.picked + " of " + picked.total + " selected  ·  " + formatBytes(picked.bytes)
+        : count + (count === 1 ? " file" : " files")
     });
-    // A peeked torrent was added only to be looked at, so throwing it away is a
-    // first-class button rather than the generic "Remove…" further along the
-    // row. It skips the confirm — nothing has downloaded, so there is nothing
-    // to lose.
+  }
+  if (t.save_path) out.push({ label: "Saving to", value: String(t.save_path) });
+  if (t.category) out.push({ label: "Category", value: String(t.category) });
+  out.push({ label: "Hash", value: String(t.hash || "") });
+  return out;
+}
+
+// "12 connected of 40 in the swarm" — spelled out here rather than the row's
+// compact "12/40", because this tab has the width and is where someone comes to
+// find out what the numbers mean.
+function swarmDetail(connected, total) {
+  var c = numOr(connected, 0);
+  if (c < 0) c = 0;
+  var tot = numOr(total, -1);
+  if (tot < c) return c + " connected  ·  swarm size unknown";
+  return c + " connected  ·  " + tot + " in the swarm";
+}
+
+// The contents panel: what is inside one torrent, and which of it is coming.
+// It REPLACES the list rather than expanding a row, because the file list is a
+// list of its own — nesting one inside a row of another is what the old
+// expand-in-place section did, and it left the file rows indented under a
+// heading with no way to tell where the torrent ended.
+//
+// Structure: a plain hero (title + Back), the two controls a torrent has, then
+// two tabs — the files you came to choose from, and the numbers you occasionally
+// want. The hero is the host's own `detail-header` in `plain` mode: a torrent
+// has no artwork, so the full hero was a 320px scrimmed panel wrapped around a
+// placeholder disc, but its Back button is the one every detail page in the app
+// uses and that is worth keeping.
+function torrentDetailNodes(hash) {
+  var t = torrents[hash];
+  var children = [];
+  if (!t) {
+    // Removed here or in qBittorrent while its contents were open. Say so
+    // rather than rendering an empty panel with no explanation.
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content: "That torrent is no longer in qBittorrent."
+    });
+    children.push({ type: "button", label: "← Back to torrents", action: "qbt:close-files", variant: "secondary" });
+    return children;
+  }
+
+  var done = isFinished(t);
+  var paused = isPaused(t);
+  var armed = !!armedPeek[t.hash];
+  // An armed peek is RUNNING and waiting on a file choice, so it is not the
+  // paused "press Start download" hold — different banner, different buttons.
+  var awaiting = !!pendingSelection[t.hash] && !armed;
+  var peeked = !!peekedTorrents[t.hash];
+  var rowBusy = busy === t.hash || busy === "*";
+  var reachable = filesAreReachable();
+  var pending = needsChoice(t);
+  var files = filesByHash[t.hash];
+  var picked = selectionSummary(files);
+  var filter = filterFor(hash);
+  var shown = filesInView(hash);
+
+  var metaBits = [];
+  if (files) {
+    metaBits.push(picked.picked === picked.total
+      ? picked.total + (picked.total === 1 ? " file" : " files")
+      : picked.picked + " of " + picked.total + " files");
+  }
+  metaBits.push(formatBytes(t.total_size || t.size));
+
+  children.push({
+    type: "detail-header",
+    // No artwork, no background, no motion look, no FX picker — a torrent has
+    // no image of its own, and the title is what identifies it.
+    plain: true,
+    title: t.name || magnetDisplayName(t.magnet_uri) || hash,
+    subtitle: torrentStatusText(t, pending) + (pending ? "" : "  ·  " + torrentPercent(t)),
+    meta: metaBits.join("  ·  "),
+    backAction: "qbt:close-files",
+    // In the hero, where every other detail page puts Play and Enqueue. These
+    // are the two verbs a torrent has, so they replace that pair rather than
+    // sitting in a second bar underneath it. A hero button fires with no
+    // payload, which is fine here: an action with no target while a contents
+    // panel is open can only mean that torrent (see hashesOf).
+    buttons: [
+      {
+        id: paused ? "qbt:start" : "qbt:stop",
+        label: paused ? "Start" : "Stop",
+        variant: paused ? "primary" : "secondary",
+        disabled: rowBusy
+      },
+      { id: "qbt:delete-ask", label: "Remove…", variant: "danger", disabled: rowBusy }
+    ]
+  });
+
+  // 0% while nothing is selected: qBittorrent reports 100% for a torrent that
+  // wants no files, and a full bar over an empty download is the single most
+  // misleading thing this panel could draw.
+  var pct = pending ? 0 : Math.round(Math.min(1, Math.max(0, numOr(t.progress, 0))) * 1000) / 10;
+  children.push({ type: "progress-bar", value: pct, max: 100, label: pct.toFixed(1) + "%" });
+
+  if (isErrored(t)) {
+    children.push({ type: "text", content: "This torrent is in an error state in qBittorrent.", className: "error" });
+  }
+
+  children.push({
+    type: "tabs",
+    activeTab: detailTab,
+    action: "qbt:detail-tab",
+    tabs: [
+      // Files first and first-by-default: choosing what downloads is what this
+      // panel is for. The numbers are a reference you occasionally check.
+      { id: "files", label: "Files", count: files ? files.length : undefined },
+      { id: "info", label: "Info" }
+    ]
+  });
+
+  if (detailTab === "info") {
+    // `plugin-heading` and `plugin-kv` are generic host classes (see
+    // PluginViewRenderer.css), not qBittorrent's. A heading has to LOOK like a
+    // heading, and a label/value pair needs two columns — one "Label: value"
+    // text node has nothing for the values to line up against.
+    var lines = torrentInfoLines(t);
+    for (var li = 0; li < lines.length; li++) {
+      if (lines[li].heading) {
+        children.push({ type: "text", className: "plugin-heading", content: lines[li].heading });
+      } else {
+        children.push({
+          type: "layout",
+          direction: "horizontal",
+          className: "plugin-kv",
+          children: [
+            { type: "text", className: "plugin-kv-key", content: lines[li].label },
+            { type: "text", className: "plugin-kv-value", content: String(lines[li].value) }
+          ]
+        });
+      }
+    }
+    return children;
+  }
+
+  // --- the Files tab --------------------------------------------------------
+
+  if (armed) {
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content:
+        "Nothing is downloading. Every file below is set to skip — include the ones you want and they start straight away."
+    });
+    // No "Start download": there is nothing to start until a file is chosen,
+    // and the choosing is what starts it. Discard is still first-class — the
+    // expected outcome of a look is often to walk away.
     if (peeked) {
-      buttons.push({
+      children.push({
         type: "button",
-        label: "Discard",
+        label: "Discard this torrent",
         action: "qbt:discard-peek",
         variant: "secondary",
         disabled: rowBusy,
@@ -1966,102 +2917,8 @@ function torrentNode(t) {
     }
   }
 
-  // Play is offered only when the files are reachable from this machine —
-  // qBittorrent on a NAS reports ITS paths, which mean nothing here. Hidden
-  // rather than disabled: a permanently dead button on every row is noise, and
-  // the Files list explains the situation once, where it's relevant.
-  if (reachable && Number(t.progress) > 0) {
-    buttons.push({
-      type: "button",
-      label: "Play",
-      action: "qbt:play-torrent",
-      variant: "accent",
-      disabled: rowBusy,
-      data: { hash: t.hash }
-    });
-  }
-  buttons.push({
-    type: "button",
-    label: open ? "Hide files" : "Files",
-    action: "qbt:toggle-files",
-    variant: "secondary",
-    data: { hash: t.hash }
-  });
-  // Only when the files actually sit inside a collection — a scan of a folder
-  // the library doesn't cover would do nothing and look broken.
-  if (done && collectionForTorrent(t)) {
-    buttons.push({
-      type: "button",
-      label: "Add to library",
-      action: "qbt:import",
-      variant: "secondary",
-      disabled: rowBusy,
-      data: { hash: t.hash }
-    });
-  }
-  buttons.push({
-    type: "button",
-    label: paused ? "Start" : "Stop",
-    action: paused ? "qbt:start" : "qbt:stop",
-    variant: "secondary",
-    disabled: rowBusy,
-    data: { hash: t.hash }
-  });
-  buttons.push({
-    type: "button",
-    label: "Remove…",
-    action: "qbt:delete-ask",
-    variant: "secondary",
-    disabled: rowBusy,
-    data: { hash: t.hash }
-  });
-
-  var children = [
-    { type: "text", content: facts.join("  ·  "), className: "muted" },
-    { type: "progress-bar", value: pct, max: 100, label: pct.toFixed(1) + "%" },
-    { type: "layout", direction: "horizontal", children: buttons }
-  ];
-
-  if (open) {
-    if (!reachable) {
-      children.push({
-        type: "text",
-        className: "ds-banner ds-banner--warning",
-        content:
-          "qBittorrent looks like it's on another machine, so these files aren't on this one. " +
-          "If its download folder is mounted here, set the path mapping in Settings → qBittorrent and they'll play."
-      });
-    }
-    // "Only the audio" is the one bulk choice a music app can make confidently,
-    // and it is the reason most people open this list: a release full of video
-    // extras, scans and samples where only the tracks are wanted. Offered only
-    // while there is still something to download — after that it would only
-    // stop seeding files already on disk.
-    var loaded = filesByHash[t.hash];
-    if (loaded && !done) {
-      var audioCount = 0;
-      var otherCount = 0;
-      for (var fi = 0; fi < loaded.length; fi++) {
-        if (mediaKindOf(loaded[fi].name) === "audio") audioCount++;
-        else otherCount++;
-      }
-      if (audioCount && otherCount) {
-        children.push({
-          type: "button",
-          label: "Download only the audio (skip " + otherCount + " other file" + (otherCount === 1 ? "" : "s") + ")",
-          action: "qbt:only-audio",
-          variant: "secondary",
-          disabled: rowBusy,
-          data: { hash: t.hash }
-        });
-      }
-    }
-    var rows = fileRowsNode(t.hash);
-    if (rows) children.push(rows);
-  }
-
   if (awaiting) {
-    children.unshift({
+    children.push({
       type: "text",
       className: "ds-banner ds-banner--warning",
       // Phase by phase, and never ahead of itself: claiming "this is what's
@@ -2076,13 +2933,73 @@ function torrentNode(t) {
             ? "Nothing has downloaded. This is what's inside — press Start download to keep it, or Discard to drop it."
             : "Paused. Choose which files you want below, then press Start download."
     });
+    var holdButtons = [
+      {
+        type: "button",
+        // A torrent held for selection leads with the one thing to do next, and
+        // its Start button says what it starts — "Start" alone reads as
+        // "resume", which is not what is being decided here.
+        label: metadataFetching[t.hash] || !filesByHash[t.hash] ? "Waiting for the file list…" : "Start download",
+        action: "qbt:start-selected",
+        variant: "accent",
+        // Nothing to choose from yet, so nothing to confirm yet.
+        disabled: rowBusy || !!metadataFetching[t.hash] || !filesByHash[t.hash],
+        data: { hash: t.hash }
+      }
+    ];
+    if (peeked) {
+      holdButtons.push({
+        type: "button",
+        label: "Discard",
+        action: "qbt:discard-peek",
+        variant: "secondary",
+        disabled: rowBusy,
+        data: { hash: t.hash }
+      });
+    }
+    children.push({ type: "layout", direction: "horizontal", children: holdButtons });
   }
 
-  if (isErrored(t)) {
-    children.unshift({ type: "text", content: "This torrent is in an error state in qBittorrent.", className: "error" });
+  if (!reachable) {
+    children.push({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content:
+        "qBittorrent looks like it's on another machine, so these files aren't on this one. " +
+        "If its download folder is mounted here, set the path mapping in Settings → qBittorrent and they'll play."
+    });
   }
 
-  return { type: "section", title: t.name || magnetDisplayName(t.magnet_uri) || t.hash, children: children };
+  if (files && files.length) {
+    // Live filter: no button label, so the host fires it on every keystroke.
+    // `stateKey` keeps one text per torrent, which is why the plugin's own
+    // filter state is keyed by hash too — otherwise the box and the list would
+    // disagree the moment you opened a second torrent.
+    children.push({
+      type: "search-input",
+      placeholder: "Filter files — try “flac”, “live”, or a folder name",
+      action: "qbt:file-filter",
+      value: filter,
+      stateKey: "qbt-files:" + hash
+    });
+
+    // Nothing matched: say so and offer the way out, or the empty list reads as
+    // "this torrent has no files".
+    if (filter && !shown.length) {
+      children.push({ type: "text", className: "muted", content: "Nothing matches “" + filter + "”." });
+      children.push({
+        type: "button",
+        label: "Clear the filter",
+        action: "qbt:file-filter-clear",
+        variant: "secondary",
+        data: { hash: hash }
+      });
+    }
+  }
+
+  var rows = fileRowsNode(t.hash);
+  if (rows) children.push(rows);
+  return children;
 }
 
 // Two outcomes only, and the cancel side must be the harmless one: the host
@@ -2090,27 +3007,34 @@ function torrentNode(t) {
 // destructive there would be triggered by the universal "get me out of this"
 // key. Removing keeps the files — deleting them from disk is not offered here,
 // because the safe default is the one that a mis-click can't cost you data.
-function deleteConfirmNode(hash) {
-  var t = torrents[hash];
+function deleteConfirmNode(hashes) {
+  var list = [].concat(hashes || []);
+  // One torrent is named; several are counted. A confirm that pasted twelve
+  // release names into a dialog is one nobody reads.
+  var t = torrents[list[0]];
+  var what =
+    list.length === 1
+      ? "“" + ((t && t.name) || list[0]) + "”"
+      : list.length + " torrents";
   return {
     type: "confirm",
-    title: "Remove torrent",
+    title: list.length === 1 ? "Remove torrent" : "Remove torrents",
     message:
-      "Remove “" + ((t && t.name) || hash) + "” from qBittorrent?\n\n" +
-      "The downloaded files stay on disk — this only stops the transfer and drops it from the list.",
+      "Remove " + what + " from qBittorrent?\n\n" +
+      "The downloaded files stay on disk — this only stops the transfer and drops " +
+      (list.length === 1 ? "it" : "them") + " from the list.",
     confirmLabel: "Remove",
     cancelLabel: "Cancel",
     confirmVariant: "danger",
     confirmAction: "qbt:delete-confirm",
-    cancelAction: "qbt:delete-cancel",
-    data: { hash: hash }
+    cancelAction: "qbt:delete-cancel"
   };
 }
 
 function render() {
   if (!api) return;
 
-  if (pendingDelete) {
+  if (pendingDelete && pendingDelete.length) {
     api.ui.setViewData(VIEW_ID, deleteConfirmNode(pendingDelete));
     return;
   }
@@ -2121,27 +3045,48 @@ function render() {
 
   // Nothing configured (or a host that can't do the auth): the view's whole job
   // is to get the user set up, so it shows the steps rather than an empty list.
+  //
+  // It still has to be able to show the SETTINGS. This branch returns before the
+  // tab strip and the settings branch further down are ever reached, so without
+  // the check below "Open settings" set activeTab and then redrew this very
+  // screen — a button whose only effect was to render itself again.
   if (!baseUrl || hostTooOld) {
+    if (activeTab === "settings") {
+      var setupSettings = settingsTabNodes();
+      for (var ui = 0; ui < setupSettings.length; ui++) children.push(setupSettings[ui]);
+      // There is no tab strip on this screen, so this is the only way back to
+      // the steps that explain what the fields want.
+      children.push({
+        type: "button",
+        label: "← Back to the setup steps",
+        action: "qbt:close-settings",
+        variant: "secondary"
+      });
+      api.ui.setViewData(
+        VIEW_ID,
+        { type: "layout", direction: "vertical", children: children },
+        { scrollKey: "settings" }
+      );
+      return;
+    }
     children.push(setupGuideNode());
     children.push({ type: "button", label: "Open settings", action: "qbt:open-settings", variant: "accent" });
     api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children });
     return;
   }
 
-  var counts = {
-    downloading: tabTorrents("downloading").length,
-    completed: tabTorrents("completed").length,
-    all: tabTorrents("all").length
-  };
+  // One list, not three. Downloading/Completed/All were three views of the same
+  // rows differing only by a filter the row itself already states, and the split
+  // actively hurt: a torrent that finished moved tabs, so it vanished from the
+  // list the user was watching it in. Status now sorts the single list instead.
+  var list = visibleTorrents();
 
   children.push({
     type: "tabs",
     activeTab: activeTab,
     action: "qbt:tab",
     tabs: [
-      { id: "downloading", label: "Downloading", count: counts.downloading },
-      { id: "completed", label: "Completed", count: counts.completed },
-      { id: "all", label: "All", count: counts.all },
+      { id: "torrents", label: "Torrents", count: list.length },
       { id: "search", label: "Search" },
       { id: "settings", label: "Settings" }
     ]
@@ -2164,22 +3109,27 @@ function render() {
     return;
   }
 
+  // One torrent's contents replaces the list entirely. The add box, the server
+  // stats and the start-all/stop-all toolbar all belong to the list, and leaving
+  // them above a single torrent's file rows made it ambiguous which of the two
+  // "Stop all" would act on.
+  if (expandedHash) {
+    var detailNodes = torrentDetailNodes(expandedHash);
+    for (var di = 0; di < detailNodes.length; di++) children.push(detailNodes[di]);
+    api.ui.setViewData(
+      VIEW_ID,
+      { type: "layout", direction: "vertical", children: children },
+      { scrollKey: "torrent:" + expandedHash }
+    );
+    return;
+  }
+
   children.push({
     type: "search-input",
     placeholder: "Paste a magnet link or .torrent URL",
     action: "qbt:add",
     buttonLabel: "Add",
     pasteButton: true
-  });
-
-  children.push({
-    type: "stats-grid",
-    items: [
-      { label: "Download", value: formatSpeed(serverState.dl_info_speed) },
-      { label: "Upload", value: formatSpeed(serverState.up_info_speed) },
-      { label: "Free space", value: formatBytes(serverState.free_space_on_disk) },
-      { label: "Torrents", value: counts.all }
-    ]
   });
 
   // The window between "add accepted" and "torrent found in the list". It can
@@ -2237,22 +3187,43 @@ function render() {
     statusVariant: lastError ? "error" : connected ? "success" : "default"
   });
 
-  var list = tabTorrents(activeTab);
   if (!list.length) {
     children.push({
       type: "text",
       content: connected
-        ? activeTab === "downloading"
-          ? "Nothing downloading."
-          : activeTab === "completed"
-            ? "Nothing finished yet."
-            : restrictToCategory && category
-              ? "No torrents in the “" + category + "” category yet. Paste a magnet link above, or turn off “Only manage my own category” in settings to see everything."
-              : "No torrents."
+        ? restrictToCategory && category
+          ? "No torrents in the “" + category + "” category yet. Paste a magnet link above, or turn off “Only manage my own category” in settings to see everything."
+          : "No torrents yet. Paste a magnet link or .torrent URL above."
         : "Not connected to qBittorrent."
     });
   } else {
-    for (var i = 0; i < list.length; i++) children.push(torrentNode(list[i]));
+    var rows = [];
+    for (var i = 0; i < list.length; i++) rows.push(torrentRow(list[i]));
+    children.push({
+      type: "track-row-list",
+      selectable: true,
+      // A torrent is a container, so clicking one opens it. Cmd/Ctrl and Shift
+      // clicks still build the selection the toolbar acts on.
+      openOnClick: true,
+      items: rows,
+      // Play first: it takes the primary overlay slot, and it is the only one of
+      // the four that is about the music rather than about the transfer.
+      //
+      // No Contents button: the row already opens on a plain click and on
+      // double-click, so a button for it was a third route to the same place,
+      // taking tray width from the actions that have no other route.
+      //
+      // There is no separate Pause: qBittorrent has Start and Stop and nothing
+      // between them — WebAPI 2.11 renamed pause/resume to stop/start precisely
+      // because they were one pair, and offering two buttons that post to the
+      // same endpoint would be a lie about what the client can do.
+      actions: [
+        { id: "qbt:play-torrent", label: "Play", icon: "▶" },
+        { id: "qbt:start", label: "Start", icon: "⏵" },
+        { id: "qbt:stop", label: "Stop", icon: "⏸" },
+        { id: "qbt:delete-ask", label: "Remove", icon: "🗑" }
+      ]
+    });
   }
 
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: activeTab });
@@ -2692,7 +3663,29 @@ function stopPolling() {
 // ---------------------------------------------------------------------------
 
 function hashOf(data) {
-  return (data && data.hash) || null;
+  var list = hashesOf(data);
+  return list.length ? list[0] : null;
+}
+
+// Torrent actions now arrive from two shapes: the contents panel's buttons send
+// `{ hash }`, and the row list sends `{ selectedIds, itemId }` — the overlay
+// button with one id, the toolbar with the whole selection. Every handler goes
+// through this so a multi-row selection works everywhere a single row does.
+function hashesOf(data) {
+  if (data && data.hash) return [String(data.hash)];
+  // The detail hero's overflow menu fires its actions with NO data — the host
+  // has no per-item context to attach. While a torrent's contents are open,
+  // an action with no target can only mean that torrent.
+  if (expandedHash && !(data && (data.selectedIds || data.itemId))) return [expandedHash];
+  var ids = rowIds(data);
+  var out = [];
+  for (var i = 0; i < ids.length; i++) {
+    // Row ids are hashes here, but the same handlers are reachable from the
+    // file list, whose ids are indices. Anything that isn't a known torrent is
+    // dropped rather than posted to qBittorrent.
+    if (torrents[ids[i]]) out.push(ids[i]);
+  }
+  return out;
 }
 
 // Resolve qbt://<hash>/<index> to the file on disk. The host slices off exactly
@@ -2717,7 +3710,22 @@ function registerStreamResolver() {
         if (!file) throw new Error("That file is no longer in the torrent");
         var path = localPathFor(t, file);
         if (!path) throw new Error("qBittorrent didn't report where it saved this torrent");
-        return "file://" + path;
+        var url = "file://" + path;
+        // The object form, purely to carry `sourceUrl`. A bare URL string has
+        // nowhere to put it, and without it the now-playing source panel falls
+        // back to the track's own URI — so a file sitting on this disk is
+        // described as "qbt://<hash>/3", with no path shown and no Open folder.
+        //
+        // Version-gated, and this one is NOT cosmetic. Until HOST_FILE_CANDIDATE
+        // the host assumed every candidate was a network stream: it handed the
+        // media element the URL verbatim and told mpv it was http. A `file://`
+        // there is unloadable in the webview, so the object form silently breaks
+        // playback on an older host. The bare string takes the generic
+        // classifier path, which has always handled file:// correctly.
+        if (compareVersions(api.appVersion || "0", HOST_FILE_CANDIDATE) >= 0) {
+          return { candidates: [{ url: url, kind: "muxed" }], sourceUrl: url };
+        }
+        return url;
       });
     });
   });
@@ -2770,7 +3778,7 @@ function searchTabNodes() {
     } else if (!searchRunning) {
       children.push({
         type: "text",
-        content: "Search the indexers you've enabled in qBittorrent, and add what you find straight to the queue.",
+        content: "Search the indexers you've enabled in qBittorrent, and download what you find straight to your library folder.",
         className: "muted"
       });
     }
@@ -2796,45 +3804,34 @@ function searchTabNodes() {
     });
   }
 
-  // One section per result, with buttons that are ALWAYS visible.
+  // A results list, not a stack of cards. One section per result gave every row
+  // a title bar, a paragraph and two full-width buttons, so four results filled
+  // the screen and nothing could be compared at a glance.
   //
-  // These were rows in a track-row-list, whose buttons only appear on hover and
-  // whose plain click does nothing at all — the host's selectable list treats a
-  // single click as "select this row" and fires the row's action only on
-  // double-click. So clicking a result looked broken, which is exactly what it
-  // was reported as. Buttons you can see beat a compact list.
+  // It is the host's selectable row list, which is what every other search
+  // surface in the app uses: hover overlay buttons, multi-select, keyboard
+  // navigation, and a toolbar that applies an action to the whole selection.
+  // The reason this was abandoned before — that a plain click only selected and
+  // nothing acted on the row — is fixed by giving each row an `action`, so
+  // double-click and Enter download it, exactly like a track anywhere else.
+  var rows = [];
   for (var i = 0; i < searchResults.length; i++) {
-    var r = searchResults[i];
-    if (isPluginNotice(r)) continue;
-    var id = searchResultId(r);
-    children.push({
-      type: "section",
-      title: r.fileName || "(untitled)",
-      children: [
-        { type: "text", content: searchResultSubtitle(r), className: "muted" },
-        {
-          type: "layout",
-          direction: "horizontal",
-          children: [
-            {
-              type: "button",
-              label: "Add to qBittorrent",
-              action: "qbt:search-add",
-              variant: "accent",
-              data: { itemId: id }
-            },
-            {
-              type: "button",
-              label: "View contents",
-              action: "qbt:search-view",
-              variant: "secondary",
-              data: { itemId: id }
-            }
-          ]
-        }
-      ]
-    });
+    if (isPluginNotice(searchResults[i])) continue;
+    rows.push(searchResultRow(searchResults[i]));
   }
+  children.push({
+    type: "track-row-list",
+    selectable: true,
+    items: rows,
+    // Download is first, so it takes the primary/accent overlay slot and is what
+    // a double-click falls back to. "View contents" adds the torrent paused, so
+    // it is a way of looking before committing, not a preview — hence the
+    // second, quieter slot.
+    actions: [
+      { id: "qbt:search-add", label: "Download", icon: "⬇" },
+      { id: "qbt:search-view", label: "View contents", icon: "📂" }
+    ]
+  });
   return children;
 }
 
@@ -2859,9 +3856,23 @@ function fileRowsNode(hash) {
   // Every file, not just the playable ones: this is the torrent's CONTENTS, and
   // choosing what to download is the main reason to look at it — you cannot skip
   // a 4 GB video extra that the list filtered out.
-  var all = files.slice();
-  if (!all.length) {
+  if (!files.length) {
     return { type: "text", content: "qBittorrent hasn't got this torrent's file list yet.", className: "muted" };
+  }
+  // The user's filter, if any. Row ids are file INDICES, not positions, so
+  // filtering cannot make an action land on the wrong file.
+  var all = filesInView(hash);
+  // From every file, not the filtered ones — a filter narrows the list, it does
+  // not re-title what is left.
+  var commonRoot = commonFolder(files);
+  if (!all.length) {
+    return {
+      type: "button",
+      label: "Clear the filter",
+      action: "qbt:file-filter-clear",
+      variant: "secondary",
+      data: { hash: hash }
+    };
   }
 
   all.sort(function (a, b) {
@@ -2872,25 +3883,59 @@ function fileRowsNode(hash) {
   for (var j = 0; j < all.length; j++) {
     var f = all[j];
     var kind = mediaKindOf(f.name);
-    var done = Number(f.progress) >= 1;
-    var skipped = Number(f.priority) === 0;
+    // Same numeric coercion as everything else reading these fields — see numOr.
+    var done = numOr(f.progress, 0) >= 1;
+    var skipped = numOr(f.priority, 1) === 0;
     var parsed = parseFileTrack(f.name);
     // A non-media file keeps its real filename: "cover" and "01" are what the
     // track parser would leave, which is useless when deciding whether to skip
     // something.
-    var label = kind ? parsed.title : String(f.name || "").replace(/\\/g, "/").split("/").pop();
-    var subtitle = formatBytes(f.size);
-    if (skipped) subtitle += " · not downloading";
-    else if (!done) subtitle += " · " + Math.round(Number(f.progress || 0) * 100) + "% downloaded";
+    var label = kind ? parsed.title : baseName(f.name);
+    // …prefixed by the folder it lives in. parseFileTrack strips the path, so
+    // the row was showing leaves only: two "01"s from CD1 and CD2 were the same
+    // row twice, and a folder of scans was indistinguishable from tracks at the
+    // root. The filter already matches on the full path, so this is also what
+    // makes a search for a folder name explain its own results.
+    var folder = fileFolder(f.name, commonRoot);
+    var title = folder ? folder + " / " + label : label;
+    // Selection state in words, before the progress. A row that only said "45%"
+    // left "is this file even coming?" unanswered — which is the question this
+    // list exists to settle — and a deselected file has no percentage worth
+    // printing, because it will never move. The torrent is passed in because
+    // "Downloading" is a claim about the transfer, not about the file.
+    // Size follows the status on the same line, for the reason it does on a
+    // torrent row: the two are read together, and a trailing column put them at
+    // opposite ends of the row.
+    var subtitle = fileStatusText(f, torrent) + "  ·  " + formatBytes(f.size);
     items.push({
       id: String(f.index),
-      // An unfinished file stays visible but is marked, so the list shows the
-      // whole torrent rather than appearing to be missing tracks. A skipped one
-      // is marked differently again — it is not coming unless you say so.
-      title: (skipped ? "⊘ " : done ? "" : "◌ ") + label,
+      // No "⊘"/"◌" prefix on the name any more: the tile carries the state in
+      // colour and the subtitle says it in words, and a third copy glued to the
+      // front of the filename only made the names harder to read.
+      title: title,
       subtitle: subtitle,
+      imageUrl: fileIconFor(f, torrent),
+      // Each row offers only what it can actually do.
+      //
+      // A DOWNLOADED file is the only one worth playing or queueing: the bytes
+      // are on disk. It gets neither Download (nothing left to fetch) nor Skip
+      // (that would only stop seeding a file the user already has, which is not
+      // what "skip" means anywhere else in this list).
+      //
+      // Anything else is a choice about whether to fetch it, and Download and
+      // Skip are that choice in two directions — so a row offers the one it is
+      // not already in. Play and Add to queue would act on a file that does not
+      // exist yet.
+      actions: done
+        ? ["qbt:play-file", "qbt:enqueue-file"]
+        : skipped
+          ? ["qbt:file-download"]
+          : ["qbt:file-skip"],
       album: torrent ? torrent.name : undefined,
-      action: kind && done ? "qbt:play-file" : undefined,
+      // Named rather than left to the host fallback (which fires the first
+      // visible action), so a double-click can never mean something the row did
+      // not put first on purpose.
+      action: kind && done ? "qbt:play-file" : skipped ? "qbt:file-download" : "qbt:file-skip",
       // Only a finished, reachable, PLAYABLE file gets a path — that is what
       // makes the host's right-click menu and drag-to-queue work on these rows.
       path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
@@ -2903,16 +3948,36 @@ function fileRowsNode(hash) {
   // drag-to-queue — the same behaviour every other track list in the app has.
   // The FIRST action is the one the host styles as Play (and the one a
   // double-click fires), so its order is load-bearing.
+  // The FIRST action is the one the host styles as primary and the one a
+  // double-click falls back to, so the order follows what the list is FOR.
+  // While nothing is selected — a torrent opened with "View contents" — that is
+  // picking files; Play and Add to queue would act on files that do not exist
+  // on disk yet. Once something is selected it reverts to a normal track list.
+  // "Audio" / "Video" sit with the host list's own All / None, because that is
+  // what they are: a preset SELECTS rows. The actions below are what act on a
+  // selection — keeping the two apart is why there is no longer a second
+  // Download toolbar duplicating the idea.
+  var kinds = partitionByKind(all);
+  var presets = [
+    { id: "audio", label: "Audio", ids: kinds.audio.map(String) },
+    { id: "video", label: "Video", ids: kinds.video.map(String) }
+  ];
+
+  // Declared once for the whole list so the buttons line up down the column;
+  // each row then names the subset that applies to it (see the rows above).
+  // Download and Skip are the same decision in two directions, so a row only
+  // ever offers the one it is not already in — the other would be a no-op.
   return {
     type: "track-row-list",
     items: items,
     numbered: true,
     selectable: true,
+    selectionPresets: presets,
     actions: [
       { id: "qbt:play-file", label: "Play", icon: "▶" },
       { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" },
-      { id: "qbt:file-download", label: "Download this file", icon: "↓" },
-      { id: "qbt:file-skip", label: "Don't download this file", icon: "⊘" }
+      { id: "qbt:file-download", label: "Download", icon: "↓" },
+      { id: "qbt:file-skip", label: "Skip", icon: "⊘" }
     ]
   };
 }
@@ -2936,7 +4001,12 @@ function registerContextMenu() {
 
 function registerActions() {
   api.ui.onAction("qbt:tab", function (data) {
-    activeTab = (data && data.tabId) || (data && data.id) || activeTab;
+    var id = (data && data.tabId) || (data && data.id) || activeTab;
+    // The Downloading/Completed/All split is gone. A view restored from a
+    // pre-consolidation session can still name one of them; they all mean the
+    // single list now, and falling through would leave a blank tab strip.
+    if (id === "downloading" || id === "completed" || id === "all") id = "torrents";
+    activeTab = id;
     render();
   });
 
@@ -2959,6 +4029,11 @@ function registerActions() {
 
   api.ui.onAction("qbt:open-settings", function () {
     activeTab = "settings";
+    render();
+  });
+
+  api.ui.onAction("qbt:close-settings", function () {
+    activeTab = "torrents";
     render();
   });
 
@@ -3024,24 +4099,26 @@ function registerActions() {
       api.ui.showNotification("Couldn't tell which result that was — try again");
       return;
     }
-    // One at a time: the fallback path adds a real (paused) torrent, and doing
-    // that to a whole selection would leave a pile of them to clean up.
-    var r = findSearchResult(ids[0]);
-    if (!r || !r.fileUrl) {
-      addSearchResult(ids[0], { peek: true });
-      return;
+    // "View contents" ADDS the torrent, paused — that is the only way to learn
+    // what is inside one, and nothing transfers until Start download. So it is
+    // one at a time even from a multi-row selection: doing it to a whole
+    // selection would leave a pile of paused torrents to clean up.
+    if (ids.length > 1) {
+      api.ui.showNotification("Showing what's inside the first one — contents open one torrent at a time");
     }
     addSearchResult(ids[0], { peek: true });
   });
 
   api.ui.onAction("qbt:start", function (data) {
-    var hash = hashOf(data);
-    if (hash) {
+    var hashes = hashesOf(data);
+    if (!hashes.length) return;
+    for (var i = 0; i < hashes.length; i++) {
       // Starting by hand ends the selection hold — the user has decided.
-      delete pendingSelection[hash];
-      delete peekedTorrents[hash];
-      actOn(startEndpoint(), [hash], "Starting the torrent");
+      delete pendingSelection[hashes[i]];
+      delete peekedTorrents[hashes[i]];
+      delete armedPeek[hashes[i]];
     }
+    actOn(startEndpoint(), hashes, hashes.length === 1 ? "Starting the torrent" : "Starting the torrents");
   });
 
   api.ui.onAction("qbt:discard-peek", function (data) {
@@ -3050,10 +4127,11 @@ function registerActions() {
     delete pendingSelection[hash];
     delete peekedTorrents[hash];
     delete metadataFetching[hash];
+    delete armedPeek[hash];
     if (expandedHash === hash) expandedHash = null;
     // deleteFiles is false: a peek downloads no content, and this must never be
     // a route to deleting data the user already had.
-    deleteTorrent(hash, false);
+    deleteTorrents([hash], false);
   });
 
   api.ui.onAction("qbt:start-selected", function (data) {
@@ -3064,7 +4142,7 @@ function registerActions() {
     var files = filesByHash[hash] || [];
     var kept = 0;
     for (var i = 0; i < files.length; i++) {
-      if (Number(files[i].priority) !== 0) kept++;
+      if (numOr(files[i].priority, 1) !== 0) kept++;
     }
     if (files.length && !kept) {
       // Starting with everything skipped downloads nothing and looks broken.
@@ -3077,8 +4155,10 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:stop", function (data) {
-    var hash = hashOf(data);
-    if (hash) actOn(stopEndpoint(), [hash], "Stopping the torrent");
+    var hashes = hashesOf(data);
+    if (hashes.length) {
+      actOn(stopEndpoint(), hashes, hashes.length === 1 ? "Stopping the torrent" : "Stopping the torrents");
+    }
   });
 
   api.ui.onAction("qbt:start-all", function () {
@@ -3089,12 +4169,24 @@ function registerActions() {
     actOn(stopEndpoint(), hashesInView(), "Stopping the torrents");
   });
 
-  api.ui.onAction("qbt:toggle-files", function (data) {
+  api.ui.onAction("qbt:show-files", function (data) {
+    // One at a time: the contents panel replaces the list, so a multi-row
+    // selection opens the first of them rather than nothing at all.
     var hash = hashOf(data);
     if (!hash) return;
-    expandedHash = expandedHash === hash ? null : hash;
+    expandedHash = hash;
     render();
-    if (expandedHash) ensureFiles(hash);
+    ensureFiles(hash);
+  });
+
+  api.ui.onAction("qbt:detail-tab", function (data) {
+    detailTab = (data && (data.tabId || data.id)) || detailTab;
+    render();
+  });
+
+  api.ui.onAction("qbt:close-files", function () {
+    expandedHash = null;
+    render();
   });
 
   api.ui.onAction("qbt:import", function (data) {
@@ -3122,8 +4214,12 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:play-torrent", function (data) {
-    var hash = hashOf(data);
-    if (hash) playFiles(hash, null);
+    var hashes = hashesOf(data);
+    if (!hashes.length) return;
+    // One at a time: playing replaces the queue, so a multi-row selection would
+    // otherwise silently discard all but one of the torrents the user picked.
+    if (hashes.length > 1) api.ui.showNotification("Playing the first of the selected torrents");
+    playFiles(hashes[0], null);
   });
 
   api.ui.onAction("qbt:play-file", function (data) {
@@ -3131,20 +4227,23 @@ function registerActions() {
     // to.
     var indices = rowIndices(data);
     if (!indices.length || !expandedHash) return;
-    // A multi-row selection plays exactly those files; a single row plays the
-    // whole torrent from that point, which is what clicking a track in any other
-    // list does.
-    if (indices.length > 1) {
-      var tracks = tracksForIndices(expandedHash, indices);
-      if (!tracks.length) {
-        api.ui.showNotification("Nothing there that's finished downloading");
-        return;
-      }
-      var t = torrents[expandedHash];
-      api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
+    // Exactly what was selected, one row or many — Play on a row plays THAT
+    // file. It used to start the whole torrent from that point, on the argument
+    // that clicking a track in any other list does that; but this list is a
+    // torrent's contents, most of which is usually not music, and "play this
+    // one" is the only reading of a button on a single file. Whole-torrent
+    // playback is what the file list's All + Play does.
+    var tracks = tracksForIndices(expandedHash, indices);
+    if (!tracks.length) {
+      api.ui.showNotification(
+        indices.length === 1
+          ? "That file hasn't finished downloading yet"
+          : "Nothing there that's finished downloading"
+      );
       return;
     }
-    playFiles(expandedHash, indices[0]);
+    var t = torrents[expandedHash];
+    api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
   });
 
   api.ui.onAction("qbt:file-download", function (data) {
@@ -3157,18 +4256,17 @@ function registerActions() {
     if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 0);
   });
 
-  api.ui.onAction("qbt:only-audio", function (data) {
-    var hash = hashOf(data);
-    var files = hash && filesByHash[hash];
-    if (!files) return;
-    var split = partitionAudio(files);
-    if (!split.others.length || !split.audio.length) return;
-    // Include the audio first: if the second call fails, the torrent is left
-    // wanting MORE than intended rather than nothing at all, which is the
-    // recoverable direction.
-    setFilePriority(hash, split.audio, 1).then(function () {
-      return setFilePriority(hash, split.others, 0);
-    });
+  api.ui.onAction("qbt:file-filter", function (data) {
+    if (!expandedHash) return;
+    fileFilters[expandedHash] = String((data && data.query) || "");
+    render();
+  });
+
+  api.ui.onAction("qbt:file-filter-clear", function (data) {
+    var hash = hashOf(data) || expandedHash;
+    if (!hash) return;
+    delete fileFilters[hash];
+    render();
   });
 
   api.ui.onAction("qbt:enqueue-file", function (data) {
@@ -3176,13 +4274,15 @@ function registerActions() {
     if (indices.length && expandedHash) enqueueFiles(expandedHash, indices);
   });
   api.ui.onAction("qbt:delete-ask", function (data) {
-    pendingDelete = hashOf(data);
+    pendingDelete = hashesOf(data);
+    if (!pendingDelete.length) return;
     render();
   });
 
   api.ui.onAction("qbt:delete-confirm", function (data) {
-    var hash = hashOf(data) || pendingDelete;
-    if (hash) deleteTorrent(hash, false);
+    // The confirm node carries no data — the pending list is the only source,
+    // so a stale `hash` on the event can't delete something else.
+    deleteTorrents(pendingDelete || [], false);
   });
 
   api.ui.onAction("qbt:delete-cancel", function () {
@@ -3240,7 +4340,7 @@ function registerActions() {
 // Bulk actions act on exactly what the user can see — which, with the category
 // restriction on, is only this plugin's own torrents.
 function hashesInView() {
-  var list = tabTorrents(activeTab);
+  var list = visibleTorrents();
   var out = [];
   for (var i = 0; i < list.length; i++) out.push(list[i].hash);
   return out;
@@ -3311,6 +4411,7 @@ return {
   _isComplete: isComplete,
   _isPaused: isPaused,
   _isErrored: isErrored,
+  _statusRank: statusRank,
   _mergeMaindata: mergeMaindata,
   _classifyConnectionError: classifyConnectionError,
   _searchQueryForTarget: searchQueryForTarget,
@@ -3321,18 +4422,53 @@ return {
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
   _searchResultSubtitle: searchResultSubtitle,
+  _searchResultRow: searchResultRow,
+  _swarmCount: swarmCount,
   _collectionForPath: collectionForPath,
   _detectCompletions: detectCompletions,
   _mediaKindOf: mediaKindOf,
+  _classifyTorrentMedia: classifyTorrentMedia,
+  _mediaIconFor: mediaIconFor,
+  _mediaTileSvg: mediaTileSvg,
+  _seedBand: seedBand,
+  _formatSeedCount: formatSeedCount,
+  _progressBand: progressBand,
+  _torrentPercent: torrentPercent,
+  _torrentIconFor: torrentIconFor,
+  _fileIconFor: fileIconFor,
+  _fileState: fileState,
+  _fileStatusText: fileStatusText,
+  _numOr: numOr,
+  _parseFileList: parseFileList,
+  _fileListSignature: fileListSignature,
+  _torrentRow: torrentRow,
+  _torrentDetailNodes: torrentDetailNodes,
+  _torrentInfoLines: torrentInfoLines,
+  _swarmDetail: swarmDetail,
+  _torrentStatusText: torrentStatusText,
+  _armPeek: armPeek,
+  _nothingSelected: nothingSelected,
+  _isFinished: isFinished,
   _isWindowsPath: isWindowsPath,
   _joinRemotePath: joinRemotePath,
   _applyPathMapping: applyPathMapping,
   _isLikelyLocalHost: isLikelyLocalHost,
   _parseFileTrack: parseFileTrack,
+  _fileFolder: fileFolder,
+  _commonFolder: commonFolder,
+  _folderSegments: folderSegments,
+  _baseName: baseName,
   _qbtUri: qbtUri,
   _parseQbtUri: parseQbtUri,
   _playableFiles: playableFiles,
-  _partitionAudio: partitionAudio,
+  _partitionByKind: partitionByKind,
+  _matchesFilter: matchesFilter,
+  _filterFiles: filterFiles,
+  _selectionSummary: selectionSummary,
+  _formatAge: formatAge,
+  _formatDuration: formatDuration,
+  _formatAvailability: formatAvailability,
+  _swarmText: swarmText,
   _magnetHash: magnetHash,
   _newHashes: newHashes,
   _normalizeTorrentName: normalizeTorrentName,

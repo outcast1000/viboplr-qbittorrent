@@ -39,6 +39,50 @@ leave the key empty — no header is sent and that works.
 Your key is stored in Viboplr's plugin database in plain text. Revoke it in
 qBittorrent if you ever need to.
 
+## The list
+
+**One list, sorted by status.** Every torrent lives in the same **Torrents** tab
+and states its own status — *Downloading*, *Seeding*, *Paused*, *Complete*,
+*Fetching metadata*, *Error*. There is no Downloading/Completed/All split: those
+were three filtered views of the same rows, and a torrent that finished used to
+jump between them, disappearing from the list you were watching it in.
+
+The order is the triage. Torrents waiting on a decision from you come first
+(nothing happens to them until you act), then errors, then anything actually
+transferring, then queued/stalled, then paused, with finished torrents last.
+Ties break by most recently added. The tab carries the count.
+
+The **name** leads and gets the full width. Everything else reads on the line
+underneath, in one order: **status · file count · size · transfer · swarm** —
+e.g. *Downloading · 14 files · 916 MB · ↓ 2.3 MB/s · ETA 7m · 12/40 seeds ·
+3/9 leechers*. Count and size sit together because they answer one question, and
+seeds and leechers give **connected out of what the tracker says exists**: 2
+connected is a routing problem if 300 are out there and a dead release if 2 are.
+A total qBittorrent hasn't been told is left off rather than shown as 0.
+
+The tile carries the **percentage downloaded**, coloured by
+state — blue transferring, green complete, yellow stalled or waiting on you,
+grey stopped, red errored. Colour is the state and not the number on purpose:
+90% stopped and 90% downloading are the same figure and completely different
+situations.
+
+**Clicking a row opens it** — a torrent is a container, and a click that only
+highlighted it read as nothing having happened. Cmd/Ctrl-click and Shift-click
+still build a selection, and Start / Stop / Remove in the toolbar above the list
+take the whole of it in one go (Remove asks once, naming the count).
+
+Hovering a row reveals **▶ Play**, **⏵ Start**, **⏸ Stop** and **🗑 Remove**.
+There is no Contents button — the row itself opens the contents, so a button
+would be a third route to the same place at the cost of tray width.
+
+There is deliberately **no separate Pause**. qBittorrent has Start and Stop and
+nothing between them — WebAPI 2.11 renamed pause/resume to stop/start precisely
+because they were one pair — so two buttons posting to the same endpoint would
+be a lie about what the client can do. *Stop* is the pause.
+
+*Start all* / *Stop all* act on every torrent the list shows you — which, with
+the category filter on, is only the ones this plugin added.
+
 ## Status
 
 The **Settings** tab (and Settings → qBittorrent) opens with a status panel: the
@@ -73,6 +117,9 @@ if you want it.
 
 ## Notes, limits and gotchas
 
+- **The open torrent contents refresh too.** A torrent per-file progress is a
+  separate endpoint from the main poll, so while a contents panel is open the
+  plugin re-reads that one torrent file list each cycle. Closed, it does not.
 - **It polls.** The plugin API has no "view opened" signal, so while the plugin
   is enabled and a server is configured it asks qBittorrent for changes every few
   seconds (5 by default, adjustable 2–60 in settings). It uses the incremental
@@ -86,8 +133,10 @@ if you want it.
 ## Choosing files *before* the download starts
 
 Turn on **Choose files before downloading** in settings. Torrents you add are
-then paused, their file list is fetched, and the row waits with *Paused. Choose
-which files you want below, then press Start download.*
+then paused, their file list is fetched, and the plugin opens straight into that
+torrent's contents with *Paused. Choose which files you want below, then press
+Start download.* In the list it reads **Waiting for you**, in yellow, above
+everything else — it is the one row that makes no progress until you act.
 
 Magnets work as well: a magnet is only a hash, and qBittorrent won't fetch a
 stopped torrent's file list — so it's started briefly to get the metadata and
@@ -98,20 +147,87 @@ you want when you're grabbing one album.
 
 ## Contents, and choosing what downloads
 
-Press **Files** on any torrent to see everything inside it — not just the
-playable files, because the point of the list is often to skip the 4 GB video
-extra. Each row shows its size and progress; skipped files are marked `⊘` and
-unfinished ones `◌`.
+**Click a torrent** to see everything inside — not only the playable files: the
+point of the list is often to skip the 4 GB video extra. (A plain click opens;
+Cmd/Ctrl-click and Shift-click still build a multi-selection for the list's own
+toolbar, and double-click or Enter opens it too.)
 
-Per row: **↓** includes a file in the download, **⊘** drops it. On an unfinished
-torrent that also holds non-audio files, **Download only the audio** does the
-common case in one press. Priorities you set in qBittorrent itself (high,
-maximum) are left alone — this only ever switches a file between *download* and
-*don't*.
+The contents **replace the list** rather than expanding the row:
+
+- **A plain hero** — the torrent's name at full size and the **Back** button the
+  rest of the app uses. No artwork, background or effects: a torrent has no image
+  of its own, so the full hero was a 320px scrimmed panel wrapped around a
+  placeholder disc.
+- **Start / Stop and Remove**, the only two things you do to a torrent as a
+  whole. Play lives on the file rows, where it acts on something actually on
+  disk.
+- **Two tabs.** **Files** is what the panel is for, so it's first and the
+  default; **Info** is the numbers you occasionally check.
+
+### The Files tab
+
+The filter box narrows the list as you type, matching anywhere in the file's
+*path* — so `extras` finds a whole folder — with space-separated terms that all
+have to match (`live flac` narrows, it doesn't widen). Each torrent keeps its own
+filter text, and a filter that matches nothing says so and offers a Clear.
+
+Selecting files is **All · None · Audio · Video** in the list's own toolbar. They
+*select* rows; then **↓ Download** or **⊘ Skip** acts on what you selected.
+Keeping selection and action apart means every combination works without a button
+for each: *Audio* then ↓, or *All* → ⊘ → *Audio* → ↓ for "only the tracks".
+Presets follow the filter, so they can never select a row you cannot see, and a
+preset with nothing of its kind is greyed out.
+
+### The Info tab
+
+Plain text in aligned label/value rows under three headings. **Transfer** —
+status, progress, size, downloaded,
+uploaded, speeds, time left, ratio, how long it's been active, when it was added
+and finished. Speeds and time-left appear only while the torrent is *actually
+moving*: on a stopped one they'd read as a fault rather than as something you
+paused.
+
+**Swarm** — seeds and leechers as *connected* and *in the swarm* separately (2
+connected of 300 is a routing problem, 2 of 2 is a dead release), plus
+**availability** (how many complete copies your connected peers add up to; below
+1.00 nobody reachable has the whole thing, so it can stall short of 100% however
+many seeds the tracker claims), tracker count, when a full copy was last seen,
+and last activity.
+
+**Files and location** — what's selected out of the total, where it's saving, the
+category, and the hash.
+
+Titles carry the folder, **relative to the torrent’s own folder** — *CD1 /
+Opening*, *extras / scans / front.jpg* — so two discs’ track 1 are not the same
+row twice.
+
+What you won’t see is the folder every file shares. Almost every torrent wraps
+its contents in one directory named after the release, and the hero above the
+list already says it, so repeating it on every row was a column of the same
+words pushing the part that matters off the end. Any deeper folder holding
+*every* file goes the same way, leaving bare filenames. A file that genuinely
+sits at the torrent’s root means there is no shared wrapper, so nothing is
+stripped from anybody.
+
+Files sort by full path, so a folder’s contents stay together, and a filter on a
+folder name explains its own results.
+
+Each row hovers only what it can actually do. A **Downloaded** file gets **▶
+Play** and **+ Add to queue** — the bytes are on disk — and nothing else: there
+is nothing left to fetch and nothing worth skipping. Anything else is still a
+choice about whether to fetch it, so it gets **↓ Download** *or* **⊘ Skip**,
+whichever it is not already in. Play and Add to queue are absent there because
+they would act on a file that does not exist yet.
+
+The list still declares all four, so a mixed multi-row selection can reach any
+of them from the toolbar above it. The list still declares all four,
+so a multi-row selection can reach either from the toolbar. Priorities you set in
+qBittorrent itself (high, maximum) are left alone — this only ever switches a
+file between *download* and *don't*.
 
 ## Playing from a torrent
 
-**Play** plays the whole torrent, or click a single file to play just that one —
+**Play** on a file row plays **that file**, and on a multi-row selection exactly those files —
 they become ordinary queue entries, with the usual right-click menu and
 drag-to-queue. Hover a row for **▶ Play** and **+ Add to queue**.
 
@@ -151,11 +267,43 @@ The **Search** tab drives the search plugins you have installed in qBittorrent �
 this plugin ships none of its own. Results are sorted by seeders and stream in as
 each indexer answers.
 
-Each result has two buttons: **↓ Add to qBittorrent** and **☰ View contents**.
+Results are a normal row list, the same one every other search surface in the app
+uses. Each row leads with the **name**, carries its **size** in the trailing
+column, and puts **seeders / leechers** and the indexer underneath. The thumbnail
+carries the two facts you decide on:
 
-*View contents* adds the torrent **paused** and shows what's inside as soon as
-qBittorrent has the file list. Nothing downloads until you press **Start
-download**; **Discard** removes it again and never deletes anything from disk.
+- **What it is** — a **music note or a film strip**, read off the release name.
+  `FLAC`, `MP3`, `320kbps`, `24bit`, `vinyl` mean audio; `1080p`, `x265`,
+  `BluRay`, `S01E05` mean video, and win when a name carries both (a concert
+  Blu-ray with a FLAC track is still video). A name with no format tags gets a
+  plain sheet rather than a guess.
+- **Whether it will actually download** — a **seeder badge** across the bottom:
+  **green above 100**, **yellow above 10**, **red at or below 10**, and grey `?`
+  when the indexer didn't report a swarm (which is not the same as zero). Counts
+  past 999 read as `1.2k`. Results are sorted by seeders, so the colour runs
+  green to red down the list.
+
+Hovering a row
+reveals **⬇ Download** and **📂 View contents**; double-click or Enter downloads.
+Click, Cmd/Ctrl-click and Shift-click select, and **Download** in the toolbar
+above the list takes everything selected in one go. *View contents* stays one at
+a time — it adds a real (paused) torrent, and doing that to a whole selection
+would leave a pile of them to clean up.
+
+*View contents* adds the torrent **paused**, and once qBittorrent has the file
+list it **starts it with every file set to skip**. Nothing transfers — there is
+nothing selected to transfer — and the moment you include a file it begins
+arriving. There is no second *Start download* press, because picking the files
+*is* the decision. **Discard** removes the whole thing and never deletes
+anything from disk.
+
+While a torrent is in that state the list says **Choose files to start** in
+yellow at **0%**, the contents panel puts *Download this file* first, and every
+file reads *Not selected for download*. That labelling is load-bearing: with
+nothing selected there is nothing left to want, so **qBittorrent itself reports
+the torrent as 100% complete and starts seeding it**. The plugin never repeats
+that — it isn't counted as Finished, isn't coloured green, isn't announced as a
+finished download, and isn't imported into your library.
 
 For a magnet that means a brief start purely to fetch metadata from the swarm —
 no file data moves during it — and the row says so while it happens.

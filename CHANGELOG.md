@@ -1,5 +1,267 @@
 # Changelog
 
+## 0.17.0
+
+**Search results are a list again, and the fields are in the order you read
+them.**
+
+Every result was a card: a title bar, a paragraph of details and two full-width
+buttons. Four of them filled the screen and nothing could be compared against
+anything else.
+
+- **Name first, size second, swarm third.** The name is the row title and gets
+  the full width; size moved to its own trailing column, where it can be compared
+  down the list; seeders / leechers and the indexer sit underneath. Size is no
+  longer repeated in the detail line.
+- **"Add to qBittorrent" is now "⬇ Download"**, and it is a hover overlay button
+  on the row like every other action in the app, alongside **📂 View contents**.
+  Double-click or Enter downloads — the row list was dropped once before because
+  a plain click did nothing, and a per-row action fixes that properly.
+- **Multi-select works.** Click / Cmd-click / Shift-click, then Download the lot
+  from the toolbar. *View contents* stays one at a time, and says so, because it
+  adds a real paused torrent.
+- **The thumbnail says what the torrent is, and whether it will download.** It
+  used to be two arbitrary letters of the release name, drawn in the most
+  eye-catching part of the row and meaning nothing. Now it carries both facts you
+  choose on:
+  - A **music note or a film strip**, read off the release tags: `FLAC` / `MP3` /
+    `320kbps` / `24bit` / `vinyl` → audio, `1080p` / `x265` / `BluRay` / `S01E05`
+    → video. Video wins when a name carries both, since a concert Blu-ray with a
+    FLAC track is still four gigabytes of video. Tags match as whole tokens, so
+    "24k Magic" isn't 4K and "Waves" isn't WAV, and a name with no tags at all
+    gets a plain sheet instead of a guess.
+  - A **colour-coded seeder badge** across the bottom — green above 100, yellow
+    above 10, red at or below. Seeders decide whether a torrent downloads at all
+    or sits at 0 B/s forever, and while scrolling a list you read a colour, not
+    the third value of a subtitle sentence. An unreported swarm is a grey `?`,
+    never red: "the indexer didn't say" is not a verdict on the torrent. Counts
+    past 999 read as `1.2k`.
+- **An unreported swarm reads as "swarm unknown"** rather than "0 seeders".
+  Indexers send `-1` for "didn't report", and rendering that as zero was a
+  verdict on the torrent that sent people past live results.
+- Leechers now show at zero, so the fields stay in the same place on every row.
+
+*View contents* already added the torrent paused (since 0.16.0) and still does;
+the dead pre-0.16 fallback branch behind it is gone.
+
+**Clicking a torrent opens it**, instead of merely highlighting the row. A
+torrent is a container, and a click that only selected it read as nothing having
+happened. Cmd/Ctrl-click and Shift-click still build the multi-selection the
+toolbar acts on. (Needs the host's new per-list `openOnClick`; track lists
+everywhere else keep click-to-select.)
+
+With the row itself opening, the **📂 Contents** hover button is gone: it was a
+third route to the same place, taking tray width from the actions that have no
+other route. The tray is now ▶ Play · ⏵ Start · ⏸ Stop · 🗑 Remove.
+
+**The contents panel is a detail page now.**
+
+- **A plain hero**: the torrent's name at full size plus the **Back** button
+  every detail page in the app uses. No artwork, background, motion look or FX
+  picker — a torrent has no image of its own, so the full hero was a 320px
+  scrimmed panel wrapped around a placeholder disc. (Needs the host's new
+  `plain` flag on `detail-header`, which also overrides the hero's always-light
+  text tokens: with no scrim behind them they'd be white text on the page.)
+- **Start / Stop and Remove sit in the hero**, where every other detail page puts Play and Enqueue — those two verbs do not fit a torrent, so these replace the pair rather than sitting in a second bar underneath it. Nothing else at torrent level: Play moved to
+  the file rows, where it acts on something actually on disk; *Add to library*
+  went with the overflow menu (finished downloads still import automatically).
+- **A file’s folder is part of its row title, relative to the torrent’s own
+  folder** — *CD1 / Opening*, *extras / scans / front.jpg*. The name parser
+  strips the path, so the list showed leaves only: two “01”s from CD1 and CD2
+  were the same row twice, and a folder of scans looked like tracks at the root.
+  The filter already matched on the full path, so this is also what makes a
+  search for a folder name explain its own results.
+
+  What is *not* shown is the folder every file shares. Almost every torrent
+  wraps its contents in one directory named after the release, and the hero
+  above the list already says it — repeating it per row was a column of the same
+  words pushing the distinguishing part off the end. Any deeper folder holding
+  every file goes too, leaving bare filenames. A file genuinely at the root
+  means there is no shared wrapper, so nothing is stripped from anybody. It is
+  computed across all files rather than the filtered view, so a filter narrows
+  the list without re-titling what is left.
+- **Play on a file row plays that file**, not the whole torrent from that point.
+  The old behaviour borrowed the rule from a track list, but this list is a
+  torrent contents — mostly not music — and a button on one file has only one
+  reading. A multi-row selection plays exactly those files; an unfinished one
+  says so instead of playing something else.
+- **Each file row shows only the buttons that apply to it.** A downloaded file
+  gets ▶ Play and + Add to queue and nothing else; anything still being decided
+  gets ↓ Download *or* ⊘ Skip — never both, since they are the same
+  decision in two directions and the one a file is already in is a no-op taking a
+  slot. The list still declares all four so a mixed multi-row selection can reach
+  either from the toolbar. (Needs the host's new per-item `actions` subset;
+  order always follows the declared list, so the buttons two rows share stay in
+  the same slot instead of shuffling.)
+- **A file's size moved onto its detail line**, after the status — *Downloading ·
+  40% · 28 MB* — the same move the torrent rows got, for the same reason: a
+  trailing column put two figures that are read together at opposite ends of the
+  row. Skipped files show it too; it's the number you're deciding on.
+- **Split into two tabs.** **Files** — the filter and the list — is what the
+  panel is for, so it's first and the default. **Info** is the numbers, as
+  **plain text** rather than stat tiles: Transfer, Swarm, and Files-and-location,
+  including availability, tracker count, last-full-copy-seen, save path and hash.
+  Headings look like headings and values line up in a column — two generic host
+  classes (`plugin-heading`, `plugin-kv`) rather than qBittorrent-specific CSS,
+  since a block of reference facts is a shape any plugin view may need and the
+  only alternatives were stat tiles (right for a few headline numbers, wrong for
+  twenty rows) or "Label: value" text with nothing to align against.
+  Speeds and a time-left now appear only while the torrent is *actually moving* —
+  gating on "not finished" still printed "Download speed: —" and "Time left: ∞"
+  on a stopped torrent, which reads as a fault rather than as something you
+  paused.
+
+**Fixed: the now-playing source panel showed `qbt://<hash>/3` instead of the
+file path.**
+
+The stream resolver returned a bare URL string, which has nowhere to carry a
+`sourceUrl` — so the host had nothing to describe the track with but its own
+URI. It now returns the one-candidate object form with `sourceUrl` set to the
+resolved `file://` path (the host treats a one-candidate list exactly like a
+bare URL, so nothing else changes). The panel shows the real path and its
+**Open folder** button works.
+
+The track keeps its `qbt://` path on purpose: that is a late-binding handle,
+re-resolved through qBittorrent every time it plays, so it survives the file
+being moved on completion, the save path changing, or a path mapping being
+edited — none of which a `file://` frozen into the queue would.
+
+**Fixed: the open torrent file list never updated.**
+
+Click Download on a file, watch qBittorrent fetch it, and the row sat at
+*Downloading 0%* for ever. Play then refused it — "nothing finished downloading
+in this torrent yet" — about a file that plainly had, and its row never gained a
+`path`, so drag-to-queue and the right-click menu were dead on it too. All one
+cause: `/sync/maindata` describes **torrents**, and a torrent file list is a
+separate endpoint that was only ever read when the panel opened and after a
+priority change. Nothing re-read it while you watched.
+
+The contents panel now re-reads the open torrent file list on each poll — one
+request, only while a panel is open, quiet on failure (it keeps the list it has
+rather than raising a toast over a working view), and it only re-renders when a
+progress or priority actually moved.
+
+**Fixed: a deselected file read "Downloading 0%".**
+
+Two separate defects, both of which made the contents list say the opposite of
+the truth:
+
+- **A priority that arrived as the string `"0"` was read as 1.** The parser
+  gated on `typeof f.priority === "number"`, which a string fails, so it fell
+  through to the default of "download this one" — and a file the user had
+  deselected came back marked for download. Every field from `/torrents/files`
+  is now coerced with `Number()` instead, so `"0"` means zero. `index` had the
+  same bug and it was worse there: a string index fell back to the file's
+  position in the array, which sends `/torrents/filePrio` at the wrong file.
+  Where a default is still needed, the safe direction wins.
+- **"Downloading" was asserted from the file alone.** Whether a selected file is
+  actually transferring depends on the *torrent*, not the file, so every file in
+  a stopped, paused or errored torrent claimed to be downloading at 0%. Files
+  now have four states — *Not selected for download*, *Selected · 40%*,
+  *Downloading · 40%*, *Downloaded* — in four distinct tile colours.
+
+**"View contents" now leaves the torrent armed, not parked.**
+
+It added the torrent paused with every file selected, showed you the list, and
+waited for a *Start download* press — a step that stood between you and the
+thing you had just chosen, and one that started everything if you forgot to
+deselect the 4 GB video extra first.
+
+Now, as soon as the file list arrives, the torrent is **started with every file
+set to skip**. Nothing transfers, because nothing is selected. **Including a
+file downloads it on the spot** — picking the files *is* the decision, so there
+is no second button. Deselecting one is not a decision to download anything, so
+it doesn't start it.
+
+The order is the safety of it, and it is asserted as an order: deselect first,
+*then* start. The reverse downloads the whole release. Arming also verifies that
+qBittorrent really did deselect everything before it starts anything — the
+client silently keeps a completed file's priority — and falls back to the old
+paused hold if any of that fails, rather than claiming a state it didn't reach.
+
+**The trap this had to be built around:** a torrent with nothing selected has
+nothing left to want, so **qBittorrent reports it as 100% complete and starts
+seeding it**, having downloaded none of it. Everything that reads "is this
+finished?" now asks a different question first, so a parked torrent is not
+counted as Finished, not coloured green, not shown at 100%, not announced as a
+finished download, and not imported into your library. The check is on the
+files, not on the flag that got us there, so deselecting everything by hand is
+handled the same way.
+
+Its size column also switched to the torrent's real size: with nothing selected
+qBittorrent reports the *wanted* size, which is 0 B.
+
+**The Torrents tab is a list too, on the same rules.**
+
+Every torrent was a card — title bar, paragraph, progress bar and up to six
+full-width buttons — so three transfers filled the screen and nothing could be
+compared against anything else. It is now the same row list the Search tab uses:
+
+- **Name first, everything else on one detail line**: status · file count · size
+  · transfer · swarm. Size sits with the file count rather than in a trailing
+  column — the two answer one question and a column pulled them to opposite ends
+  of the row. (A *search result* keeps its size column: there you compare sizes
+  down a list of candidate releases, so the column earns its place.) The size is
+  the torrent's real weight, since qBittorrent's `size` is only what is
+  currently selected and reads 0 B when nothing is. The file count is fetched
+  once per torrent and cached (the torrents endpoint doesn't report it) and is
+  omitted for a torrent qBittorrent won't describe — including when it answers
+  with an empty list, which would otherwise print an impossible "0 files".
+- **Seeds and leechers show connected out of total** — *12/40 seeds · 3/9
+  leechers*. Either figure alone misleads: 2 connected is a routing problem if
+  300 exist and a dead release if 2 do. A total the tracker hasn't reported is
+  left off rather than rendered as `-1` or faked as 0.
+- **The tile carries the percentage, coloured by state** — blue transferring,
+  green complete, yellow stalled or waiting on you, grey stopped, red errored.
+  Colour is the *state*, not the number: 90% stopped and 90% downloading are the
+  same figure and completely different situations. The percentage floors rather
+  than rounds, so 99.7% never reads as finished.
+- **Actions are hover overlay buttons**: ▶ Play, ⏵ Start, ⏸ Stop, 📂 Contents,
+  🗑 Remove. Double-click opens the contents — for a container that is what "open
+  it" means. Multi-select works: Start / Stop / Remove take the whole selection,
+  and Remove asks once, naming the count rather than pasting twelve release names
+  into a dialog.
+- **No separate Pause, deliberately.** qBittorrent has Start and Stop and nothing
+  between them — WebAPI 2.11 renamed pause/resume to stop/start precisely because
+  they were one pair — so two buttons posting to the same endpoint would be a lie
+  about what the client can do.
+- **Contents replace the list instead of expanding the row.** A file list nested
+  inside a row of another list left no way to tell where the torrent ended. The
+  panel carries the torrent's name, its buttons, a ← Back, and everything that
+  doesn't fit in a row's overlay tray: the file-selection hold, *Download only
+  the audio*, and *Add to library*. It survives its torrent being removed
+  underneath it rather than rendering an empty page.
+- **Each file states whether it is selected for download, then its progress** —
+  *Not selected for download* / *Downloading · 45%* / *Downloaded*, and the same
+  on its tile as a grey `skip`, a blue percentage or a green `100%`. A row that
+  only said "45%" left "is this one even coming?" unanswered, which is the
+  question the contents list exists to settle. The `⊘`/`◌` name prefixes are gone
+  — a third copy of the same fact glued to the front of every filename.
+
+**One torrent list instead of three tabs.**
+
+`Downloading`, `Completed` and `All` were three filtered views of the same rows,
+filtered on a fact each row already printed. Worse, the filter moved things: a
+torrent that finished vanished from the tab you had been watching it in and
+reappeared in another one, which reads as "it disappeared".
+
+They are now a single **Torrents** tab, and status does the work the tabs were
+doing:
+
+- **Each row leads with its status** on its own line — *Downloading*, *Seeding*,
+  *Paused*, *Complete*, *Fetching metadata*, *Waiting for you*, *Error* — rather
+  than as the first grey item in a run of sizes and speeds.
+- **The order is triage.** Torrents waiting on a decision first (they are the
+  only rows that stop making progress until touched), then errors, then anything
+  transferring, then queued/stalled, then paused, then finished. Most recently
+  added breaks ties, as before.
+- **The count lives on the tab.** (An *Active* / *Finished* / speeds / free-space
+  stats row above the list was tried and removed — the per-row status and tile
+  already carry the same facts, and a server-wide summary is not what you open a
+  torrent list to read.)
+- **Start all / Stop all** now act on the whole visible list rather than on
+  whichever tab happened to be open — still bounded by the category filter.
+
 ## 0.16.0
 
 **One way of showing a torrent's contents, and it's the one that works.**
