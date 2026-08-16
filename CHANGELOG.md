@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.16.0
+
+**One way of showing a torrent's contents, and it's the one that works.**
+
+`View contents` used to try qBittorrent's `torrents/fetchMetadata` first and fall
+back to adding the torrent paused. That path is gone: it never passed the
+`downloader` parameter, so for the page-style links most indexers return it
+failed exactly the way adding used to — and it only exists on very recent
+qBittorrent builds anyway.
+
+Now **View contents always adds the torrent paused** and shows the file list as
+it arrives. Nothing downloads until you press Start download, and Discard removes
+it again. Verified against a live qBittorrent: added paused at 0.00% with no
+transfer, 53 files listed, discarded cleanly.
+
 ## 0.15.0
 
 **Adding a search result actually works now.** Verified end to end against a live

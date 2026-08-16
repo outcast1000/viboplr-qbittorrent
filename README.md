@@ -153,17 +153,12 @@ each indexer answers.
 
 Each result has two buttons: **↓ Add to qBittorrent** and **☰ View contents**.
 
-*View contents* opens a **download window**: the torrent's name, size and file
-list, with per-file include/skip and an *Only the audio* shortcut. **Add and
-start** adds it with your choices already applied; **Cancel** leaves nothing
-behind, because nothing was added in the first place.
+*View contents* adds the torrent **paused** and shows what's inside as soon as
+qBittorrent has the file list. Nothing downloads until you press **Start
+download**; **Discard** removes it again and never deletes anything from disk.
 
-That uses `torrents/fetchMetadata`, which reads a torrent's contents without
-adding it. It exists on qBittorrent **master only** — no release up to 5.2.3 has
-it. On those, the plugin says so and falls back to adding the torrent **paused**,
-showing the same file list from there, with **Start download** or **Discard**.
-Either way nothing downloads until you decide, and Discard never deletes
-anything from disk.
+For a magnet that means a brief start purely to fetch metadata from the swarm —
+no file data moves during it — and the row says so while it happens.
 
 Right-clicking a track, album or artist in your library offers **Find torrents…**,
 which opens the tab and searches for it. A track searches its *album*, since

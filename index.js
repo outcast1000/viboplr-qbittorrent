@@ -121,11 +121,6 @@ var metadataElapsed = {};
 // row. Before that there is no row to put a message on, so the view carries one.
 var preparingAdd = false;
 var preparingElapsed = 0;
-// The metadata preview ("download window"). null = closed.
-var preview = null;
-// Whether this qBittorrent has /torrents/fetchMetadata at all: null unknown,
-// false = probed and absent (every release up to 5.2.3), true = present.
-var metadataPreviewSupported = null;
 
 // Search.
 var searchQuery = "";
@@ -623,35 +618,6 @@ function magnetHash(uri) {
   return h.toLowerCase();
 }
 
-// Read the file list out of a /torrents/fetchMetadata response.
-//
-// Shape (qBittorrent's serializeTorrentInfo): { infohash_v1, infohash_v2, id,
-// info: { name, length, files: [{ path, length }] } }. Three answers are
-// possible and only one is the real one:
-//   - {}                       still fetching, ask again
-//   - only the infohash keys   metadata not complete yet, ask again
-//   - info.files present       done
-//
-// File entries carry NO index: their position in the array IS the file index
-// that /torrents/filePrio takes, which is what makes a selection made here
-// applicable after the torrent is added.
-function parseMetadataPreview(data) {
-  if (!data || typeof data !== "object") return null;
-  var info = data.info;
-  if (!info || !info.files || !info.files.length) return null;
-  var files = [];
-  for (var i = 0; i < info.files.length; i++) {
-    var f = info.files[i] || {};
-    files.push({ index: i, name: String(f.path || ""), size: Number(f.length || 0), progress: 0, priority: 1 });
-  }
-  return {
-    name: String(info.name || ""),
-    totalSize: Number(info.length || 0),
-    files: files,
-    hash: String(data.id || data.hash || data.infohash_v1 || "").toLowerCase() || null
-  };
-}
-
 // Loose name comparison for matching an added torrent to what was asked for.
 // Indexers and qBittorrent rarely agree on punctuation ("Artist - Album [FLAC]"
 // vs "Artist-Album-FLAC"), so everything but letters and digits goes.
@@ -1115,8 +1081,8 @@ var ATTACH_ATTEMPTS = 25;
 var ATTACH_POLL_MS = 1000;
 
 // Which torrent did that add produce? Three ways, in descending confidence.
-// Shared by the paused-selection flow and the preview's add, which both need the
-// hash before they can do anything else.
+// Used by the paused-selection flow, which needs the hash before it can do
+// anything else with the torrent.
 function matchAddedTorrent(knownBefore, expectedHash, nameHint) {
   if (expectedHash && torrents[expectedHash]) return expectedHash;
   var fresh = newHashes(knownBefore, torrents);
@@ -1383,173 +1349,6 @@ function actOn(path, hashes, label) {
     .then(function () {
       busy = null;
       return refresh();
-    });
-}
-
-// --- Metadata preview (the real "download window") --------------------------
-
-var PREVIEW_POLL_MS = 1500;
-var PREVIEW_MAX_MS = 60000;
-
-// Ask qBittorrent what is inside a torrent WITHOUT adding it.
-//
-// /torrents/fetchMetadata exists on qBittorrent master but is in no release as
-// of 5.2.3, so this is strictly opportunistic: the first 404/405 marks it
-// unsupported for the session and every caller falls back to adding paused.
-// Anything else is a real error and is reported as one.
-function fetchMetadataPreview(source, elapsed) {
-  if (metadataPreviewSupported === false) return Promise.resolve({ unsupported: true });
-  return authed("/torrents/fetchMetadata", { method: "POST", form: { source: source } })
-    .then(function (resp) {
-      if (resp.status === 404 || resp.status === 405) {
-        metadataPreviewSupported = false;
-        return { unsupported: true };
-      }
-      if (resp.status < 200 || resp.status >= 300) {
-        return resp.text().then(function (body) {
-          throw new Error(String(body || "").trim() || "HTTP " + resp.status);
-        });
-      }
-      metadataPreviewSupported = true;
-      return resp.json().then(function (data) {
-        var parsed = parseMetadataPreview(data);
-        if (parsed) return { preview: parsed };
-        // Empty object or infohash-only: still fetching from the swarm.
-        if ((elapsed || 0) >= PREVIEW_MAX_MS) {
-          throw new Error("Timed out waiting for this torrent's metadata");
-        }
-        if (preview) {
-          preview.elapsed = (elapsed || 0) + PREVIEW_POLL_MS;
-          render();
-        }
-        return delay(PREVIEW_POLL_MS).then(function () {
-          // Abandoned while we waited.
-          if (!preview || preview.source !== source) return { cancelled: true };
-          return fetchMetadataPreview(source, (elapsed || 0) + PREVIEW_POLL_MS);
-        });
-      });
-    });
-}
-
-function openPreview(source, nameHint) {
-  preview = {
-    source: source,
-    name: nameHint || "",
-    files: null,
-    skipped: {},
-    elapsed: 0,
-    error: null,
-    adding: false
-  };
-  activeTab = "search";
-  render();
-
-  return fetchMetadataPreview(source, 0)
-    .then(function (result) {
-      if (!preview || preview.source !== source) return null; // cancelled
-      if (result.cancelled) return null;
-      if (result.unsupported) {
-        // No preview endpoint on this qBittorrent: fall back to the flow that
-        // works everywhere — add it paused and show the contents from there.
-        preview = null;
-        render();
-        api.ui.showNotification("This qBittorrent can't preview a torrent, so it's being added paused instead");
-        return addTorrent(source, { peek: true, name: nameHint });
-      }
-      preview.files = result.preview.files;
-      preview.name = result.preview.name || preview.name;
-      preview.totalSize = result.preview.totalSize;
-      render();
-      return null;
-    })
-    .catch(function (e) {
-      console.error("qBittorrent: metadata preview failed:", e);
-      if (preview && preview.source === source) {
-        preview.error = errText(e);
-        render();
-      }
-    });
-}
-
-// Add what the preview showed, applying the choices made before anything was
-// added at all. Paused first, then priorities, then start — priorities cannot be
-// set on a torrent that does not exist yet, so this order is forced.
-function addFromPreview() {
-  if (!preview || !preview.files || preview.adding) return Promise.resolve();
-  var kept = [];
-  var skipped = [];
-  for (var i = 0; i < preview.files.length; i++) {
-    if (preview.skipped[preview.files[i].index]) skipped.push(preview.files[i].index);
-    else kept.push(preview.files[i].index);
-  }
-  if (!kept.length) {
-    api.ui.showNotification("Everything is set to skip — include at least one file");
-    return Promise.resolve();
-  }
-
-  preview.adding = true;
-  render();
-
-  var source = preview.source;
-  var nameHint = preview.name;
-  var knownBefore = shallowHashSet(torrents);
-  var expectedHash = magnetHash(source);
-  var form = {
-    urls: source,
-    sequentialDownload: "true",
-    firstLastPiecePrio: "true",
-    paused: "true",
-    stopped: "true"
-  };
-  if (category) form.category = category;
-  var dest = collectionById(destCollectionId);
-  if (dest && dest.path) form.savepath = remotePathFor(dest.path);
-
-  return ensureCategory()
-    .then(function () {
-      return authed("/torrents/add", { method: "POST", form: form });
-    })
-    .then(function (resp) {
-      expectOk(resp, "Adding the torrent");
-      return resp.text();
-    })
-    .then(function (body) {
-      if (/^fails\.?$/i.test(String(body || "").trim())) {
-        throw new Error("qBittorrent refused it — it may already be in the list");
-      }
-      return refresh();
-    })
-    .then(function () {
-      return waitForAddedTorrent(knownBefore, expectedHash, nameHint, 0);
-    })
-    .then(function (hash) {
-      if (!hash) throw new Error("Added, but qBittorrent didn't register it in time");
-      // Skips first, then start: starting before the priorities land would pull
-      // pieces of files the user just excluded, which is the whole thing this
-      // flow exists to avoid.
-      var applied = skipped.length
-        ? authed("/torrents/filePrio", { method: "POST", form: { hash: hash, id: skipped.join("|"), priority: 0 } })
-        : Promise.resolve(null);
-      return applied.then(function () {
-        return actOn(startEndpoint(), [hash], "Starting the download");
-      });
-    })
-    .then(function () {
-      preview = null;
-      activeTab = "downloading";
-      api.ui.showNotification(
-        skipped.length ? "Downloading " + kept.length + " of " + (kept.length + skipped.length) + " files" : "Download started"
-      );
-      render();
-      return refresh();
-    })
-    .catch(function (e) {
-      console.error("qBittorrent: adding from the preview failed:", e);
-      if (preview) {
-        preview.adding = false;
-        preview.error = errText(e);
-      }
-      render();
     });
 }
 
@@ -2924,118 +2723,7 @@ function registerStreamResolver() {
   });
 }
 
-// The download window: a torrent's contents, before it exists in qBittorrent.
-function previewNodes() {
-  var children = [];
-  var title = preview.name || "this torrent";
-
-  if (preview.error) {
-    children.push({ type: "text", className: "ds-banner ds-banner--error", content: preview.error });
-    children.push({
-      type: "layout",
-      direction: "horizontal",
-      children: [
-        { type: "button", label: "Add it paused instead", action: "qbt:preview-fallback", variant: "accent" },
-        { type: "button", label: "Cancel", action: "qbt:preview-cancel", variant: "secondary" }
-      ]
-    });
-    return children;
-  }
-
-  if (!preview.files) {
-    children.push({
-      type: "loading",
-      message: "Reading what's inside " + title +
-        (preview.elapsed >= 5000 ? " (" + Math.round(preview.elapsed / 1000) + "s)" : "") +
-        " — nothing has been added to qBittorrent."
-    });
-    children.push({ type: "button", label: "Cancel", action: "qbt:preview-cancel", variant: "secondary" });
-    return children;
-  }
-
-  var keptCount = 0;
-  var keptBytes = 0;
-  var items = [];
-  var hasOther = false;
-  var hasAudio = false;
-  for (var i = 0; i < preview.files.length; i++) {
-    var f = preview.files[i];
-    var kind = mediaKindOf(f.name);
-    if (kind === "audio") hasAudio = true;
-    else hasOther = true;
-    var skip = !!preview.skipped[f.index];
-    if (!skip) {
-      keptCount++;
-      keptBytes += f.size;
-    }
-    var parsed = parseFileTrack(f.name);
-    var label = kind ? parsed.title : String(f.name).replace(/\\/g, "/").split("/").pop();
-    items.push({
-      id: String(f.index),
-      title: (skip ? "⊘ " : "") + label,
-      subtitle: formatBytes(f.size) + (skip ? " · skipping" : "")
-    });
-  }
-
-  children.push({ type: "section", title: title, children: [
-    {
-      type: "stats-grid",
-      items: [
-        { label: "Files", value: preview.files.length },
-        { label: "Downloading", value: keptCount },
-        { label: "Size", value: formatBytes(keptBytes) },
-        { label: "Full size", value: formatBytes(preview.totalSize) }
-      ]
-    },
-    {
-      type: "text",
-      className: "ds-banner ds-banner--warning",
-      content: "Nothing has been added to qBittorrent yet. Pick what you want, then press Add and start."
-    }
-  ]});
-
-  if (hasAudio && hasOther) {
-    children.push({
-      type: "button",
-      label: "Only the audio",
-      action: "qbt:preview-only-audio",
-      variant: "secondary",
-      disabled: preview.adding
-    });
-  }
-
-  children.push({
-    type: "track-row-list",
-    items: items,
-    numbered: true,
-    selectable: true,
-    actions: [
-      { id: "qbt:preview-include", label: "Download this file", icon: "↓" },
-      { id: "qbt:preview-skip", label: "Don't download this file", icon: "⊘" }
-    ]
-  });
-
-  children.push({
-    type: "layout",
-    direction: "horizontal",
-    children: [
-      {
-        type: "button",
-        label: preview.adding ? "Adding…" : "Add and start",
-        action: "qbt:preview-add",
-        variant: "accent",
-        disabled: preview.adding || !keptCount
-      },
-      { type: "button", label: "Cancel", action: "qbt:preview-cancel", variant: "secondary", disabled: preview.adding }
-    ]
-  });
-  return children;
-}
-
 function searchTabNodes() {
-  // The preview takes over the tab: it is a decision to make, not something to
-  // read alongside a list of other results.
-  if (preview) return previewNodes();
   var children = [
     {
       type: "search-input",
@@ -3343,48 +3031,7 @@ function registerActions() {
       addSearchResult(ids[0], { peek: true });
       return;
     }
-    openPreview(r.fileUrl, r.fileName);
-  });
-
-  api.ui.onAction("qbt:preview-include", function (data) {
-    if (!preview) return;
-    var idx = rowIndices(data);
-    for (var i = 0; i < idx.length; i++) delete preview.skipped[idx[i]];
-    render();
-  });
-
-  api.ui.onAction("qbt:preview-skip", function (data) {
-    if (!preview) return;
-    var idx = rowIndices(data);
-    for (var i = 0; i < idx.length; i++) preview.skipped[idx[i]] = true;
-    render();
-  });
-
-  api.ui.onAction("qbt:preview-only-audio", function () {
-    if (!preview || !preview.files) return;
-    var split = partitionAudio(preview.files);
-    preview.skipped = {};
-    for (var i = 0; i < split.others.length; i++) preview.skipped[split.others[i]] = true;
-    render();
-  });
-
-  api.ui.onAction("qbt:preview-add", function () {
-    addFromPreview();
-  });
-
-  api.ui.onAction("qbt:preview-fallback", function () {
-    if (!preview) return;
-    var source = preview.source;
-    var name = preview.name;
-    preview = null;
-    render();
-    addTorrent(source, { peek: true, name: name });
-  });
-
-  api.ui.onAction("qbt:preview-cancel", function () {
-    // Nothing was added, so there is nothing to undo.
-    preview = null;
-    render();
+    addSearchResult(ids[0], { peek: true });
   });
 
   api.ui.onAction("qbt:start", function (data) {
@@ -3528,7 +3175,6 @@ function registerActions() {
     var indices = rowIndices(data);
     if (indices.length && expandedHash) enqueueFiles(expandedHash, indices);
   });
-
   api.ui.onAction("qbt:delete-ask", function (data) {
     pendingDelete = hashOf(data);
     render();
@@ -3685,7 +3331,6 @@ return {
   _parseFileTrack: parseFileTrack,
   _qbtUri: qbtUri,
   _parseQbtUri: parseQbtUri,
-  _parseMetadataPreview: parseMetadataPreview,
   _playableFiles: playableFiles,
   _partitionAudio: partitionAudio,
   _magnetHash: magnetHash,
