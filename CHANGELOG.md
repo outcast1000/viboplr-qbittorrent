@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.1
+
+**Fixes login failing on qBittorrent 5.2 and newer.**
+
+5.2.0 renamed the WebUI session cookie from `SID` to `QBT_SID_<port>` (e.g.
+`QBT_SID_8080`). The plugin looked for `SID`, found nothing, decided the server
+was running without authentication, and sent no cookie on any request after the
+login — so everything came back 403 and it looked like the username and password
+had stopped working. Upgrading from 5.1 to 5.2 was enough to trigger it.
+
+The cookie's name is now read from the response and sent back as given, so 4.x,
+5.0, 5.1 and 5.2+ all work. If a future version renames it again and sets just
+the one cookie, that is used too.
+
 ## 0.12.0
 
 **A real download window**, like qBittorrent’s own add dialog: see what is

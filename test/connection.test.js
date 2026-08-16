@@ -33,26 +33,49 @@ test("normalizeBaseUrl treats blank input as unconfigured", () => {
   assert.equal(plugin._normalizeBaseUrl(null), "");
 });
 
-test("parseSid finds the session cookie among several", () => {
+test("parseSessionCookie finds the session cookie among several", () => {
   const cookies = [
     "theme=dark; Path=/",
     "SID=8vQx1Zc9; path=/; HttpOnly; SameSite=Strict",
     "other=1",
   ];
-  assert.equal(plugin._parseSid(cookies), "8vQx1Zc9");
+  assert.deepEqual(plugin._parseSessionCookie(cookies), { name: "SID", value: "8vQx1Zc9" });
 });
 
-test("parseSid ignores cookie attributes and lookalike names", () => {
-  // "NOTSID=" must not match, and the value must stop at the first ';'.
-  assert.equal(plugin._parseSid(["NOTSID=nope"]), null);
-  assert.equal(plugin._parseSid(["SID=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT"]), "abc");
+test("parseSessionCookie handles qBittorrent 5.2's port-suffixed name", () => {
+  // 5.2.0 renamed the cookie from SID to QBT_SID_<port>. Matching only "SID"
+  // meant finding no cookie, sending none back, and every request after login
+  // being unauthenticated — which looks exactly like wrong credentials.
+  const cookies = ["QBT_SID_8080=abc123; path=/; HttpOnly; SameSite=Lax"];
+  assert.deepEqual(plugin._parseSessionCookie(cookies), { name: "QBT_SID_8080", value: "abc123" });
 });
 
-test("parseSid returns null when the server set no cookie", () => {
+test("parseSessionCookie returns the NAME as well as the value", () => {
+  // The name has to be sent back on every subsequent request; it is not a
+  // constant, so the caller cannot assume one.
+  const parsed = plugin._parseSessionCookie(["QBT_SID_9999=xyz"]);
+  assert.equal(parsed.name, "QBT_SID_9999");
+});
+
+test("parseSessionCookie ignores attributes and lookalike names", () => {
+  assert.equal(plugin._parseSessionCookie(["NOTSID=nope", "other=2"]), null);
+  assert.deepEqual(
+    plugin._parseSessionCookie(["SID=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT"]),
+    { name: "SID", value: "abc" },
+  );
+});
+
+test("parseSessionCookie falls back to a lone unrecognised cookie", () => {
+  // Survives the next rename: if the server set exactly one cookie on the login
+  // response, that cookie is the session.
+  assert.deepEqual(plugin._parseSessionCookie(["FUTURE_NAME=zzz; path=/"]), { name: "FUTURE_NAME", value: "zzz" });
+});
+
+test("parseSessionCookie returns null when the server set no cookie", () => {
   // Not an error: qBittorrent with localhost auth bypass logs you in without
   // one, and the plugin has to treat that as a valid session.
-  assert.equal(plugin._parseSid([]), null);
-  assert.equal(plugin._parseSid(undefined), null);
+  assert.equal(plugin._parseSessionCookie([]), null);
+  assert.equal(plugin._parseSessionCookie(undefined), null);
 });
 
 test("compareVersions orders by numeric segment, not string", () => {

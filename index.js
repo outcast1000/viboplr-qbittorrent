@@ -79,6 +79,9 @@ var draft = null;
 
 // Session.
 var sid = null; // cookie value, or "" when qBittorrent runs cookieless
+// The cookie NAME the server used. Not a constant: 5.2+ appends the WebUI port
+// (QBT_SID_8080), older versions use plain SID.
+var sessionCookieName = "SID";
 var sessionReady = false;
 var loginPromise = null; // single-flight: a burst of requests triggers ONE login
 var cookielessLogin = false;
@@ -163,15 +166,30 @@ function normalizeBaseUrl(raw) {
   return s.replace(/\/+$/, "");
 }
 
-// Pull the SID out of the response's Set-Cookie values. Takes the whole list
-// rather than one joined string because a joined list can't be split back apart
-// safely — a cookie's Expires attribute contains a comma of its own.
-function parseSid(cookies) {
+// Pull the session cookie out of the response's Set-Cookie values, as a
+// { name, value } pair. Takes the whole list rather than one joined string
+// because a joined list can't be split back apart safely — a cookie's Expires
+// attribute contains a comma of its own.
+//
+// The NAME is returned, not just the value, because it is not fixed:
+// qBittorrent 5.2.0 ("WEBAPI: Append port to session cookie name") renamed it
+// from `SID` to `QBT_SID_<port>`, e.g. QBT_SID_8080. Hardcoding `SID` meant
+// finding no cookie on 5.2+, sending none back, and every request after the
+// login being unauthenticated — which presents as "my username and password
+// stopped working".
+function parseSessionCookie(cookies) {
   var list = cookies || [];
+  var pairs = [];
   for (var i = 0; i < list.length; i++) {
-    var m = /(?:^|;\s*)SID=([^;]*)/.exec(String(list[i]));
-    if (m && m[1]) return m[1];
+    // Only the first name=value pair; the rest are attributes.
+    var m = /^\s*([^=;\s]+)=([^;]*)/.exec(String(list[i]));
+    if (!m || !m[2]) continue;
+    pairs.push({ name: m[1], value: m[2] });
+    if (/^(QBT_)?SID(_\d+)?$/i.test(m[1])) return { name: m[1], value: m[2] };
   }
+  // Nothing recognisable, but exactly one cookie was set: it can only be the
+  // session. Costs nothing and survives the next rename.
+  if (pairs.length === 1) return pairs[0];
   return null;
 }
 
@@ -899,7 +917,7 @@ function apiUrl(path) {
 function rawRequest(path, opts) {
   var o = opts || {};
   var headers = {};
-  if (sid) headers["Cookie"] = "SID=" + sid;
+  if (sid) headers["Cookie"] = sessionCookieName + "=" + sid;
   var body;
   if (o.form) {
     headers["Content-Type"] = "application/x-www-form-urlencoded";
@@ -935,13 +953,14 @@ function login() {
           throw new Error("qBittorrent rejected the username or password");
         }
         var cookies = typeof resp.getSetCookie === "function" ? resp.getSetCookie() : [];
-        var got = parseSid(cookies);
+        var got = parseSessionCookie(cookies);
         // No cookie is legitimate when "Bypass authentication for clients on
         // localhost" is on. It is ALSO what an older host looks like (one that
         // can't read response headers at all) — the two are indistinguishable
         // here, so accept it and let the first 403 tell them apart.
         cookielessLogin = !got;
-        sid = got || "";
+        sessionCookieName = got ? got.name : "SID";
+        sid = got ? got.value : "";
         sessionReady = true;
         return sid;
       });
@@ -2749,6 +2768,7 @@ function saveSettings() {
   // different TLS stance), so drop it rather than discovering that on the next
   // 403.
   sid = null;
+  sessionCookieName = "SID";
   sessionReady = false;
   apiVersion = null;
   qbtVersion = null;
@@ -3581,7 +3601,7 @@ return {
   deactivate: deactivate,
   // Exposed for the test harness.
   _normalizeBaseUrl: normalizeBaseUrl,
-  _parseSid: parseSid,
+  _parseSessionCookie: parseSessionCookie,
   _compareVersions: compareVersions,
   _supportsStartStop: supportsStartStop,
   _formatBytes: formatBytes,
