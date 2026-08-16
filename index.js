@@ -1,19 +1,16 @@
 // viboplr-qbittorrent — control a qBittorrent WebUI from Viboplr.
 //
 // Design notes:
-//  - Auth is a session COOKIE. /api/v2/auth/login answers with
-//    `Set-Cookie: SID=…` and qBittorrent offers no header/API-key alternative,
-//    which is why this plugin needs Viboplr >= 1.0.27: api.network.fetch only
-//    began returning response headers (and getSetCookie()) there. The SID is
-//    kept in MEMORY ONLY — a session token that outlives a restart is a
-//    liability, and re-logging in costs exactly one request.
-//  - A qBittorrent with "Bypass authentication for clients on localhost" turned
-//    on answers the login with "Ok." and NO cookie. That is a valid session, not
-//    a failure, so a cookieless login is accepted and simply sends no Cookie
-//    header afterwards.
-//  - ANY 403 means the session lapsed — expiry, a qBittorrent restart, or a
-//    password change. One re-login plus one retry covers all three; a second
-//    403 is a real answer and is surfaced.
+//  - Auth is an API KEY, and only an API key. qBittorrent 5.2 added them and
+//    they remove every moving part a session has: no login round trip, no
+//    cookie whose name changes between versions (it did, in 5.2), no expiry,
+//    and nothing the failed-login IP ban can lock out. The key rides on every
+//    request as an Authorization: Bearer header.
+//  - There is deliberately NO username/password path. Supporting both meant
+//    two auth flows, two failure vocabularies and a session layer that existed
+//    only for the weaker one.
+//  - A qBittorrent with "Bypass authentication for clients on localhost" needs
+//    no key at all: an empty key simply sends no header, and that works.
 //  - Endpoint names moved in qBittorrent 5.0 (WebAPI 2.11): /torrents/pause ->
 //    /torrents/stop and /resume -> /start. The version is probed once per
 //    session rather than guessed or discovered by trying both.
@@ -45,6 +42,11 @@ var MAX_POLL_MS = 60000;
 // than surfacing later as a baffling "session rejected".
 var MIN_HOST_VERSION = "1.0.27";
 
+// The qBittorrent this plugin targets. API keys arrived in 5.2, and 5.2.4 is the
+// build this has been developed against — below it the auth simply is not there,
+// so it is a requirement rather than a preference.
+var MIN_QBT_VERSION = "5.2.4";
+
 // qBittorrent reports "no estimate" as this sentinel rather than null.
 var ETA_INFINITY = 8640000;
 
@@ -55,11 +57,11 @@ var api = null;
 
 // Settings (persisted).
 var baseUrl = "";
-var username = "";
-var password = "";
 // Optional. qBittorrent 5.2+ accepts an API key instead of a login; when set it
 // replaces the username/password entirely.
 var apiKey = "";
+// Settings saved before this plugin dropped username/password auth.
+var hadLegacyCredentials = false;
 var category = "viboplr";
 var restrictToCategory = true;
 var insecure = false;
@@ -81,13 +83,6 @@ var chooseFilesFirst = false;
 var draft = null;
 
 // Session.
-var sid = null; // cookie value, or "" when qBittorrent runs cookieless
-// The cookie NAME the server used. Not a constant: 5.2+ appends the WebUI port
-// (QBT_SID_8080), older versions use plain SID.
-var sessionCookieName = "SID";
-var sessionReady = false;
-var loginPromise = null; // single-flight: a burst of requests triggers ONE login
-var cookielessLogin = false;
 var apiVersion = null; // WebAPI version, e.g. "2.11.2"
 var qbtVersion = null; // qBittorrent's own version, e.g. "v5.0.4"
 var hostTooOld = false; // this Viboplr predates MIN_HOST_VERSION
@@ -167,33 +162,6 @@ function normalizeBaseUrl(raw) {
   s = s.replace(/[?#].*$/, "");
   if (!/^https?:\/\//i.test(s)) s = "http://" + s;
   return s.replace(/\/+$/, "");
-}
-
-// Pull the session cookie out of the response's Set-Cookie values, as a
-// { name, value } pair. Takes the whole list rather than one joined string
-// because a joined list can't be split back apart safely — a cookie's Expires
-// attribute contains a comma of its own.
-//
-// The NAME is returned, not just the value, because it is not fixed:
-// qBittorrent 5.2.0 ("WEBAPI: Append port to session cookie name") renamed it
-// from `SID` to `QBT_SID_<port>`, e.g. QBT_SID_8080. Hardcoding `SID` meant
-// finding no cookie on 5.2+, sending none back, and every request after the
-// login being unauthenticated — which presents as "my username and password
-// stopped working".
-function parseSessionCookie(cookies) {
-  var list = cookies || [];
-  var pairs = [];
-  for (var i = 0; i < list.length; i++) {
-    // Only the first name=value pair; the rest are attributes.
-    var m = /^\s*([^=;\s]+)=([^;]*)/.exec(String(list[i]));
-    if (!m || !m[2]) continue;
-    pairs.push({ name: m[1], value: m[2] });
-    if (/^(QBT_)?SID(_\d+)?$/i.test(m[1])) return { name: m[1], value: m[2] };
-  }
-  // Nothing recognisable, but exactly one cookie was set: it can only be the
-  // session. Costs nothing and survives the next rename.
-  if (pairs.length === 1) return pairs[0];
-  return null;
 }
 
 // Numeric-segment version compare. Returns -1, 0 or 1.
@@ -403,10 +371,7 @@ function classifyConnectionError(message) {
   var m = String(message || "").toLowerCase();
   if (!m) return "unknown";
   if (/rejected the api key/.test(m)) return "apikey";
-  if (/temporarily banned|too many failed/.test(m)) return "banned";
-  if (/kept rejecting the session|rejected the session/.test(m)) return "session";
-  if (/rejected the username or password|rejected the username/.test(m)) return "auth";
-  if (/sent no session cookie/.test(m)) return "session";
+  if (/needs an api key/.test(m)) return "nokey";
   if (/timed out|timeout/.test(m)) return "timeout";
   // qBittorrent answered, but not as a WebUI would — usually the wrong path
   // (a reverse proxy subpath left off) or something else on that port.
@@ -421,11 +386,11 @@ function classifyConnectionError(message) {
 // so the instructions can't drift between the empty view and the settings panel.
 function setupSteps() {
   return [
-    "In qBittorrent, open Tools → Options → Web UI.",
-    "Tick “Web User Interface (Remote control)” and note the port (8080 by default).",
-    "Set a username and password there — leave “Bypass authentication for clients on localhost” off unless you want to skip credentials entirely.",
-    "Back here, enter the address (e.g. http://localhost:8080) with that username and password.",
-    "Press Save & connect."
+    "In qBittorrent, open Tools → Options → Web UI and tick “Web User Interface (Remote control)”. Note the port (8080 by default).",
+    "On that same screen, find API keys and create one. Copy it.",
+    "Back here, enter the address (e.g. http://localhost:8080) and paste the key.",
+    "Press Save & connect.",
+    "API keys need qBittorrent " + MIN_QBT_VERSION + " or newer. On an older build, upgrade qBittorrent first."
   ];
 }
 
@@ -441,6 +406,17 @@ function connectionStatus() {
       detail:
         "qBittorrent authenticates with a session cookie, and this version of Viboplr can't hand HTTP response headers to a plugin, so that cookie can't be read.",
       fix: "Update Viboplr from Settings → General. (A qBittorrent with “Bypass authentication for clients on localhost” switched on will work without it.)"
+    };
+  }
+  // Reachable, but too old to have API keys at all — worth saying before the
+  // user starts hunting for a key that their build cannot create.
+  if (qbtVersion && compareVersions(String(qbtVersion).replace(/^v/i, ""), MIN_QBT_VERSION) < 0) {
+    return {
+      kind: "qbt-old",
+      tone: "error",
+      label: "qBittorrent " + MIN_QBT_VERSION + " or newer is required",
+      detail: "This qBittorrent is " + qbtVersion + ". API keys were added in 5.2, and this plugin signs in with nothing else.",
+      fix: "Update qBittorrent, then create a key under Tools → Options → Web UI."
     };
   }
   if (!baseUrl) {
@@ -472,40 +448,22 @@ function connectionStatus() {
         fix: "Check the port and any firewall between here and the server."
       };
     }
+    if (kind === "nokey") {
+      return {
+        kind: kind,
+        tone: "error",
+        label: "qBittorrent wants an API key",
+        detail: "The server is reachable but refused the request unauthenticated.",
+        fix: "Create a key in qBittorrent under Tools → Options → Web UI and paste it into the API key box."
+      };
+    }
     if (kind === "apikey") {
       return {
         kind: kind,
         tone: "error",
         label: "qBittorrent rejected the API key",
         detail: "The server is reachable — the key is what it turned down. API keys need qBittorrent 5.2 or newer.",
-        fix: "Check the key under qBittorrent's Tools → Options → Web UI, or clear it here to sign in with a username and password instead."
-      };
-    }
-    if (kind === "auth") {
-      return {
-        kind: kind,
-        tone: "error",
-        label: "qBittorrent rejected the username or password",
-        detail: "The server is reachable — the credentials are what it turned down.",
-        fix: "Check them under qBittorrent's Tools → Options → Web UI, then Save & connect again."
-      };
-    }
-    if (kind === "banned") {
-      return {
-        kind: kind,
-        tone: "error",
-        label: "qBittorrent has temporarily banned this machine",
-        detail: "It bans an IP after repeated failed logins — the credentials are wrong, not the address.",
-        fix: "Fix the password, then wait for the ban to lapse (one hour by default) or restart qBittorrent."
-      };
-    }
-    if (kind === "session") {
-      return {
-        kind: kind,
-        tone: "error",
-        label: "The login worked, but the session was rejected",
-        detail: "qBittorrent accepted the credentials and then refused the session cookie that came back — which usually means the cookie never arrived.",
-        fix: "Update Viboplr to " + MIN_HOST_VERSION + " or newer, or turn on “Bypass authentication for clients on localhost” in qBittorrent."
+        fix: "Check the key under qBittorrent's Tools → Options → Web UI — it may have been revoked or regenerated."
       };
     }
     if (kind === "notfound") {
@@ -934,7 +892,6 @@ function rawRequest(path, opts) {
   // point of it. qBittorrent FORBIDS it on auth/* endpoints, so nothing here may
   // ever pair a key with a login.
   if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
-  else if (sid) headers["Cookie"] = sessionCookieName + "=" + sid;
   var body;
   if (o.form) {
     headers["Content-Type"] = "application/x-www-form-urlencoded";
@@ -949,89 +906,24 @@ function rawRequest(path, opts) {
   });
 }
 
-function login() {
-  if (loginPromise) return loginPromise;
-  if (!baseUrl) return Promise.reject(new Error("No qBittorrent server configured"));
-
-  sid = null;
-  sessionReady = false;
-
-  loginPromise = rawRequest("/auth/login", {
-    method: "POST",
-    form: { username: username, password: password }
-  })
-    .then(function (resp) {
-      return resp.text().then(function (text) {
-        var body = String(text || "").trim();
-        if (resp.status === 403) {
-          throw new Error("qBittorrent has temporarily banned this IP after too many failed logins");
-        }
-        if (resp.status !== 200 || body === "Fails.") {
-          throw new Error("qBittorrent rejected the username or password");
-        }
-        var cookies = typeof resp.getSetCookie === "function" ? resp.getSetCookie() : [];
-        var got = parseSessionCookie(cookies);
-        // No cookie is legitimate when "Bypass authentication for clients on
-        // localhost" is on. It is ALSO what an older host looks like (one that
-        // can't read response headers at all) — the two are indistinguishable
-        // here, so accept it and let the first 403 tell them apart.
-        cookielessLogin = !got;
-        sessionCookieName = got ? got.name : "SID";
-        sid = got ? got.value : "";
-        sessionReady = true;
-        return sid;
-      });
-    })
-    .then(
-      function (v) {
-        loginPromise = null;
-        return v;
-      },
-      function (e) {
-        loginPromise = null;
-        sessionReady = false;
-        throw e;
-      }
-    );
-
-  return loginPromise;
-}
-
-function ensureSession() {
-  // With an API key there is no session to establish.
-  if (apiKey) return Promise.resolve(null);
-  if (sessionReady) return Promise.resolve(sid);
-  return login();
-}
-
+// Every request carries the API key; there is no login and no session. Anyone
+// running qBittorrent with "Bypass authentication for clients on localhost"
+// needs no key at all, so an empty key sends no header and lets that work.
 function authed(path, opts) {
-  return ensureSession()
+  return Promise.resolve()
     .then(function () {
+      if (!baseUrl) throw new Error("No qBittorrent server configured");
       return rawRequest(path, opts);
     })
     .then(function (resp) {
-      if (resp.status !== 403) return resp;
-      // With an API key there is no session to renew: a 403 is the key being
-      // refused, and retrying would just ask again with the same key.
-      if (apiKey) {
-        throw new Error("qBittorrent rejected the API key");
-      }
-      // Session lapsed. One re-login, one retry — then believe the answer.
-      sessionReady = false;
-      return login()
-        .then(function () {
-          return rawRequest(path, opts);
-        })
-        .then(function (retry) {
-          if (retry.status === 403) {
-            throw new Error(
-              cookielessLogin
-                ? "qBittorrent kept rejecting the session. Viboplr 1.0.27 or newer is needed to read the login cookie — or turn on “Bypass authentication for clients on localhost” in qBittorrent."
-                : "qBittorrent rejected the session"
-            );
-          }
-          return retry;
-        });
+      if (resp.status !== 403 && resp.status !== 401) return resp;
+      // There is nothing to retry: the same key would be sent again. Which of
+      // the two answers applies depends on whether a key was sent at all.
+      throw new Error(
+        apiKey
+          ? "qBittorrent rejected the API key"
+          : "qBittorrent needs an API key — this plugin no longer signs in with a username and password"
+      );
     });
 }
 
@@ -2388,6 +2280,7 @@ function render() {
   // is to get the user set up, so it shows the steps rather than an empty list.
   if (!baseUrl || hostTooOld) {
     children.push(setupGuideNode());
+    children.push({ type: "button", label: "Open settings", action: "qbt:open-settings", variant: "accent" });
     api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children });
     return;
   }
@@ -2406,9 +2299,20 @@ function render() {
       { id: "downloading", label: "Downloading", count: counts.downloading },
       { id: "completed", label: "Completed", count: counts.completed },
       { id: "all", label: "All", count: counts.all },
-      { id: "search", label: "Search" }
+      { id: "search", label: "Search" },
+      { id: "settings", label: "Settings" }
     ]
   });
+
+  // Reachable from the sidebar in one click. There is no plugin API for opening
+  // the host Settings page at a given panel, and sending the user off to find it
+  // is the wrong answer when this view is where they already are.
+  if (activeTab === "settings") {
+    var settingsNodes = settingsTabNodes();
+    for (var qi = 0; qi < settingsNodes.length; qi++) children.push(settingsNodes[qi]);
+    api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: "settings" });
+    return;
+  }
 
   if (activeTab === "search") {
     var searchNodes = searchTabNodes();
@@ -2537,8 +2441,6 @@ function currentDraft() {
   if (!draft) {
     draft = {
       baseUrl: baseUrl,
-      username: username,
-      password: password,
       apiKey: apiKey,
       category: category,
       restrictToCategory: restrictToCategory,
@@ -2554,18 +2456,17 @@ function currentDraft() {
   return draft;
 }
 
-function renderSettings() {
-  if (!api) return;
-  var d = currentDraft();
-
+function destinationOptions() {
   var destOptions = [{ value: "", label: "qBittorrent's own default folder" }];
   for (var ci = 0; ci < localCollections.length; ci++) {
     var col = localCollections[ci];
     if (!col.path) continue;
     destOptions.push({ value: String(col.id), label: col.name + " — " + col.path });
   }
+  return destOptions;
+}
 
-  var status = connectionStatus();
+function statusSectionChildren(status) {
   var statusChildren = [
     {
       type: "stats-grid",
@@ -2574,7 +2475,7 @@ function renderSettings() {
         { label: "qBittorrent", value: qbtVersion || "—" },
         { label: "WebAPI", value: apiVersion || "—" },
         { label: "Viboplr", value: (api.appVersion || "?") + (hostTooOld ? " (too old)" : "") },
-        { label: "Sign-in", value: apiKey ? "API key" : username ? "Username" : "None" }
+        { label: "Sign-in", value: apiKey ? "API key" : "None (localhost bypass)" }
       ]
     }
   ];
@@ -2596,8 +2497,32 @@ function renderSettings() {
       statusChildren.push({ type: "text", content: i + 1 + ". " + steps[i] });
     }
   }
+  // Config carried over from when this plugin used a username and password.
+  // Said once, plainly, rather than letting the upgrade look like a breakage.
+  if (hadLegacyCredentials) {
+    statusChildren.unshift({
+      type: "text",
+      className: "ds-banner ds-banner--warning",
+      content:
+        "This plugin now signs in with an API key only — your saved username and password are no longer used. " +
+        "Create a key in qBittorrent (Tools → Options → Web UI) and paste it below."
+    });
+  }
+  return statusChildren;
+}
 
-  api.ui.setViewData(SETTINGS_ID, {
+function renderSettings() {
+  if (!api) return;
+  var d = currentDraft();
+  var destOptions = destinationOptions();
+  var status = connectionStatus();
+  var statusChildren = statusSectionChildren(status);
+
+  api.ui.setViewData(SETTINGS_ID, settingsTree(d, destOptions, status, statusChildren));
+}
+
+function settingsTree(d, destOptions, status, statusChildren) {
+  return {
     type: "layout",
     direction: "vertical",
     children: [
@@ -2618,21 +2543,11 @@ function renderSettings() {
           },
           {
             type: "settings-row",
-            label: "Username",
-            control: { type: "text-input", placeholder: "admin", action: "qbt:set-user", value: d.username }
-          },
-          {
-            type: "settings-row",
-            label: "Password",
-            description: "Stored in Viboplr's plugin database in plain text — prefer a dedicated WebUI account over your main one.",
-            control: { type: "text-input", action: "qbt:set-pass", password: true, value: d.password }
-          },
-          {
-            type: "settings-row",
-            label: "API key (optional)",
+            label: "API key",
             description:
-              "qBittorrent 5.2+ only. Create one under Tools → Options → Web UI and paste it here — it replaces the username " +
-              "and password, needs no login, and can't be locked out by the failed-login ban. Leave empty to sign in normally.",
+              "In qBittorrent: Tools → Options → Web UI → API keys → create one, then paste it here. " +
+              "Leave empty only if you use “Bypass authentication for clients on localhost”. " +
+              "Stored in Viboplr's plugin database in plain text — revoke it in qBittorrent if you ever need to.",
             control: { type: "text-input", action: "qbt:set-apikey", password: true, value: d.apiKey }
           },
           {
@@ -2720,7 +2635,21 @@ function renderSettings() {
         ]
       }
     ]
-  });
+  };
+}
+
+// The same settings, rendered inside the Torrents view. There is no way for a
+// plugin to open the host's Settings page at its own panel, and making the user
+// go and find it is a poor answer when the view is where they already are —
+// especially before anything is configured, when the view has nothing else to
+// show. One builder feeds both surfaces so they cannot drift.
+function settingsTabNodes() {
+  var d = currentDraft();
+  var status = connectionStatus();
+  var destOptions = destinationOptions();
+  var statusChildren = statusSectionChildren(status);
+  var tree = settingsTree(d, destOptions, status, statusChildren);
+  return tree.children;
 }
 
 // ---------------------------------------------------------------------------
@@ -2733,9 +2662,10 @@ function loadSettings() {
     .then(function (saved) {
       var s = saved || {};
       baseUrl = normalizeBaseUrl(s.baseUrl || "");
-      username = s.username || "";
-      password = s.password || "";
       apiKey = s.apiKey || "";
+      // Config written before the plugin became API-key-only. Surfaced once so the
+      // upgrade is explained rather than just failing.
+      hadLegacyCredentials = !apiKey && !!(s.username || s.password);
       category = s.category === undefined ? "viboplr" : s.category;
       restrictToCategory = s.restrictToCategory !== false;
       insecure = !!s.insecure;
@@ -2760,8 +2690,6 @@ function persistSettings() {
   return api.storage
     .set(STORAGE_KEY, {
       baseUrl: baseUrl,
-      username: username,
-      password: password,
       apiKey: apiKey,
       category: category,
       restrictToCategory: restrictToCategory,
@@ -2784,8 +2712,6 @@ function saveSettings() {
   var d = currentDraft();
   var outgoingCategory = category;
   baseUrl = normalizeBaseUrl(d.baseUrl);
-  username = d.username || "";
-  password = d.password || "";
   apiKey = (d.apiKey || "").trim();
   category = (d.category || "").trim();
   // Renaming leaves the old torrents tagged with the old name; remember it so
@@ -2804,9 +2730,6 @@ function saveSettings() {
   // Any of these can invalidate the session (a new host, new credentials, a
   // different TLS stance), so drop it rather than discovering that on the next
   // 403.
-  sid = null;
-  sessionCookieName = "SID";
-  sessionReady = false;
   apiVersion = null;
   qbtVersion = null;
   rid = 0;
@@ -2843,20 +2766,12 @@ function testConnection() {
   stopPolling();
   var prev = {
     baseUrl: baseUrl,
-    username: username,
-    password: password,
     apiKey: apiKey,
     insecure: insecure,
-    sid: sid,
-    ready: sessionReady
   };
   baseUrl = probeUrl;
-  username = d.username || "";
-  password = d.password || "";
   apiKey = (d.apiKey || "").trim();
   insecure = !!d.insecure;
-  sid = null;
-  sessionReady = false;
 
   // An API key has no login to test — sending one to auth/* is forbidden — so
   // the request itself is the test.
@@ -2881,12 +2796,8 @@ function testConnection() {
       // Restore whatever was actually saved; the test must not leave a session
       // built from unsaved credentials behind.
       baseUrl = prev.baseUrl;
-      username = prev.username;
-      password = prev.password;
       apiKey = prev.apiKey;
       insecure = prev.insecure;
-      sid = prev.sid;
-      sessionReady = prev.ready;
       renderSettings();
       startPolling();
     });
@@ -3262,6 +3173,11 @@ function registerActions() {
     addTorrent((data && data.query) || "");
   });
 
+  api.ui.onAction("qbt:open-settings", function () {
+    activeTab = "settings";
+    render();
+  });
+
   api.ui.onAction("qbt:refresh", function () {
     refresh();
   });
@@ -3536,12 +3452,6 @@ function registerActions() {
   api.ui.onAction("qbt:set-url", function (data) {
     currentDraft().baseUrl = (data && data.value) || "";
   });
-  api.ui.onAction("qbt:set-user", function (data) {
-    currentDraft().username = (data && data.value) || "";
-  });
-  api.ui.onAction("qbt:set-pass", function (data) {
-    currentDraft().password = (data && data.value) || "";
-  });
   api.ui.onAction("qbt:set-apikey", function (data) {
     currentDraft().apiKey = (data && data.value) || "";
   });
@@ -3642,9 +3552,6 @@ function deactivate() {
     });
   }
   // The session dies with the plugin; nothing about it is worth persisting.
-  sid = null;
-  sessionReady = false;
-  loginPromise = null;
   api = null;
 }
 
@@ -3653,7 +3560,6 @@ return {
   deactivate: deactivate,
   // Exposed for the test harness.
   _normalizeBaseUrl: normalizeBaseUrl,
-  _parseSessionCookie: parseSessionCookie,
   _compareVersions: compareVersions,
   _supportsStartStop: supportsStartStop,
   _formatBytes: formatBytes,

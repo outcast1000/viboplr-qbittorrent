@@ -25,38 +25,29 @@ test("a slow server is 'timeout', distinct from unreachable", () => {
   assert.equal(classify("operation timed out"), "timeout");
 });
 
-test("a refused API key is its own kind, not 'auth'", () => {
-  // Different fix entirely: there is no password to check and no login to
-  // retry, and the key needs qBittorrent 5.2+ in the first place.
+test("a refused API key is its own kind", () => {
+  // The server is fine and the key is wrong — a different fix from every other
+  // failure here.
   assert.equal(classify("qBittorrent rejected the API key"), "apikey");
 });
 
-test("bad credentials are 'auth'", () => {
-  assert.equal(classify("qBittorrent rejected the username or password"), "auth");
+test("no key at all is distinct from a wrong key", () => {
+  // "Create a key" and "check the key you pasted" send the user to different
+  // places, so they cannot share a message.
+  assert.equal(
+    classify("qBittorrent needs an API key — this plugin no longer signs in with a username and password"),
+    "nokey",
+  );
 });
 
-test("an IP ban is its own kind, not just an auth failure", () => {
-  // Fixing the password alone won't clear it — the user has to wait it out, and
-  // only this branch says so.
-  assert.equal(classify("qBittorrent has temporarily banned this IP after too many failed logins"), "banned");
-});
-
-test("a rejected session points at the host version, not the password", () => {
-  // The credentials were ACCEPTED here; the cookie is what went missing. Telling
-  // the user to check their password would send them somewhere useless.
-  assert.equal(classify("qBittorrent kept rejecting the session. Viboplr 1.0.27 or newer is needed"), "session");
-  assert.equal(classify("qBittorrent accepted the login but sent no session cookie"), "session");
-});
-
-test("a 404 means the address is wrong, not the credentials", () => {
+test("a 404 means the address is wrong, not the key", () => {
   assert.equal(classify("Reading torrents failed (HTTP 404)"), "notfound");
 });
 
 test("the specific messages win over the generic transport patterns", () => {
-  // "qBittorrent rejected the session" would match nothing in the transport set,
-  // but a proxy's error text can contain both — the plugin's own phrases are
-  // checked first on purpose.
-  assert.equal(classify("qBittorrent kept rejecting the session (connection reset)"), "session");
+  // A proxy's error text can carry transport words alongside ours; the plugin's
+  // own phrases are matched first on purpose.
+  assert.equal(classify("qBittorrent rejected the API key (connection reset)"), "apikey");
 });
 
 test("anything unrecognised stays 'unknown' rather than guessing", () => {
@@ -74,4 +65,16 @@ test("setupSteps names the qBittorrent screen the user has to open", () => {
   assert.match(joined, /Tools → Options → Web UI/);
   assert.match(joined, /8080/);
   assert.match(joined, /Save & connect/);
+  // The instructions are now an API-key walkthrough; they must say so, and must
+  // name the qBittorrent version that can actually make one.
+  assert.match(joined, /API key/i);
+  assert.match(joined, /5\.2\.4/);
+});
+
+test("the plugin no longer tells anyone to enter a username or password", () => {
+  // A leftover credentials instruction would send the user hunting for a field
+  // that no longer exists.
+  const joined = plugin._setupSteps().join(" ");
+  assert.doesNotMatch(joined, /username/i);
+  assert.doesNotMatch(joined, /password/i);
 });

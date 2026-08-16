@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.14.0
+
+**Breaking: sign-in is now an API key only, and qBittorrent 5.2.4 or newer is
+required.**
+
+- **The username and password fields are gone.** An API key has no login round
+  trip, no session to expire, no cookie whose name changes between versions (it
+  did, in 5.2), and nothing the failed-login IP ban can lock you out of. Keeping
+  both meant two auth paths and a session layer that existed only for the weaker
+  one.
+- **If you had credentials saved**, the plugin says so once and points you at
+  Tools → Options → Web UI to create a key. Nothing else changes.
+- **qBittorrent below 5.2.4 is now called out explicitly**, rather than letting
+  you hunt for a key your build can't create.
+- **A Settings tab in the Torrents view**, so the configuration is one click from
+  the sidebar. There's no plugin API for opening the host's Settings page at a
+  given panel, and sending you off to find it is the wrong answer when the view
+  is where you already are. When nothing is configured the view also offers an
+  **Open settings** button. Both surfaces render the same controls.
+- "Bypass authentication for clients on localhost" still works with no key at
+  all.
+
 ## 0.13.0
 
 **Sign in with an API key** (qBittorrent 5.2+), as an alternative to a username

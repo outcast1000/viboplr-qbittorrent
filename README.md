@@ -4,46 +4,50 @@ Control a [qBittorrent](https://www.qbittorrent.org/) WebUI from inside
 [Viboplr](https://viboplr.com): add magnet links, watch progress, and start, stop
 or remove torrents without switching apps.
 
-Requires **Viboplr 1.0.27 or newer**.
+Requires **Viboplr 1.0.27+** and **qBittorrent 5.2.4+**.
 
 ## Setup
 
+Requires **qBittorrent 5.2.4 or newer** — sign-in is an API key, and keys were
+added in 5.2.
+
 1. In qBittorrent: **Tools → Options → Web UI**, tick *Web User Interface
    (Remote control)*, and note the port (8080 by default).
-2. Set a username and password on that same screen. (Leave *Bypass
-   authentication for clients on localhost* off unless you want to skip
-   credentials entirely — that works too.)
-3. In Viboplr: **Settings → qBittorrent**, enter the WebUI address (e.g.
-   `http://localhost:8080`) plus those credentials, then **Save & connect**.
-   *Test connection* checks what you've typed before saving.
-4. Open **Torrents** in the sidebar.
+2. On that same screen, under **API keys**, create one and copy it.
+3. In Viboplr: open **Torrents** in the sidebar and go to the **Settings** tab
+   (or Settings → qBittorrent — they are the same controls). Enter the address
+   (e.g. `http://localhost:8080`), paste the key, then **Save & connect**.
+   *Test connection* checks what you have typed before saving.
 
-The same steps are shown in the app — in the Torrents view before anything is
-configured, and in Settings → qBittorrent until the connection works.
-
-## Status
-
-**Settings → qBittorrent** opens with a status panel: the connection state,
-qBittorrent's version, its WebAPI version, and the Viboplr version you're
-running. When something is wrong it names the specific fix rather than showing a
-transport error — an unreachable server, a timeout, wrong credentials, an IP ban
-after repeated failed logins (which changing the password alone won't clear), a
-rejected session, or an address that answers but isn't a Web UI. The Torrents
-view carries the same message as a banner, so a broken connection is visible from
-where you'd notice it.
+The same steps are shown in the app until the connection works.
 
 A reverse-proxied qBittorrent at a subpath (`https://home.example.com/qbt`)
 works — enter the full address including the path.
 
-### API key (qBittorrent 5.2+)
+### Why an API key and nothing else
 
-Instead of a username and password you can paste an **API key**, created in
-qBittorrent under Tools → Options → Web UI. When one is set it replaces the
-credentials entirely: it's sent on every request, there's no login step, and it
-can't be locked out by qBittorrent's failed-login IP ban.
+A key is sent on every request and needs no login. That means no session to
+expire, no cookie whose name can change between qBittorrent versions (it changed
+in 5.2, which silently broke logins), and nothing the failed-login IP ban can
+lock you out of. Supporting a username and password as well meant two auth paths
+and a whole session layer that existed only for the weaker one, so it is gone.
 
-Worth preferring if your qBittorrent supports it — the session cookie's name has
-already changed once between versions, and a key sidesteps that machinery.
+If you run qBittorrent with *Bypass authentication for clients on localhost*,
+leave the key empty — no header is sent and that works.
+
+Your key is stored in Viboplr's plugin database in plain text. Revoke it in
+qBittorrent if you ever need to.
+
+## Status
+
+The **Settings** tab (and Settings → qBittorrent) opens with a status panel: the
+connection state, qBittorrent's version, its WebAPI version, the Viboplr version
+and which sign-in is in use. When something is wrong it names the specific fix
+rather than showing a transport error — an unreachable server, a timeout, a
+refused API key, no key where one is needed, a qBittorrent too old to make one,
+or an address that answers but is not a Web UI. The Torrents view carries the
+same message as a banner, so a broken connection is visible from where you would
+notice it.
 
 ## How it decides what to touch
 
@@ -68,25 +72,14 @@ if you want it.
 
 ## Notes, limits and gotchas
 
-- **Authentication is a session cookie.** qBittorrent's `/api/v2/auth/login`
-  returns the session as `Set-Cookie: SID=…` and offers no API-key alternative,
-  which is the whole reason this plugin needs Viboplr 1.0.27+ — earlier versions'
-  `api.network.fetch` discarded response headers. The cookie is held in memory
-  only and never written to disk; a restart simply logs in again.
-- **Localhost auth bypass works too.** If you've ticked *Bypass authentication
-  for clients on localhost*, qBittorrent logs you in without a cookie. That's
-  accepted as a valid session.
-- **Your password is stored in plain text** in Viboplr's plugin database, like
-  every other plugin credential. Prefer a dedicated WebUI account over the one
-  you use elsewhere.
 - **It polls.** The plugin API has no "view opened" signal, so while the plugin
   is enabled and a server is configured it asks qBittorrent for changes every few
   seconds (5 by default, adjustable 2–60 in settings). It uses the incremental
   `/sync/maindata` endpoint, so a poll with nothing to report costs a few hundred
   bytes.
-- **qBittorrent 4.x and 5.x are both supported.** 5.0 renamed
-  `/torrents/pause` → `/stop` and `/resume` → `/start`; the WebAPI version is
-  probed once per session and the right names are used.
+- **qBittorrent 5.2.4 or newer.** API keys arrived in 5.2, and that is the only
+  sign-in this plugin has. An older build is detected and named rather than
+  leaving you hunting for a key it cannot create.
 - **Self-signed HTTPS** needs *Allow self-signed certificates* turned on.
 
 ## Choosing files *before* the download starts
