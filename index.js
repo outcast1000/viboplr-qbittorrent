@@ -104,6 +104,9 @@ var filesLoading = null;
 // selection should not outlive a restart as a mysteriously paused torrent.
 var pendingSelection = {};
 var metadataFetching = {};
+// Added only to look inside. Same paused hold, different framing: nothing has
+// been decided, so discarding is the expected outcome, not the exception.
+var peekedTorrents = {};
 
 // Search.
 var searchQuery = "";
@@ -1075,7 +1078,7 @@ function shallowHashSet(map) {
 var ATTACH_ATTEMPTS = 8;
 var ATTACH_POLL_MS = 1000;
 
-function beginSelection(knownBefore, expectedHash, attempt) {
+function beginSelection(knownBefore, expectedHash, attempt, peek) {
   var tries = attempt || 0;
   var hash = expectedHash && torrents[expectedHash] ? expectedHash : null;
   if (!hash) {
@@ -1096,7 +1099,7 @@ function beginSelection(knownBefore, expectedHash, attempt) {
       return delay(ATTACH_POLL_MS)
         .then(refresh)
         .then(function () {
-          return beginSelection(knownBefore, expectedHash, tries + 1);
+          return beginSelection(knownBefore, expectedHash, tries + 1, peek);
         });
     }
     api.ui.showNotification(
@@ -1107,6 +1110,9 @@ function beginSelection(knownBefore, expectedHash, attempt) {
   }
 
   pendingSelection[hash] = true;
+  // A peeked torrent is one the user has not committed to, so the row says
+  // "Remove" rather than only offering Start.
+  if (peek) peekedTorrents[hash] = true;
   expandedHash = hash;
   activeTab = "downloading";
 
@@ -1176,8 +1182,15 @@ function delay(ms) {
   });
 }
 
-function addTorrent(source) {
+// `opts.peek` forces the paused-and-choose flow for this one add, whatever the
+// setting says. It backs "View contents": qBittorrent has no way to read a
+// torrent's file list WITHOUT adding it — metadata comes from the swarm or the
+// .torrent itself — so looking inside means adding it paused and offering an
+// easy way back out.
+function addTorrent(source, opts) {
   var uri = String(source || "").trim();
+  var peek = !!(opts && opts.peek);
+  var holdForSelection = peek || chooseFilesFirst;
   if (!looksLikeTorrentSource(uri)) {
     api.ui.showNotification("That doesn't look like a magnet link or a .torrent URL");
     return Promise.resolve();
@@ -1190,14 +1203,14 @@ function addTorrent(source) {
     sequentialDownload: "true",
     firstLastPiecePrio: "true"
   };
-  if (chooseFilesFirst) {
+  if (holdForSelection) {
     // Both spellings: 5.0 renamed paused -> stopped, and qBittorrent ignores a
     // form field it doesn't know, so this needs no version branch.
     form.paused = "true";
     form.stopped = "true";
   }
-  var knownBefore = chooseFilesFirst ? shallowHashSet(torrents) : null;
-  var expectedHash = chooseFilesFirst ? magnetHash(uri) : null;
+  var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
+  var expectedHash = holdForSelection ? magnetHash(uri) : null;
   if (category) form.category = category;
   // Saving into a collection folder is what makes the finished download reach
   // the library at all — without it the files land somewhere the app never
@@ -1225,16 +1238,18 @@ function addTorrent(source) {
       }
       var name = magnetDisplayName(uri);
       api.ui.showNotification(
-        chooseFilesFirst
-          ? (name ? "Added " + name + " — paused so you can choose files" : "Added, paused so you can choose files")
-          : (name ? "Added " + name : "Added to qBittorrent")
+        peek
+          ? (name ? "Fetching what is inside " + name + "…" : "Fetching the file list — nothing is downloading yet")
+          : holdForSelection
+            ? (name ? "Added " + name + " — paused so you can choose files" : "Added, paused so you can choose files")
+            : (name ? "Added " + name : "Added to qBittorrent")
       );
       // Show where it went. Adding from the Search tab otherwise leaves the user
       // looking at search results with no sign anything happened.
       activeTab = "downloading";
       render();
       return refresh().then(function () {
-        if (chooseFilesFirst) return beginSelection(knownBefore, expectedHash);
+        if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek);
       });
     })
     .catch(function (e) {
@@ -1436,7 +1451,7 @@ function findSearchResult(id) {
   return null;
 }
 
-function addSearchResult(id) {
+function addSearchResult(id, opts) {
   var r = findSearchResult(id);
   if (!r) {
     // The list moved under the click (a poll landed) or the search was rerun.
@@ -1456,7 +1471,7 @@ function addSearchResult(id) {
     }
     return;
   }
-  addTorrent(r.fileUrl);
+  addTorrent(r.fileUrl, opts);
 }
 
 // --- Library import ---------------------------------------------------------
@@ -1772,6 +1787,9 @@ function deleteTorrent(hash, deleteFiles) {
       // Drop it locally rather than waiting a poll cycle — the row vanishing IS
       // the feedback for a destructive action.
       delete torrents[hash];
+      delete pendingSelection[hash];
+      delete peekedTorrents[hash];
+      delete filesByHash[hash];
     })
     .catch(function (e) {
       console.error("qBittorrent: delete failed:", e);
@@ -1841,6 +1859,7 @@ function torrentNode(t) {
   var open = expandedHash === t.hash;
   var reachable = filesAreReachable();
   var awaiting = !!pendingSelection[t.hash];
+  var peeked = !!peekedTorrents[t.hash];
   var buttons = [];
 
   // A torrent held for selection leads with the one thing to do next, and its
@@ -1855,6 +1874,20 @@ function torrentNode(t) {
       disabled: rowBusy || !!metadataFetching[t.hash],
       data: { hash: t.hash }
     });
+    // A peeked torrent was added only to be looked at, so throwing it away is a
+    // first-class button rather than the generic "Remove…" further along the
+    // row. It skips the confirm — nothing has downloaded, so there is nothing
+    // to lose.
+    if (peeked) {
+      buttons.push({
+        type: "button",
+        label: "Discard",
+        action: "qbt:discard-peek",
+        variant: "secondary",
+        disabled: rowBusy,
+        data: { hash: t.hash }
+      });
+    }
   }
 
   // Play is offered only when the files are reachable from this machine —
@@ -1957,7 +1990,9 @@ function torrentNode(t) {
       className: "ds-banner ds-banner--warning",
       content: metadataFetching[t.hash]
         ? "Fetching this torrent's file list — nothing is downloading yet."
-        : "Paused. Choose which files you want below, then press Start download."
+        : peeked
+          ? "Nothing has downloaded. This is what's inside — press Start download to keep it, or Discard to drop it."
+          : "Paused. Choose which files you want below, then press Start download."
     });
   }
 
@@ -2613,7 +2648,12 @@ function searchTabNodes() {
     type: "track-row-list",
     items: items,
     selectable: true,
-    actions: [{ id: "qbt:search-add", label: "Add to qBittorrent", icon: "↓" }]
+    // Add stays first: the host styles action[0] as the primary button and fires
+    // it on double-click, and downloading is the common intent.
+    actions: [
+      { id: "qbt:search-add", label: "Add to qBittorrent", icon: "↓" },
+      { id: "qbt:search-view", label: "View contents", icon: "☰" }
+    ]
   });
   return children;
 }
@@ -2768,19 +2808,44 @@ function registerActions() {
     for (var i = 0; i < ids.length; i++) addSearchResult(ids[i]);
   });
 
+  api.ui.onAction("qbt:search-view", function (data) {
+    var ids = rowIds(data);
+    if (!ids.length) {
+      api.ui.showNotification("Couldn't tell which result that was — try again");
+      return;
+    }
+    // One at a time: peeking adds a real (paused) torrent, and doing that to a
+    // whole selection would leave a pile of them to clean up.
+    addSearchResult(ids[0], { peek: true });
+  });
+
   api.ui.onAction("qbt:start", function (data) {
     var hash = hashOf(data);
     if (hash) {
       // Starting by hand ends the selection hold — the user has decided.
       delete pendingSelection[hash];
+      delete peekedTorrents[hash];
       actOn(startEndpoint(), [hash], "Starting the torrent");
     }
+  });
+
+  api.ui.onAction("qbt:discard-peek", function (data) {
+    var hash = hashOf(data);
+    if (!hash) return;
+    delete pendingSelection[hash];
+    delete peekedTorrents[hash];
+    delete metadataFetching[hash];
+    if (expandedHash === hash) expandedHash = null;
+    // deleteFiles is false: a peek downloads no content, and this must never be
+    // a route to deleting data the user already had.
+    deleteTorrent(hash, false);
   });
 
   api.ui.onAction("qbt:start-selected", function (data) {
     var hash = hashOf(data);
     if (!hash) return;
     delete pendingSelection[hash];
+    delete peekedTorrents[hash];
     var files = filesByHash[hash] || [];
     var kept = 0;
     for (var i = 0; i < files.length; i++) {

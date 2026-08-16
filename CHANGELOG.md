@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.0
+
+- **View contents** button on every search result, beside Add. It shows what is
+  inside a torrent before you commit to it: the file list opens, nothing
+  downloads, and the row offers **Start download** or **Discard**.
+- Works whether or not “Choose files before downloading” is on — pressing it is
+  itself the request to look first.
+
+qBittorrent has no way to read a torrent’s file list without adding it — the
+metadata comes from the swarm or the .torrent itself — so View contents adds it
+paused and Discard removes it again. Nothing is downloaded either way, and
+Discard never deletes files from disk.
+
 ## 0.10.1
 
 **Fixes clicking a search result doing nothing**, especially with “Choose files

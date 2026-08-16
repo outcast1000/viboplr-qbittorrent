@@ -145,7 +145,15 @@ torrent.
 
 The **Search** tab drives the search plugins you have installed in qBittorrent —
 this plugin ships none of its own. Results are sorted by seeders and stream in as
-each indexer answers; clicking one adds it.
+each indexer answers.
+
+Each result has two buttons: **↓ Add to qBittorrent** and **☰ View contents**.
+
+*View contents* shows what's inside before you commit — the file list opens and
+nothing downloads, then you either **Start download** or **Discard**. qBittorrent
+can't read a torrent's file list without adding it (the metadata comes from the
+swarm, or from the .torrent itself), so this adds it paused and Discard removes
+it again. Discard never deletes anything from disk.
 
 Right-clicking a track, album or artist in your library offers **Find torrents…**,
 which opens the tab and searches for it. A track searches its *album*, since
