@@ -3050,37 +3050,53 @@ function searchTabNodes() {
     return children;
   }
 
-  var items = [];
-  for (var i = 0; i < searchResults.length; i++) {
-    var r = searchResults[i];
-    items.push({
-      id: searchResultId(r),
-      title: r.fileName || "(untitled)",
-      subtitle: searchResultSubtitle(r),
-      action: "qbt:search-add"
-    });
-  }
   children.push({
     type: "text",
     content: searchResults.length + " results" + (searchStopped ? " — stopped early" : ""),
     className: "muted"
   });
-  // `selectable` is what switches the host to its library-parity row list, which
-  // is the one that renders hover action buttons. Without a visible button the
-  // only way to download was to click the row and hope.
-  children.push({
-    type: "track-row-list",
-    items: items,
-    selectable: true,
-    // Add stays first: the host styles action[0] as the primary button and fires
-    // it on double-click, and downloading is the common intent.
-    actions: [
-      { id: "qbt:search-add", label: "Add to qBittorrent", icon: "↓" },
-      { id: "qbt:search-view", label: "View contents", icon: "☰" }
-    ]
-  });
+
+  // One section per result, with buttons that are ALWAYS visible.
+  //
+  // These were rows in a track-row-list, whose buttons only appear on hover and
+  // whose plain click does nothing at all — the host's selectable list treats a
+  // single click as "select this row" and fires the row's action only on
+  // double-click. So clicking a result looked broken, which is exactly what it
+  // was reported as. Buttons you can see beat a compact list.
+  for (var i = 0; i < searchResults.length; i++) {
+    var r = searchResults[i];
+    var id = searchResultId(r);
+    children.push({
+      type: "section",
+      title: r.fileName || "(untitled)",
+      children: [
+        { type: "text", content: searchResultSubtitle(r), className: "muted" },
+        {
+          type: "layout",
+          direction: "horizontal",
+          children: [
+            {
+              type: "button",
+              label: "Add to qBittorrent",
+              action: "qbt:search-add",
+              variant: "accent",
+              data: { itemId: id }
+            },
+            {
+              type: "button",
+              label: "View contents",
+              action: "qbt:search-view",
+              variant: "secondary",
+              data: { itemId: id }
+            }
+          ]
+        }
+      ]
+    });
+  }
   return children;
 }
+
 
 function fileRowsNode(hash) {
   var torrent = torrents[hash];

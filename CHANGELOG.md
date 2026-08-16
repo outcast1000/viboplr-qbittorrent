@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.2
+
+**Fixes clicking a search result doing nothing.** Each result is now its own
+block with **Add to qBittorrent** and **View contents** buttons that are always
+visible.
+
+They used to be rows in a compact list whose buttons appeared only on hover — and
+in that list a plain click does *nothing at all*: the host treats it as selecting
+the row, and fires the row's action only on double-click. So a click on a result
+genuinely did nothing, which is what it looked like. Introduced in 0.6.0, by the
+change meant to *give* results a visible button.
+
 ## 0.14.1
 
 - The required qBittorrent version is **5.2.3**, not 5.2.4.
