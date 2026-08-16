@@ -107,6 +107,13 @@ var metadataFetching = {};
 // Added only to look inside. Same paused hold, different framing: nothing has
 // been decided, so discarding is the expected outcome, not the exception.
 var peekedTorrents = {};
+// Seconds spent waiting on each torrent's metadata. A magnet can take a minute,
+// and a counter that climbs is the one honest answer to "is this still working?"
+// — the same reason the host's download modal always shows elapsed time.
+var metadataElapsed = {};
+// True from pressing Add/View contents until the torrent has been matched to a
+// row. Before that there is no row to put a message on, so the view carries one.
+var preparingAdd = false;
 
 // Search.
 var searchQuery = "";
@@ -1059,6 +1066,13 @@ function ensureCategory() {
     });
 }
 
+// " (14s)" once the wait is long enough to wonder about. Below that the counter
+// is noise — a number that appears immediately reads as a problem.
+function elapsedSuffix(hash) {
+  var secs = Math.round((metadataElapsed[hash] || 0) / 1000);
+  return secs >= 5 ? " (" + secs + "s)" : "";
+}
+
 function shallowHashSet(map) {
   var out = {};
   for (var hash in map || {}) {
@@ -1102,6 +1116,7 @@ function beginSelection(knownBefore, expectedHash, attempt, peek) {
           return beginSelection(knownBefore, expectedHash, tries + 1, peek);
         });
     }
+    preparingAdd = false;
     api.ui.showNotification(
       "Added, but it couldn't be matched to a torrent in the list. It's paused — find it and press Start when you've chosen files."
     );
@@ -1109,6 +1124,7 @@ function beginSelection(knownBefore, expectedHash, attempt, peek) {
     return Promise.resolve();
   }
 
+  preparingAdd = false;
   pendingSelection[hash] = true;
   // A peeked torrent is one the user has not committed to, so the row says
   // "Remove" rather than only offering Start.
@@ -1134,6 +1150,7 @@ var METADATA_POLL_MS = 1500;
 var METADATA_MAX_MS = 90000;
 
 function waitForMetadata(hash, elapsed) {
+  metadataElapsed[hash] = elapsed;
   return refresh().then(function () {
     var t = torrents[hash];
     if (!t || !pendingSelection[hash]) return null; // removed, or the user moved on
@@ -1142,6 +1159,7 @@ function waitForMetadata(hash, elapsed) {
       // nothing downloads before the user has chosen.
       var wasFetching = metadataFetching[hash];
       delete metadataFetching[hash];
+      delete metadataElapsed[hash];
       var settle = wasFetching && !isPaused(t)
         ? actOn(stopEndpoint(), [hash], "Pausing for file selection")
         : Promise.resolve();
@@ -1156,6 +1174,7 @@ function waitForMetadata(hash, elapsed) {
       // Give up waiting rather than holding a paused torrent forever: the user
       // can still start it by hand and select files afterwards.
       delete metadataFetching[hash];
+      delete metadataElapsed[hash];
       api.ui.showNotification("Couldn't get this torrent's file list — start it and choose files as it runs");
       render();
       return null;
@@ -1209,6 +1228,10 @@ function addTorrent(source, opts) {
     form.paused = "true";
     form.stopped = "true";
   }
+  if (holdForSelection) {
+    preparingAdd = true;
+    render();
+  }
   var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
   var expectedHash = holdForSelection ? magnetHash(uri) : null;
   if (category) form.category = category;
@@ -1253,6 +1276,8 @@ function addTorrent(source, opts) {
       });
     })
     .catch(function (e) {
+      preparingAdd = false;
+      render();
       console.error("qBittorrent: add failed:", e);
       api.ui.showNotification("Couldn't add that torrent: " + errText(e));
     });
@@ -1868,10 +1893,11 @@ function torrentNode(t) {
   if (awaiting) {
     buttons.push({
       type: "button",
-      label: metadataFetching[t.hash] ? "Fetching file list…" : "Start download",
+      label: metadataFetching[t.hash] || !filesByHash[t.hash] ? "Waiting for the file list…" : "Start download",
       action: "qbt:start-selected",
       variant: "accent",
-      disabled: rowBusy || !!metadataFetching[t.hash],
+      // Nothing to choose from yet, so nothing to confirm yet.
+      disabled: rowBusy || !!metadataFetching[t.hash] || !filesByHash[t.hash],
       data: { hash: t.hash }
     });
     // A peeked torrent was added only to be looked at, so throwing it away is a
@@ -1988,11 +2014,17 @@ function torrentNode(t) {
     children.unshift({
       type: "text",
       className: "ds-banner ds-banner--warning",
+      // Phase by phase, and never ahead of itself: claiming "this is what's
+      // inside" above an empty box while the swarm is still being asked was the
+      // worst version of this.
       content: metadataFetching[t.hash]
-        ? "Fetching this torrent's file list — nothing is downloading yet."
-        : peeked
-          ? "Nothing has downloaded. This is what's inside — press Start download to keep it, or Discard to drop it."
-          : "Paused. Choose which files you want below, then press Start download."
+        ? "Asking the swarm what's in this torrent" + elapsedSuffix(t.hash) +
+          " — nothing is downloading. A magnet can take a minute."
+        : !filesByHash[t.hash]
+          ? "Reading the file list…"
+          : peeked
+            ? "Nothing has downloaded. This is what's inside — press Start download to keep it, or Discard to drop it."
+            : "Paused. Choose which files you want below, then press Start download."
     });
   }
 
@@ -2087,6 +2119,13 @@ function render() {
       { label: "Torrents", value: counts.all }
     ]
   });
+
+  // The window between "add accepted" and "torrent found in the list". It can
+  // run several seconds, and until now it showed nothing at all — the toast that
+  // announced the add had already dismissed itself.
+  if (preparingAdd) {
+    children.push({ type: "loading", message: "Adding to qBittorrent — waiting for it to appear…" });
+  }
 
   // Torrents stranded under a previous category name. Offered, not done
   // automatically: re-tagging someone's torrents is a write to their
@@ -2662,6 +2701,17 @@ function fileRowsNode(hash) {
   var torrent = torrents[hash];
   var files = filesByHash[hash];
   if (filesLoading === hash && !files) return { type: "loading", message: "Reading files…" };
+  // A torrent held for selection has an open, EMPTY files area until the list
+  // arrives — which for a magnet is however long the swarm takes. Returning null
+  // there left a banner promising "this is what's inside" above a blank space.
+  if (!files && pendingSelection[hash]) {
+    return {
+      type: "loading",
+      message: metadataFetching[hash]
+        ? "Asking the swarm what's in this torrent…" + elapsedSuffix(hash)
+        : "Reading the file list…"
+    };
+  }
   if (!files) return null;
 
   // Every file, not just the playable ones: this is the torrent's CONTENTS, and

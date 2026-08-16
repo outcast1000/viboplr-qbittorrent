@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.1
+
+**Says what it is doing while a torrent is being looked up.** The wait was
+mostly blank, and briefly wrong.
+
+- The seconds between adding and the torrent appearing now show *“Adding to
+  qBittorrent — waiting for it to appear…”* instead of nothing. The toast that
+  announced the add had already dismissed itself by then.
+- While the file list is being fetched the row says *“Asking the swarm what’s in
+  this torrent (12s) — nothing is downloading. A magnet can take a minute.”*
+  The counter is what answers “is this still working?”.
+- The file area shows a spinner during that wait. It used to be blank, under a
+  banner already claiming “this is what’s inside”.
+- **Start download** stays disabled and reads *“Waiting for the file list…”*
+  until there is actually something to choose from.
+
 ## 0.11.0
 
 - **View contents** button on every search result, beside Add. It shows what is
