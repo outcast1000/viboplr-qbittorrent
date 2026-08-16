@@ -4,12 +4,13 @@ Control a [qBittorrent](https://www.qbittorrent.org/) WebUI from inside
 [Viboplr](https://viboplr.com): add magnet links, watch progress, and start, stop
 or remove torrents without switching apps.
 
-Requires **Viboplr 1.0.27+** and **qBittorrent 5.2.4+**.
+Requires **Viboplr 1.0.27+** and **qBittorrent 5.2.3+**.
 
 ## Setup
 
-Requires **qBittorrent 5.2.4 or newer** — sign-in is an API key, and keys were
-added in 5.2.
+Requires **qBittorrent 5.2.3 or newer** — sign-in is an API key, and keys were
+added in 5.2. Get it from [qbittorrent.org/download](https://www.qbittorrent.org/download);
+the plugin also offers that link wherever it reports the version as the problem.
 
 1. In qBittorrent: **Tools → Options → Web UI**, tick *Web User Interface
    (Remote control)*, and note the port (8080 by default).
@@ -77,7 +78,7 @@ if you want it.
   seconds (5 by default, adjustable 2–60 in settings). It uses the incremental
   `/sync/maindata` endpoint, so a poll with nothing to report costs a few hundred
   bytes.
-- **qBittorrent 5.2.4 or newer.** API keys arrived in 5.2, and that is the only
+- **qBittorrent 5.2.3 or newer.** API keys arrived in 5.2, and that is the only
   sign-in this plugin has. An older build is detected and named rather than
   leaving you hunting for a key it cannot create.
 - **Self-signed HTTPS** needs *Allow self-signed certificates* turned on.

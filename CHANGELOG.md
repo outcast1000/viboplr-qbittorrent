@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.1
+
+- The required qBittorrent version is **5.2.3**, not 5.2.4.
+- **A download link.** "Update qBittorrent" isn't an instruction anyone can act
+  on without going off to find the download, so the setup steps now carry a
+  **Get qBittorrent** button — promoted to a prominent **Download qBittorrent
+  5.2.3 or newer** when the version is what's blocking you. If the browser can't
+  be opened, the URL itself is shown, since that was the answer all along.
+
 ## 0.14.0
 
 **Breaking: sign-in is now an API key only, and qBittorrent 5.2.4 or newer is

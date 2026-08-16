@@ -68,7 +68,7 @@ test("setupSteps names the qBittorrent screen the user has to open", () => {
   // The instructions are now an API-key walkthrough; they must say so, and must
   // name the qBittorrent version that can actually make one.
   assert.match(joined, /API key/i);
-  assert.match(joined, /5\.2\.4/);
+  assert.match(joined, /5\.2\.3/);
 });
 
 test("the plugin no longer tells anyone to enter a username or password", () => {

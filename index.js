@@ -42,10 +42,15 @@ var MAX_POLL_MS = 60000;
 // than surfacing later as a baffling "session rejected".
 var MIN_HOST_VERSION = "1.0.27";
 
-// The qBittorrent this plugin targets. API keys arrived in 5.2, and 5.2.4 is the
-// build this has been developed against — below it the auth simply is not there,
-// so it is a requirement rather than a preference.
-var MIN_QBT_VERSION = "5.2.4";
+// The qBittorrent this plugin requires. API keys arrived in 5.2 and this is the
+// build the plugin is developed against — below it the only sign-in it has does
+// not exist, so this is a requirement rather than a preference.
+var MIN_QBT_VERSION = "5.2.3";
+
+// Where to get it. Offered as a button wherever the plugin says the version is
+// the problem, because "update qBittorrent" is not an instruction anyone can act
+// on without leaving to go and find the download.
+var QBT_DOWNLOAD_URL = "https://www.qbittorrent.org/download";
 
 // qBittorrent reports "no estimate" as this sentinel rather than null.
 var ETA_INFINITY = 8640000;
@@ -2496,6 +2501,15 @@ function statusSectionChildren(status) {
     for (var i = 0; i < steps.length; i++) {
       statusChildren.push({ type: "text", content: i + 1 + ". " + steps[i] });
     }
+    // The one step nobody can complete from inside the app. Prominent when the
+    // version IS the problem, available anyway while setting up — someone
+    // reading these steps may not have qBittorrent at all yet.
+    statusChildren.push({
+      type: "button",
+      label: status.kind === "qbt-old" ? "Download qBittorrent " + MIN_QBT_VERSION + " or newer" : "Get qBittorrent",
+      action: "qbt:open-download",
+      variant: status.kind === "qbt-old" ? "accent" : "secondary"
+    });
   }
   // Config carried over from when this plugin used a username and password.
   // Said once, plainly, rather than letting the upgrade look like a breakage.
@@ -3171,6 +3185,19 @@ function registerActions() {
 
   api.ui.onAction("qbt:add", function (data) {
     addTorrent((data && data.query) || "");
+  });
+
+  api.ui.onAction("qbt:open-download", function () {
+    if (typeof api.network.openUrl !== "function") {
+      api.ui.showNotification("Download qBittorrent from " + QBT_DOWNLOAD_URL);
+      return;
+    }
+    api.network.openUrl(QBT_DOWNLOAD_URL).catch(function (e) {
+      console.error("qBittorrent: could not open the download page:", e);
+      // The URL is the actual answer, so say it rather than only reporting that
+      // the browser didn't open.
+      api.ui.showNotification("Couldn't open the browser — the download page is " + QBT_DOWNLOAD_URL);
+    });
   });
 
   api.ui.onAction("qbt:open-settings", function () {
