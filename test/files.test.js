@@ -387,3 +387,76 @@ test("a folder that merely starts the same is not a shared folder", () => {
   const files = [{ name: "CD1/a.flac" }, { name: "CD10/b.flac" }];
   assert.deepEqual(plugin._commonFolder(files), []);
 });
+
+// What a file row offers. The junk that comes with every release — cover art,
+// .nfo, a scans folder — is not playable, and offering Play / Add to queue on
+// it queued nothing and then reported "nothing there that's finished
+// downloading" about a file the same row showed as complete.
+test("a finished media file offers Play and Add to queue", () => {
+  assert.deepEqual(plugin._fileRowActions("audio", true, false), {
+    actions: ["qbt:play-file", "qbt:enqueue-file"],
+    action: "qbt:play-file",
+  });
+  assert.deepEqual(plugin._fileRowActions("video", true, false).actions, [
+    "qbt:play-file",
+    "qbt:enqueue-file",
+  ]);
+});
+
+test("a finished NON-media file offers nothing at all", () => {
+  // Not Play or Add to queue (there is nothing to play), and not Download or
+  // Skip either — the bytes are already here, and "skip" would only stop
+  // seeding a file the user has.
+  assert.deepEqual(plugin._fileRowActions(null, true, false), { actions: [], action: null });
+  // Including one that was deselected and downloaded anyway.
+  assert.deepEqual(plugin._fileRowActions(null, true, true), { actions: [], action: null });
+});
+
+test("an unfinished file offers the choice it is not already in", () => {
+  // This applies to junk as much as to media: skipping a 4 GB video extra is a
+  // main reason to open the list at all.
+  assert.deepEqual(plugin._fileRowActions("audio", false, false), {
+    actions: ["qbt:file-skip"],
+    action: "qbt:file-skip",
+  });
+  assert.deepEqual(plugin._fileRowActions("audio", false, true), {
+    actions: ["qbt:file-download"],
+    action: "qbt:file-download",
+  });
+  assert.deepEqual(plugin._fileRowActions(null, false, true), {
+    actions: ["qbt:file-download"],
+    action: "qbt:file-download",
+  });
+});
+
+// The toolbar acts on a whole selection, so a mixed one can still reach a play
+// with nothing playable in it. The refusal has to say which of the two reasons
+// applies rather than claiming a finished file is unfinished.
+test("unplayableReason blames the format when nothing selected is media", () => {
+  assert.equal(
+    plugin._unplayableReason([{ name: "cover.jpg", progress: 1 }]),
+    "That isn't an audio or video file",
+  );
+  assert.equal(
+    plugin._unplayableReason([{ name: "cover.jpg", progress: 1 }, { name: "info.nfo", progress: 1 }]),
+    "None of those are audio or video files",
+  );
+});
+
+test("unplayableReason blames the download when media is still coming", () => {
+  assert.equal(
+    plugin._unplayableReason([{ name: "01.flac", progress: 0.4 }]),
+    "That file hasn't finished downloading yet",
+  );
+  // A mixed selection with any media in it is about the download, not the
+  // format — the media file is the one the user was trying to play.
+  assert.equal(
+    plugin._unplayableReason([{ name: "cover.jpg", progress: 1 }, { name: "01.flac", progress: 0.4 }]),
+    "Nothing there that's finished downloading",
+  );
+});
+
+test("unplayableReason copes with an empty selection", () => {
+  assert.equal(plugin._unplayableReason([]), "Nothing selected");
+  assert.equal(plugin._unplayableReason(undefined), "Nothing selected");
+});

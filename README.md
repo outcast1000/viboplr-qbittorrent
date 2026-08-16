@@ -104,12 +104,19 @@ off to manage everything.
 
 **Change the category per Viboplr profile.** Settings → qBittorrent → Category
 takes any name you like, so `viboplr-alex` and `viboplr-work` can share one
-qBittorrent without either profile seeing the other's downloads. Leave it empty
-to tag nothing at all.
+qBittorrent without either profile seeing the other's downloads.
+
+**Or use no category at all.** Leave the box empty and nothing is tagged, and
+with no name to match there is nothing to filter by: the Torrents view lists
+everything in qBittorrent and the bulk buttons reach all of it, whatever *Only
+manage my own category* is set to. That switch narrows the list *to* a category;
+it can't narrow it to no category.
 
 Renaming it leaves your earlier downloads under the old name, where the filter
 hides them — so the Torrents view offers to move them across, or to leave them
 be (which is the right answer when the rename was to split a second profile off).
+Clearing the box is not a rename: nothing is hidden afterwards, so nothing is
+offered.
 
 **Remove** removes a torrent from qBittorrent and leaves the downloaded files on
 disk. Deleting the data is deliberately not offered here; do that in qBittorrent
@@ -236,6 +243,10 @@ Three things worth knowing:
 - **Only finished files play.** A half-downloaded file would open and then stop
   partway through, which looks like a corrupt file rather than an incomplete
   download. Unfinished files are listed with their progress and marked `◌`.
+- **Only audio and video are offered.** The cover art, the `.nfo` and the scans
+  folder are listed — you may well want to *skip* them, which is half the point
+  of the list — but a finished one offers no buttons at all: there is nothing to
+  play, and nothing left to download or skip either.
 - **Metadata comes from the file's own tags**, with the filename filling the
   gaps. Title, artist, album, track number and duration are read straight off
   the finished file; anything it doesn't carry falls back to what the filename

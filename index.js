@@ -1051,6 +1051,42 @@ function parseFileTrack(name) {
   return { trackNumber: trackNumber, artist: artist || null, title: title || base };
 }
 
+// What a file row offers, and which of those a double-click fires.
+//
+// Each row offers only what it can actually do:
+//
+// A DOWNLOADED MEDIA file is the only one worth playing or queueing: the bytes
+// are on disk and there is something to play. It gets neither Download (nothing
+// left to fetch) nor Skip (that would only stop seeding a file the user already
+// has, which is not what "skip" means anywhere else in this list).
+//
+// A downloaded NON-media file — the cover art, the .nfo, the scans folder that
+// comes with every release — offers nothing at all. Play and Add to queue were
+// being offered on it because the row asked only whether the file had finished:
+// pressing them queued nothing and reported "nothing there that's finished
+// downloading" about a file plainly listed as complete. Download and Skip are
+// just as meaningless on it for the reason above.
+//
+// Anything unfinished is a choice about whether to fetch it, and Download and
+// Skip are that choice in two directions — so a row offers the one it is not
+// already in. That applies to media and junk alike: skipping a 4 GB video extra
+// is a main reason to open this list.
+//
+// `action` is what a double-click fires. Named rather than left to the host
+// fallback (which fires the first visible action), so it can never mean
+// something the row did not put first on purpose — and it is null when the row
+// offers nothing, rather than falling through to an action that isn't there.
+function fileRowActions(kind, done, skipped) {
+  if (done) {
+    return kind
+      ? { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" }
+      : { actions: [], action: null };
+  }
+  return skipped
+    ? { actions: ["qbt:file-download"], action: "qbt:file-download" }
+    : { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
+}
+
 function qbtUri(hash, index) {
   return "qbt://" + hash + "/" + index;
 }
@@ -1144,6 +1180,35 @@ function playableFiles(files) {
     return String(a.name || "").localeCompare(String(b.name || ""));
   });
   return out;
+}
+
+// Is the category filter actually in force?
+//
+// A user may deliberately use no category at all — the setting says "leave it
+// empty to tag nothing" — and with no name to match against there is nothing to
+// filter by, so the view lists every torrent in qBittorrent whatever the "only
+// manage my own category" switch says. That switch narrows the view TO a
+// category; it cannot narrow it to no category.
+//
+// Spelled once because five places ask the question, and the one that spelled
+// it for itself is the one that got it wrong: with the box cleared, the
+// stranded-torrents banner announced that torrents were "hidden by the “”
+// filter" while they sat in the list directly underneath it, and offered a
+// button that would have stripped their category in qBittorrent.
+function categoryFilterActive(restrict, cat) {
+  return !!restrict && !!(cat && String(cat).trim());
+}
+
+// What to remember as the PREVIOUS category after a settings save.
+//
+// Renaming strands torrents under the old name — they vanish from a view that
+// now filters on the new one, so the old name is kept to offer moving them.
+// CLEARING the box is not a rename: nothing is filtered afterwards, so nothing
+// is stranded and there is nothing to offer.
+function nextPreviousCategory(outgoing, incoming, remembered) {
+  if (!incoming) return "";
+  if (outgoing && outgoing !== incoming) return outgoing;
+  return remembered === incoming ? "" : remembered;
 }
 
 // Hashes of every torrent carrying a given category.
@@ -1491,7 +1556,7 @@ function visibleTorrents() {
   for (var hash in torrents) {
     if (!Object.prototype.hasOwnProperty.call(torrents, hash)) continue;
     var t = torrents[hash];
-    if (restrictToCategory && category && String(t.category || "") !== category) continue;
+    if (categoryFilterActive(restrictToCategory, category) && String(t.category || "") !== category) continue;
     list.push(t);
   }
   list.sort(function (a, b) {
@@ -1652,7 +1717,7 @@ function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
   // button: without this the torrent is unreachable from the UI that is
   // supposed to be waiting for a decision.
   var t = torrents[hash];
-  if (restrictToCategory && category && String((t && t.category) || "") !== category) {
+  if (categoryFilterActive(restrictToCategory, category) && String((t && t.category) || "") !== category) {
     api.ui.showNotification(
       "Added, but qBittorrent didn't put it in “" + category + "” — turn off “Only manage my own category” to see it"
     );
@@ -2620,16 +2685,50 @@ function rowIndices(data) {
 // The files these row indices name, in the order they were given, skipping
 // anything unfinished — same rule as the Play button, since a partial file stops
 // partway and reads as corrupt.
-function filesForIndices(hash, indices) {
+// The files these row indices name, whatever they are — the raw selection, so a
+// refusal can say which of the two reasons applies.
+function selectedFiles(hash, indices) {
   var files = filesByHash[hash] || [];
   var byIndex = {};
   for (var i = 0; i < files.length; i++) byIndex[files[i].index] = files[i];
   var out = [];
   for (var j = 0; j < indices.length; j++) {
     var f = byIndex[indices[j]];
-    if (f && Number(f.progress) >= 1 && mediaKindOf(f.name)) out.push(f);
+    if (f) out.push(f);
   }
   return out;
+}
+
+function filesForIndices(hash, indices) {
+  var list = selectedFiles(hash, indices);
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    if (Number(f.progress) >= 1 && mediaKindOf(f.name)) out.push(f);
+  }
+  return out;
+}
+
+// Why nothing in this selection can play. Both reasons used to be reported as
+// "nothing there that's finished downloading", which is plainly wrong about a
+// cover.jpg the same list shows as complete — and the row-level buttons no
+// longer offer Play there at all, so anything reaching this came in through the
+// toolbar, over a mixed selection.
+function unplayableReason(selected) {
+  var list = selected || [];
+  if (!list.length) return "Nothing selected";
+  var anyMedia = false;
+  for (var i = 0; i < list.length; i++) {
+    if (mediaKindOf(list[i].name)) { anyMedia = true; break; }
+  }
+  if (!anyMedia) {
+    return list.length === 1
+      ? "That isn't an audio or video file"
+      : "None of those are audio or video files";
+  }
+  return list.length === 1
+    ? "That file hasn't finished downloading yet"
+    : "Nothing there that's finished downloading";
 }
 
 function tracksForIndices(hash, indices) {
@@ -2655,7 +2754,7 @@ function enqueueFiles(hash, indices) {
     return tracksForIndicesTagged(hash, indices);
   }).then(function (tracks) {
     if (!tracks.length) {
-      api.ui.showNotification("Nothing there that's finished downloading");
+      api.ui.showNotification(unplayableReason(selectedFiles(hash, indices)));
       return;
     }
     // Append: the end of the queue is where "add to queue" means, and the host
@@ -2738,7 +2837,7 @@ function statusLine() {
   if (s.kind !== "ok") return s.label;
   var label = "Connected";
   if (qbtVersion) label += " to qBittorrent " + qbtVersion;
-  if (restrictToCategory && category) label += " · category “" + category + "”";
+  if (categoryFilterActive(restrictToCategory, category)) label += " · category “" + category + "”";
   return label;
 }
 
@@ -3279,7 +3378,7 @@ function render() {
   // automatically: re-tagging someone's torrents is a write to their
   // qBittorrent, and the rename may well have been for a second profile that
   // should NOT inherit the first one's downloads.
-  var stranded = restrictToCategory ? hashesInCategory(torrents, previousCategory) : [];
+  var stranded = categoryFilterActive(restrictToCategory, category) ? hashesInCategory(torrents, previousCategory) : [];
   if (stranded.length) {
     children.push({
       type: "text",
@@ -3319,7 +3418,7 @@ function render() {
     children.push({
       type: "text",
       content: connected
-        ? restrictToCategory && category
+        ? categoryFilterActive(restrictToCategory, category)
           ? "No torrents in the “" + category + "” category yet. Paste a magnet link above, or turn off “Only manage my own category” in settings to see everything."
           : "No torrents yet. Paste a magnet link or .torrent URL above."
         : "Not connected to qBittorrent."
@@ -3534,7 +3633,14 @@ function settingsTree(d, destOptions, status, statusChildren) {
           {
             type: "settings-row",
             label: "Only manage my own category",
-            description: "On (recommended): the Torrents view and its Start all / Stop all buttons only ever touch torrents in the category above. Off: everything in qBittorrent is listed and bulk actions reach all of it.",
+            // State-aware, because with the box above empty this switch does
+            // nothing at all: there is no name to match, so the view lists
+            // everything either way. A description that still promised "only
+            // ever touch torrents in the category above" described a filter
+            // that wasn't running.
+            description: d.category
+              ? "On (recommended): the Torrents view and its Start all / Stop all buttons only ever touch torrents in the “" + d.category + "” category. Off: everything in qBittorrent is listed and bulk actions reach all of it."
+              : "No category set above, so there is nothing to restrict — every torrent in qBittorrent is listed and bulk actions reach all of it. Name a category above to use this.",
             control: { type: "toggle", label: "", action: "qbt:set-restrict", checked: !!d.restrictToCategory }
           },
           {
@@ -3667,8 +3773,7 @@ function saveSettings() {
   category = (d.category || "").trim();
   // Renaming leaves the old torrents tagged with the old name; remember it so
   // they can be found and moved rather than silently disappearing.
-  if (outgoingCategory && outgoingCategory !== category) previousCategory = outgoingCategory;
-  if (previousCategory === category) previousCategory = "";
+  previousCategory = nextPreviousCategory(outgoingCategory, category, previousCategory);
   restrictToCategory = !!d.restrictToCategory;
   insecure = !!d.insecure;
   pollMs = clampPoll(d.pollMs);
@@ -4039,6 +4144,7 @@ function fileRowsNode(hash) {
     // torrent row: the two are read together, and a trailing column put them at
     // opposite ends of the row.
     var subtitle = fileStatusText(f, torrent) + "  ·  " + formatBytes(f.size);
+    var offered = fileRowActions(kind, done, skipped);
     items.push({
       id: String(f.index),
       // No "⊘"/"◌" prefix on the name any more: the tile carries the state in
@@ -4047,27 +4153,10 @@ function fileRowsNode(hash) {
       title: title,
       subtitle: subtitle,
       imageUrl: fileIconFor(f, torrent),
-      // Each row offers only what it can actually do.
-      //
-      // A DOWNLOADED file is the only one worth playing or queueing: the bytes
-      // are on disk. It gets neither Download (nothing left to fetch) nor Skip
-      // (that would only stop seeding a file the user already has, which is not
-      // what "skip" means anywhere else in this list).
-      //
-      // Anything else is a choice about whether to fetch it, and Download and
-      // Skip are that choice in two directions — so a row offers the one it is
-      // not already in. Play and Add to queue would act on a file that does not
-      // exist yet.
-      actions: done
-        ? ["qbt:play-file", "qbt:enqueue-file"]
-        : skipped
-          ? ["qbt:file-download"]
-          : ["qbt:file-skip"],
+      // What this row can actually do — see fileRowActions for which, and why.
+      actions: offered.actions,
       album: torrent ? torrent.name : undefined,
-      // Named rather than left to the host fallback (which fires the first
-      // visible action), so a double-click can never mean something the row did
-      // not put first on purpose.
-      action: kind && done ? "qbt:play-file" : skipped ? "qbt:file-download" : "qbt:file-skip",
+      action: offered.action,
       // Only a finished, reachable, PLAYABLE file gets a path — that is what
       // makes the host's right-click menu and drag-to-queue work on these rows.
       path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
@@ -4368,11 +4457,7 @@ function registerActions() {
     var hash = expandedHash;
     tracksForIndicesTagged(hash, indices).then(function (tracks) {
       if (!tracks.length) {
-        api.ui.showNotification(
-          indices.length === 1
-            ? "That file hasn't finished downloading yet"
-            : "Nothing there that's finished downloading"
-        );
+        api.ui.showNotification(unplayableReason(selectedFiles(hash, indices)));
         return;
       }
       var t = torrents[hash];
@@ -4555,6 +4640,8 @@ return {
   _rowIds: rowIds,
   _searchResultId: searchResultId,
   _hashesInCategory: hashesInCategory,
+  _categoryFilterActive: categoryFilterActive,
+  _nextPreviousCategory: nextPreviousCategory,
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
   _searchResultSubtitle: searchResultSubtitle,
@@ -4590,6 +4677,8 @@ return {
   _applyPathMapping: applyPathMapping,
   _isLikelyLocalHost: isLikelyLocalHost,
   _parseFileTrack: parseFileTrack,
+  _fileRowActions: fileRowActions,
+  _unplayableReason: unplayableReason,
   _mergeFileTrack: mergeFileTrack,
   _firstText: firstText,
   _firstNum: firstNum,

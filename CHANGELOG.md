@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0
 
 **Tracks are named by the file, not by the filename.**
 
@@ -18,12 +18,34 @@ arrived with no artist at all, and every album was the raw torrent name —
   the second choice for artist: on a compilation it says "Various Artists" while
   the per-track artist is the one worth showing.
 - **The file list says it too.** Tags are read once when a torrent's contents
-  arrive, so the rows themselves show real titles and artists — not just the
-  queue entries built from them later. Rendering never triggers a read, so a
-  2000-file torrent doesn't probe 2000 files.
+  arrive, so the rows show real titles and artists — not just the queue entries
+  built from them later. Rendering never triggers a read, so a 2000-file torrent
+  doesn't probe 2000 files.
 - **Nothing here can break playback.** A host too old for the API, a seedbox
   whose files aren't reachable from this machine, and an untagged release all
   fall back to exactly the filename parse this plugin shipped with.
+
+**A file that isn't audio or video is no longer offered as one.**
+
+Every release carries cover art, an `.nfo`, a folder of scans. A finished one
+was offering **Play** and **Add to queue**, because the row asked only whether
+the file had downloaded — pressing them queued nothing and then reported
+"nothing there that's finished downloading" about a file the same row showed as
+complete. It now offers nothing at all: there is nothing to play, and Download /
+Skip are just as meaningless once the bytes are here. Unfinished files are
+unchanged, since skipping a 4 GB video extra is a main reason to open the list.
+
+**No category means no filter.**
+
+Leaving the Category box empty is a supported choice — nothing is tagged — and
+with no name to match against there is nothing to filter by, so every torrent in
+qBittorrent is listed. That already worked in the list itself, but two places
+disagreed: the stranded-torrents banner fired after clearing the box, announcing
+that torrents were "hidden by the “” filter" while they sat in the list directly
+underneath it (over a button that would have stripped their category in
+qBittorrent), and the *Only manage my own category* switch described a filter
+that wasn't running. Clearing is not a rename, so nothing is stranded and
+nothing is offered; the switch now says it does nothing when no category is set.
 
 ## 0.17.0
 
