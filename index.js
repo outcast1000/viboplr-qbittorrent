@@ -3851,6 +3851,7 @@ function render() {
     tabs: [
       { id: "torrents", label: "Torrents", count: list.length },
       { id: "search", label: "Search" },
+      { id: "debug", label: "Debug" },
       { id: "settings", label: "Settings" }
     ]
   });
@@ -3869,6 +3870,13 @@ function render() {
     var searchNodes = searchTabNodes();
     for (var si = 0; si < searchNodes.length; si++) children.push(searchNodes[si]);
     api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: "search" });
+    return;
+  }
+
+  if (activeTab === "debug") {
+    var debugNodes = debugTabNodes();
+    for (var dbi = 0; dbi < debugNodes.length; dbi++) children.push(debugNodes[dbi]);
+    api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: "debug" });
     return;
   }
 
@@ -4614,6 +4622,109 @@ function hashesOf(data) {
 //   idle-based and every reportProgress() resets it. Tiers 2 (wait for a file
 //   the torrent holds) and 3 (go find a torrent) live here.
 
+// --- Debug tracing ------------------------------------------------------------
+//
+// The Debug tab runs the REAL resolver functions and watches them narrate.
+// dbg() is a no-op unless a debug run is in flight, so the production paths
+// pay one boolean check per step and the narration can be written where the
+// decisions are made instead of duplicated in a shadow pipeline.
+var debugRunning = false;
+var debugStartedAt = 0;
+var debugLog = [];
+var DEBUG_LOG_MAX = 300;
+// What the Debug tab's inputs hold. Session-only — this is a workbench.
+var debugFields = { title: "", artist: "", album: "" };
+
+// A debug run is the REAL pipeline — the download test genuinely adds and
+// downloads torrents. That is the point (a dry run would debug a different
+// program), so the tab says it plainly instead of pretending otherwise.
+function runDebugResolve(kind) {
+  if (debugRunning) return;
+  var t = debugFields.title.trim();
+  var a = debugFields.artist.trim();
+  var al = debugFields.album.trim();
+  if (!t && !a) {
+    api.ui.showNotification("Enter at least a title or an artist");
+    return;
+  }
+  debugLog = [];
+  debugRunning = true;
+  debugStartedAt = Date.now();
+  dbg(
+    (kind === "stream" ? "STREAM resolve" : "DOWNLOAD resolve") +
+      ": title=“" + t + "” artist=“" + a + "” album=“" + al + "”"
+  );
+  var run =
+    kind === "stream"
+      ? resolveStreamByMetadata(t, a || null, al || null, null, {})
+      : resolveDownloadByMetadata(t, a || null, al || null, null, "");
+  run
+    .then(function (result) {
+      dbg(
+        result
+          ? "RESULT: " + (result.url || "(no url?)") + (result.label ? "  [" + result.label + "]" : "")
+          : "DECLINED (null) — the host would fall through to the next source"
+      );
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: debug resolve failed:", e);
+      dbg("ERROR: " + errText(e));
+    })
+    .then(function () {
+      debugRunning = false;
+      render();
+    });
+}
+
+function debugTabNodes() {
+  var children = [
+    {
+      type: "text",
+      className: "muted",
+      content:
+        "Runs the real resolver against your qBittorrent and narrates every step. " +
+        "The download test is not a simulation — it can add torrents and download files, exactly as a real download would."
+    },
+    { type: "text-input", placeholder: "Title", action: "qbt:debug-title", value: debugFields.title },
+    { type: "text-input", placeholder: "Artist", action: "qbt:debug-artist", value: debugFields.artist },
+    { type: "text-input", placeholder: "Album", action: "qbt:debug-album", value: debugFields.album },
+    {
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        { type: "button", label: "Test play (stream)", action: "qbt:debug-stream", variant: "accent", disabled: debugRunning },
+        { type: "button", label: "Test download (tiers 1–3)", action: "qbt:debug-download", variant: "secondary", disabled: debugRunning },
+        { type: "button", label: "Clear log", action: "qbt:debug-clear", variant: "secondary", disabled: debugRunning || !debugLog.length }
+      ]
+    }
+  ];
+  if (debugRunning) children.push({ type: "loading", message: "Resolving — steps appear below as they happen…" });
+  for (var i = 0; i < debugLog.length; i++) {
+    children.push({ type: "text", className: "muted", content: debugLog[i] });
+  }
+  return children;
+}
+
+function dbg(msg) {
+  if (!debugRunning) return;
+  var secs = ((Date.now() - debugStartedAt) / 1000).toFixed(1);
+  debugLog.push("+" + secs + "s  " + msg);
+  if (debugLog.length > DEBUG_LOG_MAX) debugLog.splice(0, debugLog.length - DEBUG_LOG_MAX);
+  render();
+}
+
+// Progress narration without the firehose: one line per decile, not per poll.
+function dbgEvery10(label) {
+  var last = -1;
+  return function (frac) {
+    var decile = Math.floor(numOr(frac, 0) * 10);
+    if (decile > last) {
+      last = decile;
+      dbg(label + " " + Math.round(numOr(frac, 0) * 100) + "%");
+    }
+  };
+}
+
 // Progress to the host's download modal. Best-effort by design: the host may
 // have abandoned the resolve, and a throw here must not kill a working job.
 function reportPct(percent) {
@@ -4686,44 +4797,67 @@ function primeFoundFile(hash, file) {
     });
 }
 
+// The handler itself, named so the Debug tab can run it directly and narrate.
+function resolveStreamByMetadata(title, artistName, albumName, durationSecs, opts) {
+  // Every decline must be FAST — this fires for every track no other source
+  // could play, and a slow "no" here drags the whole app's playback.
+  if (!connected || !baseUrl) {
+    dbg("stream: not connected to qBittorrent — decline");
+    return Promise.resolve(null);
+  }
+  if (!filesAreReachable()) {
+    dbg("stream: qBittorrent's files aren't reachable on this machine — decline");
+    return Promise.resolve(null);
+  }
+  var want = wantFromArgs(title, artistName, albumName, durationSecs);
+  var best = findTrackInTorrents(want, torrents, fileNamesByHash);
+  if (!best) {
+    dbg("stream: no match across " + Object.keys(fileNamesByHash).length + " cached torrents — decline");
+    return Promise.resolve(null);
+  }
+  var t = torrents[best.hash];
+  dbg("stream: matched “" + best.name + "” in “" + ((t && t.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
+  // One request to learn the file's REAL index and progress — the name cache
+  // holds neither, and the position in it is not the qBittorrent index.
+  return fetchFilesQuiet(best.hash)
+    .then(function (files) {
+      var file = locateFileByName(files, best.name);
+      if (!file) {
+        dbg("stream: the matched file is no longer in the torrent — decline");
+        return null;
+      }
+      if (numOr(file.progress, 0) < 1) {
+        // The torrent HOLDS it but hasn't downloaded it. Torrents can't
+        // answer in stream-resolve time, so start the file (setting only)
+        // and decline — the next source plays it now, this one next time.
+        dbg(
+          "stream: file is only " + Math.round(numOr(file.progress, 0) * 100) + "% downloaded — " +
+            (autoFetchFound ? "priming its download and declining" : "auto-fetch is off, declining")
+        );
+        if (autoFetchFound) primeFoundFile(best.hash, file);
+        return null;
+      }
+      return verifyMatchByTags(t, file, want).then(function (verdict) {
+        dbg("stream: tag check — " + verdict);
+        if (verdict === "contradict") return null;
+        // Our own scheme: the host recurses into the qbt:// by-URI resolver,
+        // which owns path mapping and source-panel attribution already.
+        var result = { url: qbtUri(best.hash, file.index), label: "qBittorrent" };
+        if (opts && opts.preferVideo) result.video = mediaKindOf(file.name) === "video";
+        dbg("stream: answering " + result.url);
+        return result;
+      });
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: stream resolve failed:", e);
+      dbg("stream: failed — " + errText(e));
+      return null;
+    });
+}
+
 function registerMetadataStreamResolver() {
   if (!api.playback || typeof api.playback.onStreamResolve !== "function") return;
-  api.playback.onStreamResolve("qbt-stream", function (title, artistName, albumName, durationSecs, opts) {
-    // Every decline must be FAST — this fires for every track no other source
-    // could play, and a slow "no" here drags the whole app's playback.
-    if (!connected || !baseUrl) return Promise.resolve(null);
-    if (!filesAreReachable()) return Promise.resolve(null);
-    var want = wantFromArgs(title, artistName, albumName, durationSecs);
-    var best = findTrackInTorrents(want, torrents, fileNamesByHash);
-    if (!best) return Promise.resolve(null);
-    var t = torrents[best.hash];
-    // One request to learn the file's REAL index and progress — the name cache
-    // holds neither, and the position in it is not the qBittorrent index.
-    return fetchFilesQuiet(best.hash)
-      .then(function (files) {
-        var file = locateFileByName(files, best.name);
-        if (!file) return null;
-        if (numOr(file.progress, 0) < 1) {
-          // The torrent HOLDS it but hasn't downloaded it. Torrents can't
-          // answer in stream-resolve time, so start the file (setting only)
-          // and decline — the next source plays it now, this one next time.
-          if (autoFetchFound) primeFoundFile(best.hash, file);
-          return null;
-        }
-        return verifyMatchByTags(t, file, want).then(function (verdict) {
-          if (verdict === "contradict") return null;
-          // Our own scheme: the host recurses into the qbt:// by-URI resolver,
-          // which owns path mapping and source-panel attribution already.
-          var result = { url: qbtUri(best.hash, file.index), label: "qBittorrent" };
-          if (opts && opts.preferVideo) result.video = mediaKindOf(file.name) === "video";
-          return result;
-        });
-      })
-      .catch(function (e) {
-        console.error("qBittorrent: stream resolve failed:", e);
-        return null;
-      });
-  });
+  api.playback.onStreamResolve("qbt-stream", resolveStreamByMetadata);
 }
 
 // --- Download provider: tiers 1–2 --------------------------------------------
@@ -4796,9 +4930,14 @@ function fetchExistingMatch(best, want) {
   if (!t) return Promise.resolve(null);
   return fetchFilesQuiet(best.hash).then(function (files) {
     var file = locateFileByName(files, best.name);
-    if (!file) return null;
+    if (!file) {
+      dbg("existing: the matched file is no longer in the torrent");
+      return null;
+    }
     if (numOr(file.progress, 0) >= 1) {
+      dbg("existing: file is fully downloaded — tier 1");
       return verifyMatchByTags(t, file, want).then(function (verdict) {
+        dbg("existing: tag check — " + verdict);
         if (verdict === "contradict") return null;
         reportPct(100);
         return downloadResultFor(t, file);
@@ -4806,7 +4945,9 @@ function fetchExistingMatch(best, want) {
     }
     // Tier 2. The file may be deselected (priority 0) — wanting to download it
     // IS the selection now.
+    dbg("existing: file is " + Math.round(numOr(file.progress, 0) * 100) + "% here — tier 2, selecting it and starting the torrent");
     reportPct(5);
+    var dbgTick = dbgEvery10("existing: downloading —");
     var ensureWanted = numOr(file.priority, 1) === 0 ? postFilePriority(best.hash, [file.index], 1) : Promise.resolve();
     return ensureWanted
       .then(function () {
@@ -4815,11 +4956,13 @@ function fetchExistingMatch(best, want) {
       .then(function () {
         return waitForFileDownload(best.hash, file.index, function (frac) {
           reportPct(5 + 94 * frac);
+          dbgTick(frac);
         });
       })
       .then(function (done) {
         var t2 = torrents[best.hash] || t;
         return verifyMatchByTags(t2, done, want).then(function (verdict) {
+          dbg("existing: download complete — tag check " + verdict);
           if (verdict === "contradict") {
             throw new Error("The downloaded file's tags say it is a different song — not handing it over");
           }
@@ -5086,19 +5229,33 @@ function runDiscovery(want, format) {
   // Walk the ladder until a query yields something worth examining.
   var trySearch = function (idx) {
     if (idx >= queries.length) return Promise.resolve([]);
+    dbg("discovery: searching “" + queries[idx] + "” (" + (idx + 1) + "/" + queries.length + ")");
     return searchStep(queries[idx]).then(function (results) {
+      var viable = filterTier3Candidates(results || [], ctx);
       var ranked = rankTier3Candidates(results, ctx);
+      dbg("discovery: " + (results || []).length + " results, " + viable.length + " viable");
+      for (var di = 0; di < ranked.length; di++) {
+        dbg(
+          "  " + (di + 1) + ". “" + ranked[di].fileName + "” — " +
+            formatBytes(ranked[di].fileSize) + ", " + formatSeedCount(swarmCount(ranked[di].nbSeeders)) +
+            " seeds, score " + scoreSearchCandidate(ranked[di], ctx).toFixed(1)
+        );
+      }
       if (ranked.length) return ranked;
       return trySearch(idx + 1);
     });
   };
   return trySearch(0)
     .then(function (candidates) {
-      if (!candidates.length) return null;
+      if (!candidates.length) {
+        dbg("discovery: nothing viable from any query — giving up");
+        return null;
+      }
       return examineCandidates(candidates, 0, want);
     })
     .catch(function (e) {
       if (String(e && e.message) === "no-plugins") {
+        dbg("discovery: qBittorrent has no search plugins installed — giving up");
         if (!saidNoSearchPlugins) {
           saidNoSearchPlugins = true;
           api.ui.showNotification(
@@ -5125,6 +5282,7 @@ function examineCandidates(candidates, i, want) {
   if (i >= candidates.length) return Promise.resolve(null);
   var r = candidates[i];
   var addedHash = null;
+  dbg("examine " + (i + 1) + "/" + candidates.length + ": adding “" + r.fileName + "” paused");
   reportPct(resolvePercent("candidate", i, 0));
   var before = shallowHashSet(torrents);
   var expected = magnetHash(r.fileUrl);
@@ -5133,21 +5291,32 @@ function examineCandidates(candidates, i, want) {
       return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
     })
     .then(function (hash) {
-      if (!hash) return null; // dead link — nothing was added, nothing to clean
+      if (!hash) {
+        dbg("  it never registered in qBittorrent (dead link?) — next candidate");
+        return null; // dead link — nothing was added, nothing to clean
+      }
       addedHash = hash;
       if (resolveJob) resolveJob.hashes[hash] = true;
       trackOrphan(hash);
+      dbg("  registered as " + hash.substring(0, 12) + "… — waiting for its file list");
       return waitForMetadataQuiet(hash, {
         maxMs: RESOLVE_META_MAX_MS,
         onTick: function (elapsed) {
           reportPct(resolvePercent("candidate", i, 0.2 + (0.6 * elapsed) / RESOLVE_META_MAX_MS));
         }
       }).then(function (res) {
-        if (!res.ok) return null;
+        if (!res.ok) {
+          dbg(res.gone ? "  the torrent vanished while waiting — next candidate" : "  no file list after " + Math.round(RESOLVE_META_MAX_MS / 1000) + "s — removing it, next candidate");
+          return null;
+        }
         return fetchFilesQuiet(hash).then(function (files) {
           var t = torrents[hash];
           var file = pickFileForTrack(files, (t && t.name) || r.fileName || "", want);
-          if (!file) return null;
+          if (!file) {
+            dbg("  " + files.length + " files, none match the track — removing it, next candidate");
+            return null;
+          }
+          dbg("  " + files.length + " files — picked “" + file.name + "”");
           return { hash: hash, files: files, file: file };
         });
       });
@@ -5173,7 +5342,9 @@ function examineCandidates(candidates, i, want) {
 
 function commitCandidate(found, want) {
   var hash = found.hash;
+  dbg("commit: deselect all → select “" + found.file.name + "” → start");
   reportPct(resolvePercent("commit", 0, 0));
+  var dbgTick = dbgEvery10("commit: downloading —");
   var all = [];
   for (var i = 0; i < found.files.length; i++) {
     if (typeof found.files[i].index === "number") all.push(found.files[i].index);
@@ -5193,18 +5364,21 @@ function commitCandidate(found, want) {
       untrackOrphan(hash);
       return waitForFileDownload(hash, found.file.index, function (frac) {
         reportPct(resolvePercent("download", 0, frac));
+        dbgTick(frac);
       });
     })
     .then(function (file) {
       var t = torrents[hash];
       if (!t) throw new Error("That torrent is no longer in qBittorrent");
       return verifyMatchByTags(t, file, want).then(function (verdict) {
+        dbg("commit: download complete — tag check " + verdict);
         if (verdict === "contradict") {
           return deleteTorrents([hash], true).then(function () {
             throw new Error("The downloaded file's tags say it is a different song");
           });
         }
         var result = downloadResultFor(t, file);
+        dbg("commit: disposition “" + tier3Disposition + "”");
         return finalizeDisposition(hash, t).then(function () {
           reportPct(100);
           return result;
@@ -5278,25 +5452,36 @@ function pickFileForQuery(files, torrentName, query) {
   return media.length === 1 ? media[0] : null;
 }
 
+// Named for the same reason as the stream half: the Debug tab runs it raw.
+function resolveDownloadByMetadata(title, artistName, albumName, durationSecs, format) {
+  if (!connected || !baseUrl) {
+    dbg("download: not connected to qBittorrent — decline");
+    return Promise.resolve(null);
+  }
+  if (!filesAreReachable()) {
+    api.log("warn", "download resolve declined: qBittorrent's files aren't reachable from this machine", "qbittorrent");
+    dbg("download: qBittorrent's files aren't reachable on this machine — decline");
+    return Promise.resolve(null);
+  }
+  var want = wantFromArgs(title, artistName, albumName, durationSecs);
+  var best = findTrackInTorrents(want, torrents, fileNamesByHash);
+  if (best) {
+    var bt = torrents[best.hash];
+    dbg("download: found in existing torrent “" + ((bt && bt.name) || best.hash) + "” — “" + best.name + "” (score " + best.score.toFixed(2) + ")");
+    return fetchExistingMatch(best, want).then(function (r) {
+      if (r) return r;
+      dbg("download: the existing match fell through" + (discoveryEnabled ? " — trying discovery" : " and discovery is off — decline"));
+      return discoveryEnabled ? discoverAndFetch(want, format) : null;
+    });
+  }
+  dbg("download: not in any existing torrent" + (discoveryEnabled ? " — starting discovery" : " and discovery is off — decline"));
+  return discoveryEnabled ? discoverAndFetch(want, format) : Promise.resolve(null);
+}
+
 function registerDownloadProvider() {
   if (!api.downloads || typeof api.downloads.onResolveByMetadata !== "function") return;
 
-  api.downloads.onResolveByMetadata("qbt-download", function (title, artistName, albumName, durationSecs, format) {
-    if (!connected || !baseUrl) return Promise.resolve(null);
-    if (!filesAreReachable()) {
-      api.log("warn", "download resolve declined: qBittorrent's files aren't reachable from this machine", "qbittorrent");
-      return Promise.resolve(null);
-    }
-    var want = wantFromArgs(title, artistName, albumName, durationSecs);
-    var best = findTrackInTorrents(want, torrents, fileNamesByHash);
-    if (best) {
-      return fetchExistingMatch(best, want).then(function (r) {
-        if (r) return r;
-        return discoveryEnabled ? discoverAndFetch(want, format) : null;
-      });
-    }
-    return discoveryEnabled ? discoverAndFetch(want, format) : Promise.resolve(null);
-  });
+  api.downloads.onResolveByMetadata("qbt-download", resolveDownloadByMetadata);
 
   if (typeof api.downloads.onInteractiveSearch === "function") {
     api.downloads.onInteractiveSearch("qbt-download", function (query, limit) {
@@ -6018,6 +6203,25 @@ function registerActions() {
   api.ui.onAction("qbt:set-auto-import", function (data) {
     currentDraft().autoImport = !!(data && (data.checked === undefined ? data.value : data.checked));
     renderSettings();
+  });
+  api.ui.onAction("qbt:debug-title", function (data) {
+    debugFields.title = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:debug-artist", function (data) {
+    debugFields.artist = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:debug-album", function (data) {
+    debugFields.album = (data && data.value) || "";
+  });
+  api.ui.onAction("qbt:debug-stream", function () {
+    runDebugResolve("stream");
+  });
+  api.ui.onAction("qbt:debug-download", function () {
+    runDebugResolve("download");
+  });
+  api.ui.onAction("qbt:debug-clear", function () {
+    debugLog = [];
+    render();
   });
   api.ui.onAction("qbt:set-auto-fetch", function (data) {
     currentDraft().autoFetchFound = !!(data && (data.checked === undefined ? data.value : data.checked));

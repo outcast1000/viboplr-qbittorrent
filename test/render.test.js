@@ -261,11 +261,41 @@ test("removing a multi-row selection confirms once, by count", async () => {
   });
 });
 
-test("the tab strip is Torrents / Search / Settings", async () => {
+test("the tab strip is Torrents / Search / Debug / Settings", async () => {
   await withPlugin(async ({ views }) => {
     const tabs = walk(last(views)).find((n) => n.type === "tabs");
-    assert.deepEqual(tabs.tabs.map((t) => t.id), ["torrents", "search", "settings"]);
+    assert.deepEqual(tabs.tabs.map((t) => t.id), ["torrents", "search", "debug", "settings"]);
     assert.equal(tabs.tabs[0].count, 2);
+  });
+});
+
+test("the debug tab runs the real stream resolver and narrates each step", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:tab"]({ tabId: "debug" });
+    let nodes = walk(last(views));
+    // The workbench: three fields, two run buttons, a clear button.
+    for (const action of ["qbt:debug-title", "qbt:debug-artist", "qbt:debug-album"]) {
+      assert.ok(nodes.some((n) => n.type === "text-input" && n.action === action), "missing input " + action);
+    }
+    for (const action of ["qbt:debug-stream", "qbt:debug-download", "qbt:debug-clear"]) {
+      assert.ok(nodes.some((n) => n.action === action), "missing button " + action);
+    }
+    // A miss narrates the decline instead of failing silently.
+    handlers["qbt:debug-title"]({ value: "No Such Song" });
+    handlers["qbt:debug-artist"]({ value: "Nobody" });
+    handlers["qbt:debug-stream"]({});
+    await settle();
+    const texts = walk(last(views))
+      .filter((n) => n.type === "text")
+      .map((n) => n.content)
+      .join("\n");
+    assert.ok(texts.includes("STREAM resolve"), texts);
+    assert.ok(texts.includes("no match"), texts);
+    assert.ok(texts.includes("DECLINED"), texts);
+    // Clearing empties the log.
+    handlers["qbt:debug-clear"]({});
+    const after = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
+    assert.ok(!after.includes("STREAM resolve"), after);
   });
 });
 

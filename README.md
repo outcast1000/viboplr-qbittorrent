@@ -399,6 +399,14 @@ be **reachable on this machine** (local qBittorrent, or the path mapping set),
 and tier 3 needs **search plugins installed in qBittorrent** — without them the
 resolver declines and says so once.
 
+**Debugging a resolve.** The **Debug** tab is a workbench for exactly this
+pipeline: enter a title/artist/album, run *Test play* (stream path) or *Test
+download* (full tiers 1–3), and every step narrates itself with elapsed
+times — the cache match and its score, search queries and ranked candidates,
+each examined torrent, the file pick, download progress, and the final result
+or the precise reason for the decline. It runs the real resolver, so a
+download test can genuinely add torrents and download files.
+
 ## Not here yet
 
 Planned: RSS auto-download rules for artists you follow, and playing a file

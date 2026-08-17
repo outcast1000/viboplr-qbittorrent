@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.22.0
+
+**A Debug tab for the resolver.** Type a title, artist and album into the new
+**Debug** tab and run either half of the resolver against your real
+qBittorrent — *Test play* for the stream path, *Test download* for the full
+tiers-1–3 pipeline — and watch every step narrate itself with elapsed times:
+cache match (with its score), file progress, tag verdicts, each search query
+and its result counts, every ranked candidate with size/seeds/score, the
+add–register–metadata–inspect walk per candidate, the one-file commit,
+download progress by decile, the disposition, and the final result or the
+exact reason for the decline.
+
+The narration lives inside the real resolver functions and is a no-op unless
+a debug run is in flight — so what the tab shows is what a real play or
+download actually did, not a simulation. Which also means the download test is
+not a dry run: it can genuinely add torrents and download files, and the tab
+says so.
+
 ## 0.21.1
 
 **Discovery searches the way torrents are named.** The query ladder is now
