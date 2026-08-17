@@ -200,6 +200,15 @@ test("a deselected file is never described as downloading", () => {
   assert.equal(plugin._fileStatusText({ priority: 0, progress: 0.45 }, running), "Not selected for download");
 });
 
+test("a fully-downloaded file reads Downloaded even when deselected", () => {
+  // Downloaded wins over deselected: bytes on disk are on disk. Deselecting a
+  // file you already have (to stop seeding it) doesn't un-download it, so
+  // "Not selected" would hide that it is sitting there, playable.
+  const running = { state: "downloading" };
+  assert.equal(plugin._fileState({ priority: 0, progress: 1 }, running), "done");
+  assert.equal(plugin._fileStatusText({ priority: 0, progress: 1 }, running), "Downloaded");
+});
+
 test("a priority that arrives as a string still means deselected", () => {
   // THE bug: `typeof f.priority === "number"` rejected "0" and fell through to
   // the default of 1, so a file the user had deselected came back marked for

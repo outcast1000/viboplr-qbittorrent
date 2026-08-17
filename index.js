@@ -760,8 +760,12 @@ function torrentIconFor(t, awaiting) {
 // torrent is selected and going nowhere, and calling that "Downloading 0%" is
 // a claim about the transfer that is simply untrue.
 function fileState(f, torrent) {
-  if (numOr(f && f.priority, 1) === 0) return "skipped";
+  // Downloaded wins over deselected: a file whose bytes are on disk reads
+  // "Downloaded" whatever its priority. Deselecting a file you already have
+  // (to stop seeding it) doesn't un-download it, so calling it "Not selected"
+  // would hide that it's sitting right there, playable.
   if (numOr(f && f.progress, 0) >= 1) return "done";
+  if (numOr(f && f.priority, 1) === 0) return "skipped";
   // No torrent to ask (the contents of something already removed) — describe
   // the file, not a transfer we can't vouch for.
   if (!torrent || isPaused(torrent) || isErrored(torrent)) return "waiting";
@@ -1297,24 +1301,20 @@ function parseFileTrack(name) {
 // something the row did not put first on purpose — and it is null when the row
 // offers nothing, rather than falling through to an action that isn't there.
 function fileRowActions(kind, done, skipped) {
-  // Skipped wins, exactly as fileState() ranks it: a deselected file reads
-  // "Not selected for download", so the row must not also offer Play / Add to
-  // queue — that contradiction is what a file with priority 0 but bytes on
-  // disk (a deselected file in an otherwise-complete torrent) showed. The only
-  // action that matches "not selected" is to include it. A finished non-media
-  // file is the one exception with nothing to offer: its bytes are here and it
-  // can't be played, and "download" would re-select something already present.
-  if (skipped) {
-    return done && !kind
-      ? { actions: [], action: null }
-      : { actions: ["qbt:file-download"], action: "qbt:file-download" };
-  }
+  // Downloaded wins, matching fileState(): a file with bytes on disk reads
+  // "Downloaded", so its actions describe a file you HAVE — media plays, and a
+  // non-media file (cover art, .nfo) offers nothing, since there is nothing to
+  // play and "skip" would only stop seeding something already here. Priority
+  // no longer matters once the bytes exist.
   if (done) {
     return kind
       ? { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" }
       : { actions: [], action: null };
   }
-  return { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
+  // Not downloaded: offer the choice it is not already in.
+  return skipped
+    ? { actions: ["qbt:file-download"], action: "qbt:file-download" }
+    : { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
 }
 
 function qbtUri(hash, index) {
@@ -7046,10 +7046,9 @@ function fileRowsNode(hash) {
       action: offered.action,
       // Only a finished, reachable, PLAYABLE file gets a path — that is what
       // makes the host's right-click menu and drag-to-queue work on these rows.
-      // A deselected file is deliberately excluded even when its bytes exist,
-      // so "Not selected for download" reads the same on the row, its overlay
-      // buttons, and the host's right-click menu.
-      path: kind && done && !skipped && filesAreReachable() ? qbtUri(hash, f.index) : null,
+      // Priority is irrelevant here: a downloaded file's bytes are on disk and
+      // playable whether or not it is still selected.
+      path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
       artistName: kind ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
       albumTitle: kind && torrent ? firstText([tags && tags.album, torrent.name]) : null
     });

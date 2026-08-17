@@ -1,14 +1,16 @@
 # Changelog
 
-## 0.25.1
+## 0.25.2
 
-**A "Not selected for download" file now offers only Download.** A file with
-priority 0 that already had bytes on disk (a deselected file in an otherwise
-complete torrent) read *"Not selected for download"* on its row but still
-offered **Play** and **Add to queue** — the status ranked "skipped" first while
-the buttons ranked "downloaded" first. Skipped now wins in both, so such a row
-offers only **Download**, and it is no longer treated as playable by drag-to-
-queue or the right-click menu either. The row and its actions finally agree.
+**A downloaded file reads "Downloaded" and plays, whatever its selection.** A
+file with bytes on disk that had been deselected (priority 0) read *"Not
+selected for download"* and its Play / Add to queue buttons disagreed with that
+status. Now **downloaded wins over deselected everywhere** — such a file reads
+*"Downloaded"*, a media one plays and enqueues, and it is draggable and
+right-click-playable, because its bytes are on disk whether or not it is still
+selected. Deselection now only affects files that are *not yet* downloaded
+(those still read "Not selected for download" and offer **Download**). The row,
+its status, its buttons and the right-click menu all agree.
 
 ## 0.25.0
 
