@@ -4713,6 +4713,19 @@ function dbg(msg) {
   render();
 }
 
+// The one line that says WHAT is being searched for and WHERE. The local cache
+// isn't queried with a string — it's token-matched — so this prints the
+// normalized needles the matcher will actually use, which is what settles
+// "why didn't it find it": you can read the folded tokens against the folded
+// filenames.
+function dbgCacheTarget(prefix, want) {
+  if (!debugRunning) return;
+  var bits = ["title “" + normalizeForMatch(want.title) + "”"];
+  if (want.artist) bits.push("artist “" + normalizeForMatch(want.artist) + "”");
+  if (want.album) bits.push("album “" + normalizeForMatch(want.album) + "”");
+  dbg(prefix + " [local cache] matching " + bits.join(" + ") + " across " + Object.keys(fileNamesByHash).length + " cached torrents");
+}
+
 // Progress narration without the firehose: one line per decile, not per poll.
 function dbgEvery10(label) {
   var last = -1;
@@ -4810,13 +4823,14 @@ function resolveStreamByMetadata(title, artistName, albumName, durationSecs, opt
     return Promise.resolve(null);
   }
   var want = wantFromArgs(title, artistName, albumName, durationSecs);
+  dbgCacheTarget("stream:", want);
   var best = findTrackInTorrents(want, torrents, fileNamesByHash);
   if (!best) {
-    dbg("stream: no match across " + Object.keys(fileNamesByHash).length + " cached torrents — decline");
+    dbg("stream: [local cache] no match — decline");
     return Promise.resolve(null);
   }
   var t = torrents[best.hash];
-  dbg("stream: matched “" + best.name + "” in “" + ((t && t.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
+  dbg("stream: [local cache] matched “" + best.name + "” in “" + ((t && t.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
   // One request to learn the file's REAL index and progress — the name cache
   // holds neither, and the position in it is not the qBittorrent index.
   return fetchFilesQuiet(best.hash)
@@ -5229,11 +5243,11 @@ function runDiscovery(want, format) {
   // Walk the ladder until a query yields something worth examining.
   var trySearch = function (idx) {
     if (idx >= queries.length) return Promise.resolve([]);
-    dbg("discovery: searching “" + queries[idx] + "” (" + (idx + 1) + "/" + queries.length + ")");
+    dbg("discovery: [qBittorrent app] search string “" + queries[idx] + "” (" + (idx + 1) + "/" + queries.length + ")");
     return searchStep(queries[idx]).then(function (results) {
       var viable = filterTier3Candidates(results || [], ctx);
       var ranked = rankTier3Candidates(results, ctx);
-      dbg("discovery: " + (results || []).length + " results, " + viable.length + " viable");
+      dbg("discovery: [qBittorrent app] “" + queries[idx] + "” → " + (results || []).length + " results, " + viable.length + " viable");
       for (var di = 0; di < ranked.length; di++) {
         dbg(
           "  " + (di + 1) + ". “" + ranked[di].fileName + "” — " +
@@ -5464,17 +5478,18 @@ function resolveDownloadByMetadata(title, artistName, albumName, durationSecs, f
     return Promise.resolve(null);
   }
   var want = wantFromArgs(title, artistName, albumName, durationSecs);
+  dbgCacheTarget("download:", want);
   var best = findTrackInTorrents(want, torrents, fileNamesByHash);
   if (best) {
     var bt = torrents[best.hash];
-    dbg("download: found in existing torrent “" + ((bt && bt.name) || best.hash) + "” — “" + best.name + "” (score " + best.score.toFixed(2) + ")");
+    dbg("download: [local cache] matched “" + best.name + "” in “" + ((bt && bt.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
     return fetchExistingMatch(best, want).then(function (r) {
       if (r) return r;
-      dbg("download: the existing match fell through" + (discoveryEnabled ? " — trying discovery" : " and discovery is off — decline"));
+      dbg("download: the existing match fell through" + (discoveryEnabled ? " — trying the qBittorrent app" : " and discovery is off — decline"));
       return discoveryEnabled ? discoverAndFetch(want, format) : null;
     });
   }
-  dbg("download: not in any existing torrent" + (discoveryEnabled ? " — starting discovery" : " and discovery is off — decline"));
+  dbg("download: [local cache] no match" + (discoveryEnabled ? " — moving to the qBittorrent app's search" : " and discovery is off — decline"));
   return discoveryEnabled ? discoverAndFetch(want, format) : Promise.resolve(null);
 }
 

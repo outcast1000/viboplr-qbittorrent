@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.1
+
+**The Debug log now names the search string and the target.** Every lookup
+line says where it ran — `[local cache]` (the persistent file-name cache) or
+`[qBittorrent app]` (its search plugins) — and what it actually asked. For the
+qBittorrent side that is the literal search string; for the cache, which is
+token-matched rather than queried, it prints the **normalized** needles the
+matcher really uses (`title “joga” + artist “bjork”`), so "why didn't it find
+it" can be answered by reading the folded tokens against the folded filenames.
+
 ## 0.22.0
 
 **A Debug tab for the resolver.** Type a title, artist and album into the new

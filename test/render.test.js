@@ -290,6 +290,9 @@ test("the debug tab runs the real stream resolver and narrates each step", async
       .map((n) => n.content)
       .join("\n");
     assert.ok(texts.includes("STREAM resolve"), texts);
+    // Each lookup names its target and what it asked — the cache line carries
+    // the NORMALIZED needles the matcher actually used.
+    assert.ok(texts.includes("[local cache] matching title “no such song” + artist “nobody”"), texts);
     assert.ok(texts.includes("no match"), texts);
     assert.ok(texts.includes("DECLINED"), texts);
     // Clearing empties the log.
