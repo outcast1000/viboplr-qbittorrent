@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.26.0
+
+**Open a non-media file, or reveal its folder.** A downloaded file that isn't
+audio or video — cover art, an `.nfo`, a PDF booklet — used to offer nothing.
+Its row now has **Open** and **Show folder** buttons (when the files are on this
+machine), so the extras in a release are one click away.
+
+**Manage web indexers as JSON — view, export, import.** The Settings → Web
+indexers block gained, per site, a **View JSON** button that drops that
+definition into the edit box to read, copy, or tweak. Below, **Export all**
+fills the box with every indexer (bundled and custom) as one JSON array — a copy-
+out backup — and the add box now **imports an array**, so a whole set pastes
+back in at once. Re-importing a definition whose id already exists **updates** it
+rather than being rejected, which is how you edit one you pulled up with View
+JSON. A bad definition in a batch aborts the whole import and keeps your text.
+
 ## 0.25.2
 
 **A downloaded file reads "Downloaded" and plays, whatever its selection.** A

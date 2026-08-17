@@ -1300,15 +1300,17 @@ function parseFileTrack(name) {
 // fallback (which fires the first visible action), so it can never mean
 // something the row did not put first on purpose — and it is null when the row
 // offers nothing, rather than falling through to an action that isn't there.
-function fileRowActions(kind, done, skipped) {
+function fileRowActions(kind, done, skipped, reachable) {
   // Downloaded wins, matching fileState(): a file with bytes on disk reads
-  // "Downloaded", so its actions describe a file you HAVE — media plays, and a
-  // non-media file (cover art, .nfo) offers nothing, since there is nothing to
-  // play and "skip" would only stop seeding something already here. Priority
-  // no longer matters once the bytes exist.
+  // "Downloaded", so its actions describe a file you HAVE. Priority no longer
+  // matters once the bytes exist.
   if (done) {
-    return kind
-      ? { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" }
+    if (kind) return { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" };
+    // Non-media (cover art, .nfo, a PDF booklet): nothing to play, but the file
+    // is really here — offer to open it or reveal its folder. Only when it is
+    // on this machine; opening a path that isn't mounted here would just fail.
+    return reachable
+      ? { actions: ["qbt:file-open", "qbt:file-folder"], action: "qbt:file-open" }
       : { actions: [], action: null };
   }
   // Not downloaded: offer the choice it is not already in.
@@ -3095,6 +3097,62 @@ function localPathFor(torrent, file) {
   return applyPathMapping(joinRemotePath(save, file.name), pathMapFrom, pathMapTo);
 }
 
+// The directory an absolute path sits in — everything up to the last separator.
+// Both separators, because a path mapping may hand back either style.
+function parentDir(path) {
+  var s = String(path || "");
+  var cut = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return cut > 0 ? s.substring(0, cut) : s;
+}
+
+// A local path as a file:// URL the OS opener understands. Windows paths get
+// the extra slash (file:///C:/…) and back-slashes normalised; each segment is
+// encoded so spaces and # in release names don't truncate the URL.
+function fileUrlFor(path) {
+  var s = String(path || "").replace(/\\/g, "/");
+  // Windows drive path → file:///C:/…; a POSIX path keeps its leading slash,
+  // which its empty first segment reproduces after the split, giving file:///…
+  var prefix = /^[A-Za-z]:/.test(s) ? "file:///" : "file://";
+  var parts = s.split("/");
+  for (var i = 0; i < parts.length; i++) {
+    // A drive letter (C:) must not have its colon encoded, and an empty
+    // segment (the POSIX leading slash) encodes to nothing anyway.
+    parts[i] = /^[A-Za-z]:$/.test(parts[i]) ? parts[i] : encodeURIComponent(parts[i]);
+  }
+  return prefix + parts.join("/");
+}
+
+// Open a non-media file, or reveal its folder, from a file row. `data` carries
+// the row index; the file's local path comes from the same mapping playback
+// uses, so a remote-but-mounted qBittorrent works too.
+function openLocalFile(data, folder) {
+  if (typeof api.network.openUrl !== "function") {
+    api.ui.showNotification("This build can't open files");
+    return;
+  }
+  var indices = rowIndices(data);
+  if (!indices.length || !expandedHash) return;
+  var torrent = torrents[expandedHash];
+  var files = filesByHash[expandedHash] || [];
+  var file = null;
+  for (var i = 0; i < files.length; i++) {
+    if (files[i].index === indices[0]) {
+      file = files[i];
+      break;
+    }
+  }
+  var path = file && localPathFor(torrent, file);
+  if (!path) {
+    api.ui.showNotification("qBittorrent didn't report where this file is saved");
+    return;
+  }
+  var target = folder ? parentDir(path) : path;
+  api.network.openUrl(fileUrlFor(target)).catch(function (e) {
+    console.error("qBittorrent: could not open " + (folder ? "the folder" : "the file") + ":", e);
+    api.ui.showNotification("Couldn't open " + (folder ? "the folder" : "the file") + " — it may not be reachable from this machine");
+  });
+}
+
 // Are this torrent's files reachable from here at all? Either qBittorrent is on
 // this machine, or the user has told us where its download directory is mounted.
 function filesAreReachable() {
@@ -4468,27 +4526,41 @@ function webIndexerSettingsRows() {
         siteLabel(def.siteUrl) + " · searched directly, no qBittorrent search plugin needed · " + health + (custom ? " · added by you" : ""),
       control: { type: "toggle", label: "", action: "qbt:webidx-" + def.id, checked: !webIndexersDisabled[def.id] }
     });
-    if (custom) {
-      rows.push({
-        type: "settings-row",
-        label: "",
-        description: "Remove the “" + def.name + "” definition.",
-        control: { type: "button", label: "Remove", action: "qbt:webdel-" + def.id, variant: "secondary" }
-      });
-    }
+    rows.push({
+      type: "settings-row",
+      label: "",
+      description: custom ? "Show this definition's JSON below, or remove it." : "Show this definition's JSON below (copy it as a starting point for your own).",
+      control: {
+        type: "layout",
+        direction: "horizontal",
+        children: [{ type: "button", label: "View JSON", action: "qbt:webview-" + def.id, variant: "secondary" }].concat(
+          custom ? [{ type: "button", label: "Remove", action: "qbt:webdel-" + def.id, variant: "secondary" }] : []
+        )
+      }
+    });
   }
   rows.push({
     type: "settings-row",
-    label: "Add a web indexer",
+    label: "Add or import web indexers",
     description:
-      "Paste an indexer definition (JSON) and press Add. A definition says how to search one site — see the plugin's README for the format.",
-    control: { type: "text-input", placeholder: "{ \"id\": \"mysite\", … }", action: "qbt:web-draft", value: webIndexerDraft, multiline: true, rows: 4 }
+      "Paste one indexer definition, or a JSON array of them, and press Add — importing several at once works. " +
+      "“View JSON” above fills this box with an existing definition to copy or tweak, and “Export all” fills it with every " +
+      "indexer as an array. A definition says how to search one site; see the plugin's README for the format.",
+    control: { type: "text-input", placeholder: "{ \"id\": \"mysite\", … }  or  [ {…}, {…} ]", action: "qbt:web-draft", value: webIndexerDraft, multiline: true, rows: 6 }
   });
   rows.push({
     type: "settings-row",
     label: "",
     description: "",
-    control: { type: "button", label: "Add indexer", action: "qbt:web-add", variant: "secondary" }
+    control: {
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        { type: "button", label: "Add / import", action: "qbt:web-add", variant: "accent" },
+        { type: "button", label: "Export all", action: "qbt:web-export", variant: "secondary" },
+        { type: "button", label: "Clear box", action: "qbt:web-clear", variant: "secondary" }
+      ]
+    }
   });
   return rows;
 }
@@ -7031,7 +7103,7 @@ function fileRowsNode(hash) {
     // torrent row: the two are read together, and a trailing column put them at
     // opposite ends of the row.
     var subtitle = fileStatusText(f, torrent) + "  ·  " + formatBytes(f.size);
-    var offered = fileRowActions(kind, done, skipped);
+    var offered = fileRowActions(kind, done, skipped, filesAreReachable());
     items.push({
       id: String(f.index),
       // No "⊘"/"◌" prefix on the name any more: the tile carries the state in
@@ -7372,6 +7444,13 @@ function registerActions() {
     if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 0);
   });
 
+  api.ui.onAction("qbt:file-open", function (data) {
+    openLocalFile(data, false);
+  });
+  api.ui.onAction("qbt:file-folder", function (data) {
+    openLocalFile(data, true);
+  });
+
   api.ui.onAction("qbt:list-filter", function (data) {
     listFilter = String((data && data.query) || "");
     // Typing is the demand signal: start (or keep) filling the name cache for
@@ -7505,6 +7584,12 @@ function registerActions() {
       renderSettings();
       render();
     });
+    api.ui.onAction("qbt:webview-" + def.id, function () {
+      // The live definition (bundled or custom) into the box, to read, copy,
+      // or tweak-and-re-Add under a new id.
+      webIndexerDraft = JSON.stringify(webDefById(def.id) || def, null, 2);
+      renderSettings();
+    });
   };
   for (var wd = 0; wd < WEB_DEFS.length; wd++) registerWebIndexerActions(WEB_DEFS[wd]);
   for (var cd = 0; cd < customIndexers.length; cd++) registerWebIndexerActions(customIndexers[cd]);
@@ -7520,28 +7605,74 @@ function registerActions() {
       api.ui.showNotification("Paste an indexer definition first");
       return;
     }
-    var def;
+    var parsed;
     try {
-      def = JSON.parse(text);
+      parsed = JSON.parse(text);
     } catch (e) {
       api.ui.showNotification("That isn't valid JSON: " + errText(e));
+      return;
+    }
+    // One definition or an array of them — importing several at once is the
+    // same path, so a box filled by "Export all" round-trips straight back in.
+    var incoming = Object.prototype.toString.call(parsed) === "[object Array]" ? parsed : [parsed];
+    if (!incoming.length) {
+      api.ui.showNotification("Nothing to add");
       return;
     }
     var taken = {};
     var all = WEB_DEFS.concat(customIndexers);
     for (var i = 0; i < all.length; i++) taken[all[i].id] = true;
-    var problems = validateIndexerDef(def, taken);
-    if (problems.length) {
-      api.ui.showNotification("That definition has problems: " + problems.slice(0, 3).join(" · "));
-      return;
+    // Re-importing an EXISTING id replaces that definition rather than being
+    // rejected as a duplicate — that is how you edit one via View JSON.
+    var accepted = [];
+    for (var d = 0; d < incoming.length; d++) {
+      var def = incoming[d];
+      var replacing = def && customIndexers.some(function (c) { return c.id === def.id; });
+      var checkAgainst = {};
+      for (var k in taken) if (!(replacing && k === def.id)) checkAgainst[k] = true;
+      var problems = validateIndexerDef(def, checkAgainst);
+      if (problems.length) {
+        api.ui.showNotification("“" + ((def && def.name) || (def && def.id) || "definition " + (d + 1)) + "”: " + problems.slice(0, 2).join(" · "));
+        return; // all-or-nothing: a bad one in the batch aborts, box kept
+      }
+      accepted.push({ def: def, replacing: replacing });
+      taken[def.id] = true;
     }
-    customIndexers.push(def);
-    registerWebIndexerActions(def);
+    for (var a = 0; a < accepted.length; a++) {
+      var it = accepted[a];
+      if (it.replacing) {
+        for (var r = 0; r < customIndexers.length; r++) {
+          if (customIndexers[r].id === it.def.id) {
+            customIndexers[r] = it.def;
+            break;
+          }
+        }
+      } else {
+        customIndexers.push(it.def);
+        registerWebIndexerActions(it.def);
+      }
+    }
     webIndexerDraft = "";
     persistSettings();
-    api.ui.showNotification("Added “" + def.name + "” — it joins every search from now on");
+    api.ui.showNotification(
+      accepted.length === 1
+        ? (accepted[0].replacing ? "Updated “" : "Added “") + accepted[0].def.name + "” — it joins every search from now on"
+        : "Imported " + accepted.length + " indexers"
+    );
     renderSettings();
     render();
+  });
+
+  api.ui.onAction("qbt:web-export", function () {
+    // Every indexer — bundled and custom — as an array, ready to copy out or
+    // paste back in. The full set is what makes it a backup.
+    webIndexerDraft = JSON.stringify(WEB_DEFS.concat(customIndexers), null, 2);
+    renderSettings();
+  });
+
+  api.ui.onAction("qbt:web-clear", function () {
+    webIndexerDraft = "";
+    renderSettings();
   });
   api.ui.onAction("qbt:set-map-from", function (data) {
     currentDraft().pathMapFrom = (data && data.value) || "";
@@ -7718,6 +7849,8 @@ return {
   _isLikelyLocalHost: isLikelyLocalHost,
   _parseFileTrack: parseFileTrack,
   _fileRowActions: fileRowActions,
+  _parentDir: parentDir,
+  _fileUrlFor: fileUrlFor,
   _unplayableReason: unplayableReason,
   _mergeFileTrack: mergeFileTrack,
   _firstText: firstText,

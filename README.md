@@ -243,12 +243,15 @@ stripped from anybody.
 Files sort by full path, so a folder’s contents stay together, and a filter on a
 folder name explains its own results.
 
-Each row hovers only what it can actually do. A **Downloaded** file gets **▶
-Play** and **+ Add to queue** — the bytes are on disk — and nothing else: there
-is nothing left to fetch and nothing worth skipping. Anything else is still a
-choice about whether to fetch it, so it gets **↓ Download** *or* **⊘ Skip**,
-whichever it is not already in. Play and Add to queue are absent there because
-they would act on a file that does not exist yet.
+Each row hovers only what it can actually do. A **Downloaded** media file gets
+**▶ Play** and **+ Add to queue** — the bytes are on disk. A downloaded file
+that *isn't* audio or video (cover art, an `.nfo`, a PDF booklet) can't be
+played, so it offers **Open** and **Show folder** instead, when the files are on
+this machine. Anything not yet downloaded is still a choice about whether to
+fetch it, so it gets **↓ Download** *or* **⊘ Skip**, whichever it is not already
+in — Play is absent there because it would act on a file that does not exist yet.
+"Downloaded" is decided by the bytes on disk, not the selection, so a file you
+downloaded and later *deselected* still reads Downloaded and still plays.
 
 The list still declares all four, so a mixed multi-row selection can reach any
 of them from the toolbar above it. The list still declares all four,
@@ -267,10 +270,11 @@ Three things worth knowing:
 - **Only finished files play.** A half-downloaded file would open and then stop
   partway through, which looks like a corrupt file rather than an incomplete
   download. Unfinished files are listed with their progress and marked `◌`.
-- **Only audio and video are offered.** The cover art, the `.nfo` and the scans
-  folder are listed — you may well want to *skip* them, which is half the point
-  of the list — but a finished one offers no buttons at all: there is nothing to
-  play, and nothing left to download or skip either.
+- **Only audio and video play.** The cover art, the `.nfo` and the scans folder
+  are listed — you may well want to *skip* them before they download, which is
+  half the point of the list — and once one has finished it offers **Open** and
+  **Show folder** rather than Play, so you can still reach the extras in a
+  release.
 - **Metadata comes from the file's own tags**, with the filename filling the
   gaps. Title, artist, album, track number and duration are read straight off
   the finished file; anything it doesn't carry falls back to what the filename
@@ -321,9 +325,19 @@ note shows how it's doing this session. A site that's down or blocking you shows
 as a single notice row (`web:1337x: HTTP 403`) and never sinks the others.
 
 Each indexer is a **definition, not code** — a small JSON document saying how to
-build the search URL and read the result rows. You can **paste your own** for any
-other site under *Add a web indexer* (it's validated with plain-English errors
-first). The format, briefly:
+build the search URL and read the result rows. Under the indexer list you can
+**view, export and import** these:
+
+- **View JSON** (per site) drops that definition into the edit box — copy it, or
+  tweak it and re-add it under a new id.
+- **Export all** fills the box with every indexer as a single JSON array (a
+  copy-out backup).
+- The box **imports one definition or an array of them** — paste an exported set
+  straight back in. Re-importing an id that already exists **updates** it. Bad
+  definitions are rejected with plain-English errors, and a bad one in a batch
+  aborts the whole import so nothing half-applies.
+
+The format, briefly:
 
 ```json
 {

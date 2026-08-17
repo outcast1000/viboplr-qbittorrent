@@ -269,6 +269,64 @@ test("the tab strip is Torrents / Search / Debug / Settings", async () => {
   });
 });
 
+test("web indexers: export fills the box, and a pasted array imports", async () => {
+  await withPlugin(async ({ handlers, settingsViews }) => {
+    // Settings-row controls hang off `.control`, which the shared walk() skips.
+    const deep = (node, out = []) => {
+      if (!node || typeof node !== "object") return out;
+      out.push(node);
+      for (const child of node.children || []) deep(child, out);
+      for (const btn of node.buttons || []) deep(btn, out);
+      if (node.control) deep(node.control, out);
+      return out;
+    };
+    const draftValue = () => {
+      const inputs = deep(last(settingsViews)).filter((n) => n.type === "text-input" && n.action === "qbt:web-draft");
+      return inputs.length ? inputs[inputs.length - 1].value : null;
+    };
+    const settingsText = () =>
+      deep(last(settingsViews))
+        .filter((n) => n.type === "settings-row")
+        .map((n) => n.label + " " + (n.description || ""))
+        .join("\n");
+
+    // Export all → the box holds a JSON array of every bundled indexer.
+    handlers["qbt:web-export"]({});
+    const exported = JSON.parse(draftValue());
+    assert.ok(Array.isArray(exported));
+    assert.ok(exported.some((d) => d.id === "tpb"));
+
+    // View one → the box holds just that definition.
+    handlers["qbt:webview-nyaa"]({});
+    assert.equal(JSON.parse(draftValue()).id, "nyaa");
+
+    // Import an array of two custom indexers in one go.
+    const mine = [
+      { id: "mysite", name: "My Site", siteUrl: "https://mysite.example", type: "rss", search: { url: "https://mysite.example/rss?q={q}" }, rows: { tag: "item" }, fields: { fileName: { tag: "title" }, fileUrl: { tag: "link" } } },
+      { id: "other", name: "Other", siteUrl: "https://other.example", type: "json", search: { url: "https://other.example/api?q={q}" }, rows: { path: "" }, fields: { fileName: { path: "name" }, fileUrl: { magnet: { infoHash: { path: "h" } } } } },
+    ];
+    handlers["qbt:web-draft"]({ value: JSON.stringify(mine) });
+    handlers["qbt:web-add"]({});
+    const afterImport = settingsText();
+    assert.ok(afterImport.includes("Search My Site"), afterImport);
+    assert.ok(afterImport.includes("Search Other"), afterImport);
+    // The box is cleared on a successful add.
+    assert.equal(draftValue(), "");
+
+    const countRows = (prefix) => settingsText().split("\n").filter((l) => l.indexOf(prefix) === 0).length;
+    assert.equal(countRows("Search My Site"), 1);
+
+    // Re-importing an EXISTING custom id REPLACES it (edit-via-View-JSON), it
+    // does not add a second row.
+    handlers["qbt:web-draft"]({ value: JSON.stringify(Object.assign({}, mine[0], { name: "My Site Renamed" })) });
+    handlers["qbt:web-add"]({});
+    // Still exactly one "My Site …" row, now the renamed one.
+    assert.equal(countRows("Search My Site"), 1);
+    assert.ok(settingsText().includes("Search My Site Renamed"));
+    assert.equal(draftValue(), "");
+  });
+});
+
 test("the debug tab runs the real stream resolver and narrates each step", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:tab"]({ tabId: "debug" });

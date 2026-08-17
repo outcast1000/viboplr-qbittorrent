@@ -403,13 +403,37 @@ test("a finished media file offers Play and Add to queue", () => {
   ]);
 });
 
-test("a finished NON-media file offers nothing at all", () => {
-  // Not Play or Add to queue (there is nothing to play), and not Download or
-  // Skip either — the bytes are already here, and "skip" would only stop
-  // seeding a file the user has.
-  assert.deepEqual(plugin._fileRowActions(null, true, false), { actions: [], action: null });
+test("a finished NON-media file offers Open and Show folder when reachable", () => {
+  // Not Play or Add to queue (there is nothing to play), but the bytes ARE
+  // here, so open the file or reveal its folder.
+  assert.deepEqual(plugin._fileRowActions(null, true, false, true), {
+    actions: ["qbt:file-open", "qbt:file-folder"],
+    action: "qbt:file-open",
+  });
   // Including one that was deselected and downloaded anyway.
-  assert.deepEqual(plugin._fileRowActions(null, true, true), { actions: [], action: null });
+  assert.deepEqual(plugin._fileRowActions(null, true, true, true).actions, ["qbt:file-open", "qbt:file-folder"]);
+  // But nothing when the files aren't on this machine — opening would fail.
+  assert.deepEqual(plugin._fileRowActions(null, true, false, false), { actions: [], action: null });
+});
+
+test("parentDir and fileUrlFor build openable URLs for both path styles", () => {
+  assert.equal(plugin._parentDir("/downloads/Album/cover.jpg"), "/downloads/Album");
+  assert.equal(plugin._parentDir("Z:\\torrents\\Album\\scan.pdf"), "Z:\\torrents\\Album");
+  // Unix path: file:// + encoded segments (space, #, & survive).
+  assert.equal(
+    plugin._fileUrlFor("/downloads/Some Album #1/cover art.jpg"),
+    "file:///downloads/Some%20Album%20%231/cover%20art.jpg"
+  );
+  // Windows path: file:/// with the drive colon intact and back-slashes fixed.
+  assert.equal(
+    plugin._fileUrlFor("Z:\\torrents\\A & B\\note.nfo"),
+    "file:///Z:/torrents/A%20%26%20B/note.nfo"
+  );
+  // A folder URL is just the parent path run through the same builder.
+  assert.equal(
+    plugin._fileUrlFor(plugin._parentDir("/downloads/Album/cover.jpg")),
+    "file:///downloads/Album"
+  );
 });
 
 test("a downloaded file plays even if it was later deselected", () => {
