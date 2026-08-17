@@ -41,7 +41,13 @@ function registeredActions() {
 // `id: "qbt:x"` inside a row list's `actions` array.
 function emittedActions() {
   const out = new Set();
-  for (const m of SOURCE.matchAll(/(?:action|id|confirmAction|cancelAction): "(qbt:[^"]+)"/g)) out.add(m[1]);
+  for (const m of SOURCE.matchAll(/(?:action|id|confirmAction|cancelAction): "(qbt:[^"]+)"/g)) {
+    // A trailing "-" is a dynamic prefix ("qbt:webidx-" + def.id) whose full
+    // ids are registered per indexer definition at runtime — the static scan
+    // can't pair those, and the dedicated web-indexer tests cover them.
+    if (m[1].endsWith("-")) continue;
+    out.add(m[1]);
+  }
   return out;
 }
 

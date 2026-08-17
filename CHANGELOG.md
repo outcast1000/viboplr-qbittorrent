@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.25.0
+
+**Search torrent websites directly — no qBittorrent search plugins needed.**
+
+Until now every search (the Search tab AND automatic discovery) needed search
+plugins installed in qBittorrent, which most people don't have. The plugin now
+ships a Jackett-inspired **web indexer engine**: it searches torrent sites
+itself and merges those results into everything — the Search tab, tier-3
+discovery, fetch & play, and the Debug tab all gain web results with the site
+shown as the source.
+
+Four indexers are built in and on by default:
+
+- **The Pirate Bay** (via its JSON API — rock solid),
+- **Nyaa** (RSS),
+- **1337x** and **TorrentGalaxy** (HTML).
+
+Each is a **definition, not code** — a small JSON document describing how to
+build the search URL and read the result rows. You can toggle each one in
+Settings, and **paste your own** definition for any other site (validated with
+human-readable errors before it's accepted); adding a site never needs a plugin
+update. HTML is parsed by a tolerant built-in parser + CSS-selector subset, so
+tag-soup result tables read correctly.
+
+Robustness built in: indexers run in parallel with per-site politeness spacing,
+a dead or blocked site is isolated (it shows as one "web:site: HTTP 403" notice
+row and never sinks the others), unknown counts are omitted rather than faked,
+and a site whose magnet lives on the torrent's detail page is fetched lazily —
+only when you actually add that result, not for every row of every search.
+
 ## 0.24.0
 
 **"Fetch & play" now goes and finds the torrent too.** 0.23.0's second

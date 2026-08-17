@@ -103,6 +103,17 @@ var discoveryEnabled = true;
 // library flow and removes the torrent, "remove" drops the torrent but keeps
 // the file on disk.
 var tier3Disposition = "seed";
+// Web indexers: which definitions are switched off (bundled ones stay in the
+// plugin, so upgrades can't clobber the user's choice), and any definitions
+// the user pasted in settings (validated at paste time).
+var webIndexersDisabled = {};
+var customIndexers = [];
+// The settings paste box for a new indexer definition. Session-only draft.
+var webIndexerDraft = "";
+// Set by registerActions; used to give custom defs their action handlers both
+// at paste time and after loadSettings restores them (registerActions runs
+// before settings have loaded, so the restore can't happen inline there).
+var registerCustomIndexerActions = null;
 
 // Draft settings — what the settings panel's inputs currently hold. Kept apart
 // from the live values so a half-typed password never reaches storage and never
@@ -2250,6 +2261,23 @@ function disposeSearch(id) {
     });
 }
 
+// The Search tab now has TWO sources under one spinner: qBittorrent's own
+// search plugins, and the web indexer sweep. Each keeps its latest rows in a
+// module var; the visible list is always the merged sort of both, and the
+// spinner runs while EITHER is still working.
+var lastQbtRows = [];
+var webSearchRows = [];
+var qbtSearchActive = false;
+var webSearchActive = false;
+
+function refreshSearchRunning() {
+  searchRunning = qbtSearchActive || webSearchActive;
+}
+
+function mergeSearchRows() {
+  searchResults = sortSearchResults(lastQbtRows.concat(webSearchRows));
+}
+
 function runSearch(query) {
   var q = String(query || "").trim();
   if (!q) return Promise.resolve();
@@ -2259,13 +2287,30 @@ function runSearch(query) {
   var previousJob = searchJobId;
 
   searchQuery = q;
-  searchRunning = true;
   searchError = null;
   searchResults = [];
+  lastQbtRows = [];
+  webSearchRows = [];
   searchJobId = null;
   searchStopped = false;
   activeTab = "search";
+
+  var webDefs = enabledWebDefs();
+  qbtSearchActive = true;
+  webSearchActive = !!webDefs.length;
+  refreshSearchRunning();
   render();
+
+  if (webDefs.length) {
+    webSearchAll(webDefs, q, webFetchFn).then(function (rows) {
+      if (gen !== searchGen) return;
+      webSearchRows = rows;
+      webSearchActive = false;
+      refreshSearchRunning();
+      mergeSearchRows();
+      render();
+    });
+  }
 
   // Drop the previous job before starting another; a user retyping a query
   // would otherwise leak one server-side job per attempt.
@@ -2275,28 +2320,35 @@ function runSearch(query) {
     })
     .then(function (plugins) {
       if (!plugins.length) {
-        throw new Error("no-plugins");
+        // With web indexers enabled the search runs on them alone; the
+        // "install search plugins" banner only fires when NOTHING can search.
+        if (!webDefs.length) throw new Error("no-plugins");
+        qbtSearchActive = false;
+        refreshSearchRunning();
+        render();
+        return null;
       }
       return authed("/search/start", {
         method: "POST",
         form: { pattern: q, plugins: "enabled", category: "all" }
-      });
-    })
-    .then(function (resp) {
-      expectOk(resp, "Starting the search");
-      return resp.json();
-    })
-    .then(function (job) {
-      if (gen !== searchGen) {
-        // A newer search started while this one was getting going.
-        return disposeSearch(job && job.id);
-      }
-      searchJobId = job && job.id;
-      return pollSearch(searchJobId, gen, 0);
+      })
+        .then(function (resp) {
+          expectOk(resp, "Starting the search");
+          return resp.json();
+        })
+        .then(function (job) {
+          if (gen !== searchGen) {
+            // A newer search started while this one was getting going.
+            return disposeSearch(job && job.id);
+          }
+          searchJobId = job && job.id;
+          return pollSearch(searchJobId, gen, 0);
+        });
     })
     .catch(function (e) {
       if (gen !== searchGen) return null;
-      searchRunning = false;
+      qbtSearchActive = false;
+      refreshSearchRunning();
       searchError = String(e && e.message) === "no-plugins" ? "no-plugins" : errText(e);
       if (searchError !== "no-plugins") console.error("qBittorrent: search failed:", e);
       render();
@@ -2318,10 +2370,12 @@ function pollSearch(id, gen, elapsed) {
   return readSearchResultsPage(id, SEARCH_LIMIT)
     .then(function (data) {
       if (gen !== searchGen) return null;
-      searchResults = sortSearchResults((data && data.results) || []);
+      lastQbtRows = (data && data.results) || [];
+      mergeSearchRows();
       var done = String((data && data.status) || "") !== "Running" || elapsed >= SEARCH_MAX_MS;
       if (done) {
-        searchRunning = false;
+        qbtSearchActive = false;
+        refreshSearchRunning();
         render();
         var finishedId = searchJobId;
         searchJobId = null;
@@ -2339,7 +2393,8 @@ function pollSearch(id, gen, elapsed) {
     .catch(function (e) {
       if (gen !== searchGen) return null;
       console.error("qBittorrent: reading search results failed:", e);
-      searchRunning = false;
+      qbtSearchActive = false;
+      refreshSearchRunning();
       searchError = errText(e);
       render();
       return disposeSearch(id);
@@ -2360,35 +2415,47 @@ function collectSearchResults(pattern, opts) {
   var maxMs = (opts && opts.maxMs) || SEARCH_MAX_MS;
   var onTick = (opts && opts.onTick) || null;
   var jobId = null;
+
+  // The web indexer sweep runs in parallel with qBittorrent's own search
+  // plugins — discovery, the Debug tab and interactive search all consume
+  // this function, so websites join every one of those surfaces here.
+  var webDefs = enabledWebDefs();
+  var webJob = webDefs.length ? webSearchAll(webDefs, q, webFetchFn) : Promise.resolve([]);
+
   var run = (searchPlugins === null ? loadSearchPlugins() : Promise.resolve(searchPlugins))
     .then(function (plugins) {
-      if (!plugins.length) throw new Error("no-plugins");
+      if (!plugins.length) {
+        // Web indexers can carry the search alone; "no-plugins" is only true
+        // when there is genuinely nowhere to ask.
+        if (!webDefs.length) throw new Error("no-plugins");
+        return [];
+      }
       return authed("/search/start", {
         method: "POST",
         form: { pattern: q, plugins: "enabled", category: "all" }
-      });
-    })
-    .then(function (resp) {
-      expectOk(resp, "Starting the search");
-      return resp.json();
-    })
-    .then(function (job) {
-      jobId = job && job.id;
-      headlessSearchJobId = jobId;
-      var step = function (elapsed) {
-        return readSearchResultsPage(jobId, SEARCH_LIMIT).then(function (data) {
-          var results = (data && data.results) || [];
-          if (onTick) onTick(results.length, elapsed);
-          if (String((data && data.status) || "") !== "Running" || elapsed >= maxMs) return results;
-          return delay(SEARCH_POLL_MS).then(function () {
-            return step(elapsed + SEARCH_POLL_MS);
-          });
+      })
+        .then(function (resp) {
+          expectOk(resp, "Starting the search");
+          return resp.json();
+        })
+        .then(function (job) {
+          jobId = job && job.id;
+          headlessSearchJobId = jobId;
+          var step = function (elapsed) {
+            return readSearchResultsPage(jobId, SEARCH_LIMIT).then(function (data) {
+              var results = (data && data.results) || [];
+              if (onTick) onTick(results.length, elapsed);
+              if (String((data && data.status) || "") !== "Running" || elapsed >= maxMs) return results;
+              return delay(SEARCH_POLL_MS).then(function () {
+                return step(elapsed + SEARCH_POLL_MS);
+              });
+            });
+          };
+          return step(0);
         });
-      };
-      return step(0);
     });
   // Dispose on BOTH exits — a finished job holds server resources either way.
-  return run.then(
+  var qbtJob = run.then(
     function (results) {
       if (headlessSearchJobId === jobId) headlessSearchJobId = null;
       return disposeSearch(jobId).then(function () {
@@ -2398,10 +2465,17 @@ function collectSearchResults(pattern, opts) {
     function (e) {
       if (headlessSearchJobId === jobId) headlessSearchJobId = null;
       return disposeSearch(jobId).then(function () {
-        throw e;
+        // A broken qBittorrent search must not sink web results that DID
+        // arrive — but with no web indexers there is nothing to save.
+        if (!webDefs.length) throw e;
+        console.error("qBittorrent: search-plugin side of the sweep failed:", e);
+        return [];
       });
     }
   );
+  return Promise.all([qbtJob, webJob]).then(function (parts) {
+    return parts[0].concat(parts[1]);
+  });
 }
 
 // Stop a running search, keeping whatever came back.
@@ -2413,6 +2487,8 @@ function collectSearchResults(pattern, opts) {
 function stopSearch() {
   if (!searchRunning) return Promise.resolve();
   searchGen++;
+  qbtSearchActive = false;
+  webSearchActive = false; // the sweep's completion sees the new gen and drops
   searchRunning = false;
   searchStopped = true;
   var id = searchJobId;
@@ -2459,7 +2535,21 @@ function addSearchResult(id, opts) {
     }
     return;
   }
-  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName, downloader: r.engineName });
+  // A magnet-follow web result carries its DETAIL page as fileUrl; the magnet
+  // is fetched now, for the one row the user actually clicked.
+  if (r.webFollow) {
+    api.ui.showNotification("Fetching the magnet link from " + siteLabel(r.siteUrl) + "…");
+    resolveWebFileUrl(r, webFetchFn)
+      .then(function (resolved) {
+        return addTorrent(resolved.fileUrl, { peek: !!(opts && opts.peek), name: resolved.fileName, downloader: downloaderFor(resolved) });
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: could not resolve the result's magnet link:", e);
+        api.ui.showNotification("Couldn't get that torrent's magnet link: " + errText(e));
+      });
+    return;
+  }
+  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName, downloader: downloaderFor(r) });
 }
 
 // --- Library import ---------------------------------------------------------
@@ -4319,7 +4409,10 @@ function settingsTree(d, destOptions, status, statusChildren) {
                 { value: "remove", label: "Remove the torrent, keep the file" }
               ]
             }
-          },
+          }
+        ]
+          .concat(webIndexerSettingsRows())
+          .concat([
           {
             type: "settings-row",
             label: "Their download folder",
@@ -4338,10 +4431,56 @@ function settingsTree(d, destOptions, status, statusChildren) {
             description: "How often to ask qBittorrent for progress, in seconds (2–60).",
             control: { type: "text-input", placeholder: "5", action: "qbt:set-poll", value: String(Math.round(d.pollMs / 1000)) }
           }
-        ]
+        ])
       }
     ]
   };
+}
+
+// The Web indexers block: one toggle per definition (bundled + pasted), with a
+// session health note, and the paste box for adding definitions. Rendered as
+// data because the def list is data — a pasted def gets its row on the next
+// render with no code involved.
+function webIndexerSettingsRows() {
+  var rows = [];
+  var all = WEB_DEFS.concat(customIndexers);
+  for (var i = 0; i < all.length; i++) {
+    var def = all[i];
+    var stat = webIndexerStats[def.id];
+    var health = stat
+      ? stat.ok + " ok · " + stat.fail + " failed" + (stat.lastError ? " (" + stat.lastError + ")" : "")
+      : "not asked yet this session";
+    var custom = i >= WEB_DEFS.length;
+    rows.push({
+      type: "settings-row",
+      label: "Search " + def.name,
+      description:
+        siteLabel(def.siteUrl) + " · searched directly, no qBittorrent search plugin needed · " + health + (custom ? " · added by you" : ""),
+      control: { type: "toggle", label: "", action: "qbt:webidx-" + def.id, checked: !webIndexersDisabled[def.id] }
+    });
+    if (custom) {
+      rows.push({
+        type: "settings-row",
+        label: "",
+        description: "Remove the “" + def.name + "” definition.",
+        control: { type: "button", label: "Remove", action: "qbt:webdel-" + def.id, variant: "secondary" }
+      });
+    }
+  }
+  rows.push({
+    type: "settings-row",
+    label: "Add a web indexer",
+    description:
+      "Paste an indexer definition (JSON) and press Add. A definition says how to search one site — see the plugin's README for the format.",
+    control: { type: "text-input", placeholder: "{ \"id\": \"mysite\", … }", action: "qbt:web-draft", value: webIndexerDraft, multiline: true, rows: 4 }
+  });
+  rows.push({
+    type: "settings-row",
+    label: "",
+    description: "",
+    control: { type: "button", label: "Add indexer", action: "qbt:web-add", variant: "secondary" }
+  });
+  return rows;
 }
 
 // The same settings, rendered inside the Torrents view. There is no way for a
@@ -4384,6 +4523,8 @@ function loadSettings() {
       autoFetchFound = s.autoFetchFound !== false;
       discoveryEnabled = s.discoveryEnabled !== false;
       tier3Disposition = s.tier3Disposition === "import" || s.tier3Disposition === "remove" ? s.tier3Disposition : "seed";
+      webIndexersDisabled = s.webIndexersDisabled || {};
+      customIndexers = s.customIndexers || [];
       previousCategory = s.previousCategory || "";
       draft = null;
     })
@@ -4412,6 +4553,8 @@ function persistSettings() {
       autoFetchFound: autoFetchFound,
       discoveryEnabled: discoveryEnabled,
       tier3Disposition: tier3Disposition,
+      webIndexersDisabled: webIndexersDisabled,
+      customIndexers: customIndexers,
       previousCategory: previousCategory
     })
     .catch(function (e) {
@@ -4606,6 +4749,946 @@ function hashesOf(data) {
 // Resolve qbt://<hash>/<index> to the file on disk. The host slices off exactly
 // "file://" and hands the rest to mpv, so the path goes back RAW — no percent
 // encoding, forward slashes on every platform.
+// ---------------------------------------------------------------------------
+// Web indexers — search torrent WEBSITES directly (Jackett-inspired)
+//
+// The idea borrowed from Jackett is indexers as DATA, not code: a JSON
+// definition per site says how to build the search URL and how to read rows
+// out of the response (JSON path, RSS tags, or CSS selectors over HTML).
+// Adding a site is pasting a definition in settings, never a plugin release.
+//
+// The sandbox has no DOM — `document` is shadowed and DOMParser is off the
+// sandbox contract — so HTML is parsed by the small tolerant parser below.
+// It is NOT a browser parser and says so: no adoption agency (misnested
+// <b><i></b></i>), no table foster-parenting, no <template>, no SVG/MathML
+// foreign-content rules, no encodings beyond what the host already decoded.
+// Tracker result tables don't need any of that; the auto-close rules cover
+// the tag soup they actually serve.
+// ---------------------------------------------------------------------------
+
+// --- Markup parser ------------------------------------------------------------
+
+var VOID_ELEMENTS = {
+  area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1, input: 1,
+  link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1
+};
+// Content is text until the matching close tag — a script containing the
+// string "</table>" must not close the table.
+var RAW_TEXT_ELEMENTS = { script: 1, style: 1, textarea: 1, title: 1 };
+// Opening the KEY implicitly closes an open VALUE at the top of the stack,
+// repeatedly. This is the whole tag-soup story for result tables: trackers
+// routinely omit </td>, </tr> and </li>.
+var AUTO_CLOSE = {
+  li: { li: 1, p: 1 },
+  p: { p: 1 },
+  div: { p: 1 },
+  table: { p: 1 },
+  ul: { p: 1 },
+  ol: { p: 1 },
+  tr: { td: 1, th: 1, tr: 1 },
+  td: { td: 1, th: 1 },
+  th: { td: 1, th: 1 },
+  thead: { td: 1, th: 1, tr: 1, tbody: 1, tfoot: 1, thead: 1 },
+  tbody: { td: 1, th: 1, tr: 1, thead: 1, tfoot: 1, tbody: 1 },
+  tfoot: { td: 1, th: 1, tr: 1, thead: 1, tbody: 1, tfoot: 1 },
+  option: { option: 1 }
+};
+
+var NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
+
+function decodeEntities(s) {
+  var str = String(s == null ? "" : s);
+  if (str.indexOf("&") === -1) return str;
+  return str.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z]+);/g, function (whole, body) {
+    if (body.charAt(0) === "#") {
+      var hex = body.charAt(1) === "x" || body.charAt(1) === "X";
+      var code = parseInt(body.substring(hex ? 2 : 1), hex ? 16 : 10);
+      // No surrogate pairs — an astral emoji entity in a torrent name
+      // degrades to the raw entity text, which is fine.
+      return isFinite(code) && code > 0 && code < 0xffff ? String.fromCharCode(code) : whole;
+    }
+    var lower = body.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, lower) ? NAMED_ENTITIES[lower] : whole;
+  });
+}
+
+// Parse HTML (htmlMode) or XML/RSS (!htmlMode) into a tree of
+// { tag, attrs, children, parent } elements and { text, parent } text nodes.
+// `parent` pointers exist for the selector combinators — a node is NOT
+// JSON-serializable.
+function parseMarkup(text, htmlMode) {
+  var src = String(text == null ? "" : text);
+  var root = { tag: "#root", attrs: {}, children: [], parent: null };
+  var stack = [root];
+  var i = 0;
+  var n = src.length;
+
+  var top = function () {
+    return stack[stack.length - 1];
+  };
+  var addText = function (raw, skipDecode) {
+    if (!raw) return;
+    top().children.push({ text: skipDecode ? raw : decodeEntities(raw), parent: top() });
+  };
+
+  while (i < n) {
+    var lt = src.indexOf("<", i);
+    if (lt === -1) {
+      addText(src.substring(i));
+      break;
+    }
+    if (lt > i) addText(src.substring(i, lt));
+
+    if (src.substr(lt, 4) === "<!--") {
+      var endComment = src.indexOf("-->", lt + 4);
+      i = endComment === -1 ? n : endComment + 3;
+      continue;
+    }
+    if (src.substr(lt, 9) === "<![CDATA[") {
+      var endCdata = src.indexOf("]]>", lt + 9);
+      addText(src.substring(lt + 9, endCdata === -1 ? n : endCdata), true);
+      i = endCdata === -1 ? n : endCdata + 3;
+      continue;
+    }
+    var next = src.charAt(lt + 1);
+    if (next === "!" || next === "?") {
+      var endDecl = src.indexOf(">", lt + 1);
+      i = endDecl === -1 ? n : endDecl + 1;
+      continue;
+    }
+    if (next === "/") {
+      var endClose = src.indexOf(">", lt + 2);
+      var closeName = src
+        .substring(lt + 2, endClose === -1 ? n : endClose)
+        .replace(/[\s/].*$/, "")
+        .toLowerCase();
+      if (closeName) {
+        // Pop to the nearest matching open tag anywhere in the stack (closing
+        // everything in between); a close nothing opened is ignored.
+        for (var s = stack.length - 1; s >= 1; s--) {
+          if (stack[s].tag === closeName) {
+            stack.length = s;
+            break;
+          }
+        }
+      }
+      i = endClose === -1 ? n : endClose + 1;
+      continue;
+    }
+    if (!/[a-zA-Z]/.test(next)) {
+      // A bare "<" in text ("<3 seeders") is text, not markup.
+      addText("<");
+      i = lt + 1;
+      continue;
+    }
+
+    // Opening tag: name, then attributes in their quoting variants.
+    var j = lt + 1;
+    while (j < n && /[^\s/>]/.test(src.charAt(j))) j++;
+    var tag = src.substring(lt + 1, j).toLowerCase();
+    var attrs = {};
+    var selfClosed = false;
+    while (j < n) {
+      while (j < n && /\s/.test(src.charAt(j))) j++;
+      var ch = src.charAt(j);
+      if (ch === ">") {
+        j++;
+        break;
+      }
+      if (ch === "/") {
+        if (src.charAt(j + 1) === ">") {
+          selfClosed = true;
+          j += 2;
+          break;
+        }
+        j++;
+        continue;
+      }
+      if (j >= n) break;
+      var nameStart = j;
+      while (j < n && /[^\s=/>]/.test(src.charAt(j))) j++;
+      var attrName = src.substring(nameStart, j).toLowerCase();
+      while (j < n && /\s/.test(src.charAt(j))) j++;
+      var attrValue = "";
+      if (src.charAt(j) === "=") {
+        j++;
+        while (j < n && /\s/.test(src.charAt(j))) j++;
+        var quote = src.charAt(j);
+        if (quote === "\"" || quote === "'") {
+          var endQuote = src.indexOf(quote, j + 1);
+          attrValue = src.substring(j + 1, endQuote === -1 ? n : endQuote);
+          j = endQuote === -1 ? n : endQuote + 1;
+        } else {
+          var valueStart = j;
+          while (j < n && /[^\s>]/.test(src.charAt(j))) j++;
+          attrValue = src.substring(valueStart, j);
+        }
+      }
+      if (attrName) attrs[attrName] = decodeEntities(attrValue);
+    }
+    i = j;
+
+    if (htmlMode) {
+      var closes = AUTO_CLOSE[tag];
+      while (closes && stack.length > 1 && closes[top().tag]) stack.pop();
+    }
+    var el = { tag: tag, attrs: attrs, children: [], parent: top() };
+    top().children.push(el);
+    var isVoid = htmlMode && VOID_ELEMENTS[tag];
+    if (!selfClosed && !isVoid) stack.push(el);
+
+    if (htmlMode && RAW_TEXT_ELEMENTS[tag] && !selfClosed) {
+      var closeRe = new RegExp("</" + tag + "[\\s>]", "i");
+      var match = closeRe.exec(src.substring(i));
+      var rawEnd = match ? i + match.index : n;
+      if (rawEnd > i) el.children.push({ text: src.substring(i, rawEnd), parent: el });
+      if (match) {
+        var gt = src.indexOf(">", rawEnd);
+        i = gt === -1 ? n : gt + 1;
+      } else {
+        i = n;
+      }
+      stack.pop();
+    }
+  }
+  return root;
+}
+
+// Concatenated descendant text, whitespace collapsed. What "the cell says".
+function nodeText(node) {
+  if (!node) return "";
+  if (node.text !== undefined) return String(node.text).replace(/\s+/g, " ").trim();
+  var out = [];
+  var walk = function (nd) {
+    var kids = nd.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].text !== undefined) out.push(kids[i].text);
+      else walk(kids[i]);
+    }
+  };
+  walk(node);
+  return out.join("").replace(/\s+/g, " ").trim();
+}
+
+// --- Selector engine ------------------------------------------------------------
+//
+// The supported subset, chosen by what the bundled definitions need and
+// nothing more: tag, .class, #id, [attr], [attr=v], [attr^=v], [attr*=v],
+// compounds, descendant (space), child (>), :nth-child(n). Anything else is
+// an ERROR, not a silent mismatch — the parser doubles as the definition
+// validator, so a user pasting ":not(...)" is told exactly what isn't
+// supported.
+
+function parseSelector(sel) {
+  var s = String(sel == null ? "" : sel).trim();
+  if (!s) return { error: "empty selector" };
+  var steps = [];
+  var i = 0;
+  var n = s.length;
+  var pendingComb = " ";
+  while (i < n) {
+    var step = { combinator: pendingComb, tag: "", id: "", classes: [], attrs: [], nth: 0 };
+    var compoundStart = i;
+    var tagStart = i;
+    // No ":" in tag names — a namespaced RSS tag (nyaa:seeders) is reached via
+    // childByTag(), never a selector, and letting ":" into the name here would
+    // silently swallow ":nth-child" and every unsupported pseudo.
+    while (i < n && /[a-zA-Z0-9_*-]/.test(s.charAt(i))) i++;
+    if (i > tagStart) {
+      var tagName = s.substring(tagStart, i);
+      if (tagName !== "*") step.tag = tagName.toLowerCase();
+    }
+    var simpleLoop = true;
+    while (simpleLoop && i < n) {
+      var ch = s.charAt(i);
+      if (ch === ".") {
+        i++;
+        var classStart = i;
+        while (i < n && /[a-zA-Z0-9_-]/.test(s.charAt(i))) i++;
+        if (i === classStart) return { error: "empty class name in “" + sel + "”" };
+        step.classes.push(s.substring(classStart, i));
+      } else if (ch === "#") {
+        i++;
+        var idStart = i;
+        while (i < n && /[a-zA-Z0-9_-]/.test(s.charAt(i))) i++;
+        if (i === idStart) return { error: "empty id in “" + sel + "”" };
+        step.id = s.substring(idStart, i);
+      } else if (ch === "[") {
+        var closeBracket = s.indexOf("]", i);
+        if (closeBracket === -1) return { error: "unclosed [ in “" + sel + "”" };
+        var body = s.substring(i + 1, closeBracket);
+        i = closeBracket + 1;
+        var attrMatch = /^([a-zA-Z0-9_:-]+)\s*(?:([\^*]?=)\s*(.*))?$/.exec(body);
+        if (!attrMatch) return { error: "unsupported attribute selector “[" + body + "]” in “" + sel + "”" };
+        var rawValue = attrMatch[3] === undefined ? null : attrMatch[3].replace(/^["']/, "").replace(/["']$/, "");
+        step.attrs.push({ name: attrMatch[1].toLowerCase(), op: attrMatch[2] || "", value: rawValue });
+      } else if (ch === ":") {
+        var nthMatch = /^:nth-child\((\d+)\)/.exec(s.substring(i));
+        if (!nthMatch) return { error: "unsupported selector feature “" + s.substring(i, i + 12) + "…” in “" + sel + "”" };
+        step.nth = parseInt(nthMatch[1], 10);
+        i += nthMatch[0].length;
+      } else if (ch === "," || ch === "+" || ch === "~") {
+        return { error: "unsupported selector feature “" + ch + "” in “" + sel + "”" };
+      } else {
+        simpleLoop = false;
+      }
+    }
+    if (i === compoundStart) return { error: "could not parse “" + sel + "”" };
+    steps.push(step);
+    // Between compounds: whitespace = descendant, ">" = child.
+    var sawWs = false;
+    while (i < n && /\s/.test(s.charAt(i))) {
+      i++;
+      sawWs = true;
+    }
+    if (i < n && s.charAt(i) === ">") {
+      pendingComb = ">";
+      i++;
+      while (i < n && /\s/.test(s.charAt(i))) i++;
+    } else if (sawWs) {
+      pendingComb = " ";
+    } else if (i < n) {
+      return { error: "could not parse “" + sel + "” near “" + s.substring(i, i + 8) + "”" };
+    }
+  }
+  if (!steps.length) return { error: "empty selector" };
+  return { steps: steps };
+}
+
+function matchesStep(el, step) {
+  if (!el || el.text !== undefined || el.tag === "#root") return false;
+  if (step.tag && el.tag !== step.tag) return false;
+  if (step.id && el.attrs.id !== step.id) return false;
+  for (var c = 0; c < step.classes.length; c++) {
+    var classes = " " + (el.attrs["class"] || "") + " ";
+    if (classes.indexOf(" " + step.classes[c] + " ") === -1) return false;
+  }
+  for (var a = 0; a < step.attrs.length; a++) {
+    var spec = step.attrs[a];
+    var val = el.attrs[spec.name];
+    if (val === undefined) return false;
+    if (spec.value !== null) {
+      if (spec.op === "=" && val !== spec.value) return false;
+      if (spec.op === "^=" && val.indexOf(spec.value) !== 0) return false;
+      if (spec.op === "*=" && val.indexOf(spec.value) === -1) return false;
+    }
+  }
+  if (step.nth) {
+    var parent = el.parent;
+    if (!parent) return false;
+    var position = 0;
+    var kids = parent.children;
+    for (var k = 0; k < kids.length; k++) {
+      if (kids[k].text !== undefined) continue;
+      position++;
+      if (kids[k] === el) break;
+    }
+    if (position !== step.nth) return false;
+  }
+  return true;
+}
+
+// Verify the left part of the chain for an element that matched the rightmost
+// compound. Descendant combinators backtrack up the ancestor list.
+function matchesChain(el, steps, stepIdx) {
+  if (stepIdx === 0) return true;
+  var prev = steps[stepIdx - 1];
+  if (steps[stepIdx].combinator === ">") {
+    var parent = el.parent;
+    return !!(parent && matchesStep(parent, prev) && matchesChain(parent, steps, stepIdx - 1));
+  }
+  var anc = el.parent;
+  while (anc) {
+    if (matchesStep(anc, prev) && matchesChain(anc, steps, stepIdx - 1)) return true;
+    anc = anc.parent;
+  }
+  return false;
+}
+
+function selectAll(root, selector) {
+  var parsed = typeof selector === "string" ? parseSelector(selector) : selector;
+  if (!parsed || parsed.error || !root) return [];
+  var steps = parsed.steps;
+  var last = steps.length - 1;
+  var out = [];
+  var walk = function (node) {
+    var kids = node.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.text !== undefined) continue;
+      if (matchesStep(el, steps[last]) && matchesChain(el, steps, last)) out.push(el);
+      walk(el);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+function selectFirst(root, selector) {
+  var all = selectAll(root, selector);
+  return all.length ? all[0] : null;
+}
+
+// First DIRECT child element with this tag name — the RSS field accessor
+// (handles namespaced names like "nyaa:seeders", which selectors refuse).
+function childByTag(el, tagName) {
+  var name = String(tagName || "").toLowerCase();
+  var kids = (el && el.children) || [];
+  for (var i = 0; i < kids.length; i++) {
+    if (kids[i].text === undefined && kids[i].tag === name) return kids[i];
+  }
+  return null;
+}
+
+// --- Value filters ------------------------------------------------------------
+
+// "1.4 GB" / "1,4 Go" / "1.234,5 MB" / "1,234.5 MiB" → bytes. The LAST of
+// "."/"," present is the decimal separator; the other is thousands noise.
+// KB/KiB/Ko variants are used interchangeably by indexers, so everything is
+// 1024-based — the value only feeds display and sorting.
+function parseSize(s) {
+  var str = String(s == null ? "" : s).replace(/\u00a0/g, " ").trim();
+  var m = /^([\d.,\s]+?)\s*([kmgt]?i?[bo])\b/i.exec(str);
+  var numPart;
+  var unitChar;
+  if (m) {
+    numPart = m[1];
+    unitChar = m[2].toLowerCase().charAt(0);
+  } else if (/^[\d.,\s]+$/.test(str) && str.length) {
+    numPart = str;
+    unitChar = "b";
+  } else {
+    return null;
+  }
+  var num = numPart.replace(/\s+/g, "");
+  var lastDot = num.lastIndexOf(".");
+  var lastComma = num.lastIndexOf(",");
+  if (lastDot > lastComma) num = num.replace(/,/g, "");
+  else if (lastComma > -1) num = num.replace(/\./g, "").replace(",", ".");
+  var value = parseFloat(num);
+  if (!isFinite(value) || value < 0) return null;
+  var mult =
+    unitChar === "k" ? 1024
+      : unitChar === "m" ? 1048576
+        : unitChar === "g" ? 1073741824
+          : unitChar === "t" ? 1099511627776
+            : 1;
+  return Math.round(value * mult);
+}
+
+var KNOWN_FILTERS = { trim: 1, regex: 2, parseSize: 1, parseInt: 1, prepend: 2, append: 2, querystring: 2, replace: 3 };
+
+function applyFilters(value, filters) {
+  var v = value == null ? "" : value;
+  var list = filters || [];
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    var name = f && f[0];
+    if (name === "trim") v = String(v).trim();
+    else if (name === "regex") {
+      var rm = new RegExp(f[1]).exec(String(v));
+      v = rm ? (rm[1] !== undefined ? rm[1] : rm[0]) : "";
+    } else if (name === "parseSize") v = parseSize(v);
+    else if (name === "parseInt") {
+      var cleaned = String(v)
+        .replace(/[\s\u00a0]/g, "")
+        .replace(/[.,](?=\d{3}(\D|$))/g, "");
+      var parsed = parseInt(cleaned, 10);
+      v = isNaN(parsed) ? null : parsed;
+    } else if (name === "prepend") v = String(f[1]) + String(v);
+    else if (name === "append") v = String(v) + String(f[1]);
+    else if (name === "querystring") {
+      var escaped = String(f[1]).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      var qm = new RegExp("[?&]" + escaped + "=([^&#]*)").exec(String(v));
+      v = qm ? decodeURIComponent(qm[1].replace(/\+/g, " ")) : "";
+    } else if (name === "replace") v = String(v).split(String(f[1])).join(String(f[2]));
+    // Unknown names are rejected by validateIndexerDef; at runtime they are
+    // skipped so one bad custom def degrades instead of throwing mid-sweep.
+  }
+  return v;
+}
+
+// --- Indexer definitions & engine ----------------------------------------------
+
+var WEB_TIMEOUT_MS = 10000;
+var WEB_MIN_GAP_MS = 2500;
+var WEB_GAP_JITTER_MS = 500;
+var WEB_DEF_ROW_CAP = 50;
+var WEB_TOTAL_ROW_CAP = 150;
+
+// Dot-path into a JSON value; "" is the value itself. Deliberately tiny — no
+// wildcards, no arrays-in-the-middle; nothing the bundled defs need.
+function jsonPath(value, path) {
+  var p = String(path == null ? "" : path);
+  if (!p) return value;
+  var parts = p.split(".");
+  var v = value;
+  for (var i = 0; i < parts.length; i++) {
+    if (v == null || typeof v !== "object") return undefined;
+    v = v[parts[i]];
+  }
+  return v;
+}
+
+function buildSearchUrl(def, query) {
+  return String(def.search.url).replace("{q}", encodeURIComponent(String(query == null ? "" : query)));
+}
+
+// magnet:?xt=urn:btih:… from a JSON row. Returns null for anything that is
+// not a real 40-hex hash — apibay answers an EMPTY search with one sentinel
+// row whose hash is all zeros, and without this rule every empty TPB search
+// would produce a fake addable result.
+function buildMagnet(infoHash, name, trackers) {
+  var hash = String(infoHash == null ? "" : infoHash).trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(hash)) return null;
+  if (/^0{40}$/.test(hash)) return null;
+  var out = "magnet:?xt=urn:btih:" + hash;
+  if (name) out += "&dn=" + encodeURIComponent(String(name));
+  var list = trackers || [];
+  for (var i = 0; i < list.length; i++) out += "&tr=" + encodeURIComponent(String(list[i]));
+  return out;
+}
+
+// Extract one field from one row per the def type. Returns the raw string
+// (before filters); "" when the source finds nothing.
+function extractField(spec, row, defType) {
+  if (defType === "json") {
+    var v = jsonPath(row, spec.path);
+    return v == null ? "" : String(v);
+  }
+  if (defType === "rss") {
+    var child = childByTag(row, spec.tag);
+    return child ? nodeText(child) : "";
+  }
+  var el = spec.selector ? selectFirst(row, spec.selector) : row;
+  if (!el) return "";
+  if (spec.attribute) {
+    var attr = el.attrs && el.attrs[String(spec.attribute).toLowerCase()];
+    return attr == null ? "" : attr;
+  }
+  return nodeText(el);
+}
+
+// Run one definition against a RESPONSE BODY — pure, no network, which is what
+// makes every bundled def testable against a saved fixture. Returns result
+// rows in the plugin's standard search shape.
+function runDefOnBody(def, bodyText) {
+  var rows;
+  if (def.type === "json") {
+    var parsed = JSON.parse(bodyText);
+    var arr = jsonPath(parsed, (def.rows && def.rows.path) || "");
+    rows = Object.prototype.toString.call(arr) === "[object Array]" ? arr : [];
+  } else if (def.type === "rss") {
+    rows = selectAll(parseMarkup(bodyText, false), (def.rows && def.rows.tag) || "item");
+  } else {
+    rows = selectAll(parseMarkup(bodyText, true), def.rows.selector);
+  }
+  var cap = Math.min(rows.length, def.limit || WEB_DEF_ROW_CAP);
+  var out = [];
+  for (var i = 0; i < cap; i++) {
+    var mapped = mapDefRow(def, rows[i]);
+    if (mapped) out.push(mapped);
+  }
+  return out;
+}
+
+function mapDefRow(def, row) {
+  var fields = def.fields || {};
+  var result = { siteUrl: def.siteUrl, engineName: "web:" + def.id };
+  var names = ["fileName", "fileUrl", "fileSize", "nbSeeders", "nbLeechers", "descrLink"];
+  for (var i = 0; i < names.length; i++) {
+    var key = names[i];
+    var spec = fields[key];
+    if (!spec) continue;
+    var value;
+    if (key === "fileUrl" && spec.magnet) {
+      value = buildMagnet(
+        extractField(spec.magnet.infoHash, row, def.type),
+        spec.magnet.name ? extractField(spec.magnet.name, row, def.type) : "",
+        spec.magnet.trackers
+      );
+      if (value === null) return null; // sentinel / junk hash — drop the row
+    } else {
+      value = applyFilters(extractField(spec, row, def.type), spec.filters);
+    }
+    // Unknown numbers stay ABSENT, never -1: a row with -1 size and -1 swarm
+    // is the isPluginNotice shape and would render as an engine error.
+    if (key === "fileSize" || key === "nbSeeders" || key === "nbLeechers") {
+      if (typeof value === "number" && isFinite(value) && value >= 0) result[key] = value;
+    } else if (value) {
+      result[key] = String(value);
+    }
+  }
+  if (!result.fileName) return null;
+  if (!result.fileUrl) {
+    // Magnet-on-detail-page defs: the row ships its detail URL as fileUrl so
+    // identity and the add flow have something stable, tagged for the lazy
+    // magnet resolution at add time (resolveWebFileUrl).
+    if (def.magnetFollow && result.descrLink) {
+      result.fileUrl = result.descrLink;
+      result.webFollow = def.id;
+    } else {
+      return null;
+    }
+  }
+  return result;
+}
+
+// --- Bundled definitions --------------------------------------------------------
+//
+// Data, not code. Selectors are pinned by the fixture tests; when a site
+// redesigns, the fix is a new definition, not a new parser.
+
+var WEB_DEFS = [
+  {
+    schemaVersion: 1,
+    id: "tpb",
+    name: "The Pirate Bay",
+    siteUrl: "https://thepiratebay.org",
+    type: "json",
+    search: { url: "https://apibay.org/q.php?q={q}&cat=100" },
+    rows: { path: "" },
+    fields: {
+      fileName: { path: "name" },
+      fileUrl: {
+        magnet: {
+          infoHash: { path: "info_hash" },
+          name: { path: "name" },
+          trackers: [
+            "udp://tracker.opentrackr.org:1337/announce",
+            "udp://open.stealth.si:80/announce",
+            "udp://tracker.torrent.eu.org:451/announce",
+            "udp://exodus.desync.com:6969/announce"
+          ]
+        }
+      },
+      fileSize: { path: "size", filters: [["parseInt"]] },
+      nbSeeders: { path: "seeders", filters: [["parseInt"]] },
+      nbLeechers: { path: "leechers", filters: [["parseInt"]] },
+      descrLink: { path: "id", filters: [["prepend", "https://thepiratebay.org/description.php?id="]] }
+    }
+  },
+  {
+    schemaVersion: 1,
+    id: "nyaa",
+    name: "Nyaa",
+    siteUrl: "https://nyaa.si",
+    type: "rss",
+    search: { url: "https://nyaa.si/?page=rss&q={q}&c=2_0&f=0" },
+    rows: { tag: "item" },
+    fields: {
+      fileName: { tag: "title" },
+      fileUrl: { tag: "link" },
+      fileSize: { tag: "nyaa:size", filters: [["parseSize"]] },
+      nbSeeders: { tag: "nyaa:seeders", filters: [["parseInt"]] },
+      nbLeechers: { tag: "nyaa:leechers", filters: [["parseInt"]] },
+      descrLink: { tag: "guid" }
+    }
+  },
+  {
+    schemaVersion: 1,
+    id: "x1337",
+    name: "1337x",
+    siteUrl: "https://1337x.to",
+    type: "html",
+    search: { url: "https://1337x.to/category-search/{q}/Music/1/" },
+    rows: { selector: "table.table-list tbody > tr" },
+    fields: {
+      fileName: { selector: "td.coll-1 a:nth-child(2)" },
+      descrLink: { selector: "td.coll-1 a:nth-child(2)", attribute: "href", filters: [["prepend", "https://1337x.to"]] },
+      nbSeeders: { selector: "td.coll-2", filters: [["parseInt"]] },
+      nbLeechers: { selector: "td.coll-3", filters: [["parseInt"]] },
+      // The size cell embeds a completed-count span; take the leading size.
+      fileSize: { selector: "td.coll-4", filters: [["regex", "^[\\d.,]+\\s*[KMGT]?i?B"], ["parseSize"]] }
+    },
+    magnetFollow: { selector: "a[href^=magnet]", attribute: "href" }
+  },
+  {
+    schemaVersion: 1,
+    id: "tgx",
+    name: "TorrentGalaxy",
+    siteUrl: "https://torrentgalaxy.to",
+    type: "html",
+    search: { url: "https://torrentgalaxy.to/torrents.php?search={q}&c22=1&c26=1&sort=seeders&order=desc" },
+    rows: { selector: "div.tgxtablerow" },
+    fields: {
+      fileName: { selector: "div.tgxtablecell a.txlight" },
+      descrLink: { selector: "div.tgxtablecell a.txlight", attribute: "href", filters: [["prepend", "https://torrentgalaxy.to"]] },
+      fileUrl: { selector: "a[href^=magnet]", attribute: "href" },
+      fileSize: { selector: "span.badge-secondary", filters: [["parseSize"]] },
+      nbSeeders: { selector: "span[title*=Seeder]", filters: [["regex", "(\\d+)\\s*/"], ["parseInt"]] },
+      nbLeechers: { selector: "span[title*=Seeder]", filters: [["regex", "/\\s*(\\d+)"], ["parseInt"]] }
+    }
+  }
+];
+
+// --- Validation -----------------------------------------------------------------
+
+// Human-readable problems for a definition — what the settings paste box
+// shows, and the tripwire proving every bundled def stays valid.
+function validateIndexerDef(def, existingIds) {
+  var problems = [];
+  var d = def || {};
+  var push = function (msg) {
+    problems.push(msg);
+  };
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(String(d.id || ""))) push("“id” must be 1–32 chars of a-z, 0-9, - or _");
+  else if (existingIds && existingIds[d.id]) push("“id” “" + d.id + "” is already taken");
+  if (!String(d.name || "").trim()) push("“name” is required");
+  if (!/^https?:\/\//.test(String(d.siteUrl || ""))) push("“siteUrl” must be an http(s) URL");
+  var type = String(d.type || "");
+  if (type !== "json" && type !== "rss" && type !== "html") push("“type” must be json, rss or html");
+  var searchUrl = d.search && d.search.url;
+  if (!/^https?:\/\//.test(String(searchUrl || ""))) push("“search.url” must be an http(s) URL");
+  else if (String(searchUrl).indexOf("{q}") === -1) push("“search.url” must contain {q}");
+  if (type === "html") {
+    var rowsSel = d.rows && d.rows.selector;
+    if (!rowsSel) push("an html definition needs “rows.selector”");
+    else {
+      var parsedRows = parseSelector(rowsSel);
+      if (parsedRows.error) push("“rows.selector”: " + parsedRows.error);
+    }
+  } else if (type === "json") {
+    if (!d.rows || typeof d.rows.path !== "string") push("a json definition needs “rows.path” (\"\" for the response root)");
+  }
+  var fields = d.fields || {};
+  var allowedFields = { fileName: 1, fileUrl: 1, fileSize: 1, nbSeeders: 1, nbLeechers: 1, descrLink: 1 };
+  for (var key in fields) {
+    if (!Object.prototype.hasOwnProperty.call(fields, key)) continue;
+    if (!allowedFields[key]) {
+      push("unknown field “" + key + "”");
+      continue;
+    }
+    var spec = fields[key] || {};
+    if (key === "fileUrl" && spec.magnet) {
+      if (type !== "json") push("“fileUrl.magnet” is only for json definitions");
+      if (!spec.magnet.infoHash) push("“fileUrl.magnet” needs “infoHash”");
+      var trackers = spec.magnet.trackers || [];
+      for (var t = 0; t < trackers.length; t++) {
+        if (!/^(udp|https?):\/\//.test(String(trackers[t]))) push("tracker “" + trackers[t] + "” must be udp:// or http(s)://");
+      }
+    } else {
+      var sources = 0;
+      if (typeof spec.path === "string") sources++;
+      if (spec.tag) sources++;
+      if (spec.selector) sources++;
+      if (sources !== 1) push("field “" + key + "” needs exactly one source (path / tag / selector)");
+      else if (type === "json" && typeof spec.path !== "string") push("field “" + key + "” must use “path” in a json definition");
+      else if (type === "rss" && !spec.tag) push("field “" + key + "” must use “tag” in an rss definition");
+      else if (type === "html") {
+        if (!spec.selector) push("field “" + key + "” must use “selector” in an html definition");
+        else {
+          var parsedField = parseSelector(spec.selector);
+          if (parsedField.error) push("field “" + key + "”: " + parsedField.error);
+        }
+      }
+    }
+    var filters = spec.filters || [];
+    for (var f = 0; f < filters.length; f++) {
+      var fname = filters[f] && filters[f][0];
+      if (!KNOWN_FILTERS[fname]) push("field “" + key + "”: unknown filter “" + fname + "”");
+      else if (filters[f].length !== KNOWN_FILTERS[fname]) push("field “" + key + "”: filter “" + fname + "” takes " + (KNOWN_FILTERS[fname] - 1) + " argument(s)");
+      else if (fname === "regex") {
+        try {
+          new RegExp(filters[f][1]);
+        } catch (e) {
+          push("field “" + key + "”: regex “" + filters[f][1] + "” doesn't compile");
+        }
+      }
+    }
+  }
+  if (!fields.fileName) push("“fields.fileName” is required");
+  if (!fields.fileUrl && !d.magnetFollow) push("“fields.fileUrl” is required unless “magnetFollow” is set");
+  if (d.magnetFollow) {
+    if (type !== "html") push("“magnetFollow” is only for html definitions");
+    else if (!d.magnetFollow.selector) push("“magnetFollow” needs a “selector”");
+    else {
+      var parsedFollow = parseSelector(d.magnetFollow.selector);
+      if (parsedFollow.error) push("“magnetFollow.selector”: " + parsedFollow.error);
+    }
+    if (d.magnetFollow && !fields.descrLink) push("“magnetFollow” needs “fields.descrLink” (the detail page to follow)");
+  }
+  if (d.limit !== undefined && !(d.limit >= 1 && d.limit <= 100)) push("“limit” must be 1–100");
+  if (d.search && d.search.timeoutMs !== undefined && !(d.search.timeoutMs >= 2000 && d.search.timeoutMs <= 20000)) push("“search.timeoutMs” must be 2000–20000");
+  if (d.search && d.search.minGapMs !== undefined && !(d.search.minGapMs >= 0 && d.search.minGapMs <= 60000)) push("“search.minGapMs” must be 0–60000");
+  return problems;
+}
+
+// --- The sweep --------------------------------------------------------------------
+
+// Per-HOST politeness: consecutive hits on one host are spaced by minGap +
+// jitter (the google plugin's pattern), while different indexers run in
+// parallel — a second same-host hit inside a second is the Cloudflare ban
+// signature; hits on different sites are unrelated.
+var webHostChains = {};
+
+// The real fetch, injected everywhere else so tests can substitute a stub —
+// the sandbox shadows global fetch and no test ever calls activate().
+function webFetchFn(url, init) {
+  return api.network.fetch(url, init);
+}
+
+// In-memory health per def id — { ok, fail, lastError } — for the settings
+// note and the debug narration. Session-only, like the google plugin's stats.
+var webIndexerStats = {};
+
+function hostOf(url) {
+  var m = /^https?:\/\/([^/]+)/i.exec(String(url || ""));
+  return m ? m[1].toLowerCase() : "";
+}
+
+function throttledWebFetch(url, def, fetchFn, opts) {
+  var host = hostOf(url);
+  var minGap = (opts && opts.minGapMs !== undefined) ? opts.minGapMs : (def.search && def.search.minGapMs) || WEB_MIN_GAP_MS;
+  var chain = webHostChains[host] || { tail: Promise.resolve(), lastAt: 0 };
+  webHostChains[host] = chain;
+  var run = chain.tail.then(function () {
+    var wait = Math.max(0, chain.lastAt + minGap + Math.random() * WEB_GAP_JITTER_MS - Date.now());
+    return delay(wait).then(function () {
+      chain.lastAt = Date.now();
+      return fetchFn(url, {
+        method: "GET",
+        headers: (def.search && def.search.headers) || undefined,
+        timeoutMs: (def.search && def.search.timeoutMs) || WEB_TIMEOUT_MS
+      });
+    });
+  });
+  // The chain survives a failed request; the caller still sees the rejection.
+  chain.tail = run.then(
+    function () {
+      return null;
+    },
+    function () {
+      return null;
+    }
+  );
+  return run.then(function (resp) {
+    if (resp.status < 200 || resp.status >= 300) throw new Error("HTTP " + resp.status);
+    return resp.text();
+  });
+}
+
+function recordWebStat(id, ok, err) {
+  var s = webIndexerStats[id] || { ok: 0, fail: 0, lastError: null };
+  webIndexerStats[id] = s;
+  if (ok) s.ok++;
+  else {
+    s.fail++;
+    s.lastError = err || null;
+  }
+}
+
+// Search every enabled definition, in parallel across hosts, failures
+// isolated: a dead site records a stat and yields ONE notice-shaped row
+// (fileSize/seeders/leechers = -1) that the existing search-notice rendering
+// prints as "web:x: HTTP 403" — the sweep itself never rejects.
+function webSearchAll(defs, query, fetchFn, opts) {
+  var list = defs || [];
+  var q = String(query == null ? "" : query).trim();
+  if (!q || !list.length) return Promise.resolve([]);
+  var jobs = [];
+  for (var i = 0; i < list.length; i++) {
+    (function (def) {
+      var url = buildSearchUrl(def, q);
+      dbg("search: [web:" + def.id + "] GET " + url);
+      jobs.push(
+        throttledWebFetch(url, def, fetchFn, opts)
+          .then(function (body) {
+            var rows = runDefOnBody(def, body);
+            recordWebStat(def.id, true);
+            dbg("search: [web:" + def.id + "] " + rows.length + " rows");
+            return rows;
+          })
+          .catch(function (e) {
+            recordWebStat(def.id, false, errText(e));
+            console.error("qBittorrent: web indexer " + def.id + " failed:", e);
+            dbg("search: [web:" + def.id + "] failed — " + errText(e));
+            return [
+              {
+                fileName: errText(e),
+                fileSize: -1,
+                nbSeeders: -1,
+                nbLeechers: -1,
+                engineName: "web:" + def.id,
+                siteUrl: def.siteUrl
+              }
+            ];
+          })
+      );
+    })(list[i]);
+  }
+  return Promise.all(jobs).then(function (results) {
+    var out = [];
+    var real = 0;
+    for (var r = 0; r < results.length; r++) {
+      for (var j = 0; j < results[r].length; j++) {
+        var row = results[r][j];
+        if (isPluginNotice(row)) {
+          out.push(row); // notices exempt from the cap
+        } else if (real < WEB_TOTAL_ROW_CAP) {
+          out.push(row);
+          real++;
+        }
+      }
+    }
+    return out;
+  });
+}
+
+// The definitions currently in force: bundled ones minus the user's disables,
+// plus their custom ones (validated at paste time).
+function enabledWebDefs() {
+  var out = [];
+  for (var i = 0; i < WEB_DEFS.length; i++) {
+    if (!webIndexersDisabled[WEB_DEFS[i].id]) out.push(WEB_DEFS[i]);
+  }
+  for (var c = 0; c < customIndexers.length; c++) {
+    if (!webIndexersDisabled[customIndexers[c].id]) out.push(customIndexers[c]);
+  }
+  return out;
+}
+
+function webDefById(id) {
+  var all = WEB_DEFS.concat(customIndexers);
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].id === id) return all[i];
+  }
+  return null;
+}
+
+// qBittorrent's `downloader` field routes an add through one of ITS OWN
+// search plugins. Our web engine names ("web:tpb") mean nothing to it — an
+// add carrying one would fail. Every add path maps engineName through this.
+function downloaderFor(result) {
+  var name = String((result && result.engineName) || "");
+  return name.indexOf("web:") === 0 ? "" : name;
+}
+
+// Lazy magnet resolution for magnetFollow rows: the list page had no magnet,
+// only the detail URL. Fetched at ADD time, once, for the one row the user
+// actually wants — an eager per-row fetch would hammer the site 20+ times per
+// search for results nobody clicks.
+function resolveWebFileUrl(result, fetchFn) {
+  if (!result || !result.webFollow) return Promise.resolve(result);
+  var def = webDefById(result.webFollow);
+  if (!def || !def.magnetFollow) return Promise.resolve(result);
+  dbg("add: [web:" + def.id + "] fetching the detail page for its magnet — " + result.fileUrl);
+  return throttledWebFetch(result.fileUrl, def, fetchFn).then(function (body) {
+    var el = selectFirst(parseMarkup(body, true), def.magnetFollow.selector);
+    var magnet = el && el.attrs ? el.attrs[String(def.magnetFollow.attribute || "href").toLowerCase()] : null;
+    if (!magnet || magnet.indexOf("magnet:") !== 0) {
+      throw new Error("No magnet link found on the torrent's page");
+    }
+    var out = {};
+    for (var k in result) {
+      if (Object.prototype.hasOwnProperty.call(result, k)) out[k] = result[k];
+    }
+    out.fileUrl = magnet;
+    delete out.webFollow;
+    return out;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Metadata resolver — serve ANY track from torrents
 // ---------------------------------------------------------------------------
@@ -5418,8 +6501,15 @@ function examineCandidates(candidates, i, want) {
   dbg("examine " + (i + 1) + "/" + candidates.length + ": adding “" + r.fileName + "” paused");
   reportPct(resolvePercent("candidate", i, 0));
   var before = shallowHashSet(torrents);
-  var expected = magnetHash(r.fileUrl);
-  return addTorrentRaw(r.fileUrl, { paused: true, downloader: r.engineName || "" })
+  var expected = null;
+  // A web magnet-follow candidate holds only its detail URL until now; the
+  // magnet is fetched for the ONE candidate being examined, not for the list.
+  return resolveWebFileUrl(r, webFetchFn)
+    .then(function (resolved) {
+      r = resolved;
+      expected = magnetHash(r.fileUrl);
+      return addTorrentRaw(r.fileUrl, { paused: true, downloader: downloaderFor(r) });
+    })
     .then(function () {
       return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
     })
@@ -5657,9 +6747,14 @@ function registerDownloadProvider() {
       return enqueueDiscovery(function () {
         resolveJob = { hashes: {}, startedAt: Date.now() };
         var before = shallowHashSet(torrents);
-        var expected = magnetHash(r.fileUrl);
+        var expected = null;
         var addedHash = null;
-        return addTorrentRaw(r.fileUrl, { paused: true, downloader: r.engineName || "" })
+        return resolveWebFileUrl(r, webFetchFn)
+          .then(function (resolved) {
+            r = resolved;
+            expected = magnetHash(r.fileUrl);
+            return addTorrentRaw(r.fileUrl, { paused: true, downloader: downloaderFor(r) });
+          })
           .then(function () {
             return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
           })
@@ -6373,6 +7468,69 @@ function registerActions() {
     currentDraft().tier3Disposition = v === "import" || v === "remove" ? v : "seed";
     renderSettings();
   });
+
+  // Web indexer toggles act on the LIVE settings, not the draft — flipping a
+  // site on shouldn't wait behind Save & connect, which also resets the
+  // session. Same persistence path as everything else (persistSettings).
+  var registerWebIndexerActions = function (def) {
+    api.ui.onAction("qbt:webidx-" + def.id, function (data) {
+      var on = !!(data && (data.checked === undefined ? data.value : data.checked));
+      if (on) delete webIndexersDisabled[def.id];
+      else webIndexersDisabled[def.id] = true;
+      persistSettings();
+      renderSettings();
+      render();
+    });
+    api.ui.onAction("qbt:webdel-" + def.id, function () {
+      for (var i = 0; i < customIndexers.length; i++) {
+        if (customIndexers[i].id === def.id) {
+          customIndexers.splice(i, 1);
+          break;
+        }
+      }
+      delete webIndexersDisabled[def.id];
+      persistSettings();
+      renderSettings();
+      render();
+    });
+  };
+  for (var wd = 0; wd < WEB_DEFS.length; wd++) registerWebIndexerActions(WEB_DEFS[wd]);
+  for (var cd = 0; cd < customIndexers.length; cd++) registerWebIndexerActions(customIndexers[cd]);
+  registerCustomIndexerActions = registerWebIndexerActions;
+
+  api.ui.onAction("qbt:web-draft", function (data) {
+    webIndexerDraft = (data && data.value) || "";
+  });
+
+  api.ui.onAction("qbt:web-add", function () {
+    var text = webIndexerDraft.trim();
+    if (!text) {
+      api.ui.showNotification("Paste an indexer definition first");
+      return;
+    }
+    var def;
+    try {
+      def = JSON.parse(text);
+    } catch (e) {
+      api.ui.showNotification("That isn't valid JSON: " + errText(e));
+      return;
+    }
+    var taken = {};
+    var all = WEB_DEFS.concat(customIndexers);
+    for (var i = 0; i < all.length; i++) taken[all[i].id] = true;
+    var problems = validateIndexerDef(def, taken);
+    if (problems.length) {
+      api.ui.showNotification("That definition has problems: " + problems.slice(0, 3).join(" · "));
+      return;
+    }
+    customIndexers.push(def);
+    registerWebIndexerActions(def);
+    webIndexerDraft = "";
+    persistSettings();
+    api.ui.showNotification("Added “" + def.name + "” — it joins every search from now on");
+    renderSettings();
+    render();
+  });
   api.ui.onAction("qbt:set-map-from", function (data) {
     currentDraft().pathMapFrom = (data && data.value) || "";
   });
@@ -6432,6 +7590,13 @@ function activate(hostApi) {
   renderSettings();
 
   loadSettings()
+    .then(function () {
+      // Custom indexer definitions restored from storage need their toggle /
+      // remove handlers — registerActions ran before settings existed.
+      if (registerCustomIndexerActions) {
+        for (var ci = 0; ci < customIndexers.length; ci++) registerCustomIndexerActions(customIndexers[ci]);
+      }
+    })
     .then(loadNamesCache)
     .then(loadOrphans)
     .then(loadCollections)
@@ -6575,6 +7740,25 @@ return {
   _pickFileForTrack: pickFileForTrack,
   _pickFileForQuery: pickFileForQuery,
   _discoveryQueries: discoveryQueries,
+  _decodeEntities: decodeEntities,
+  _parseHtml: function (text) { return parseMarkup(text, true); },
+  _parseXml: function (text) { return parseMarkup(text, false); },
+  _nodeText: nodeText,
+  _parseSelector: parseSelector,
+  _selectAll: selectAll,
+  _selectFirst: selectFirst,
+  _childByTag: childByTag,
+  _parseSize: parseSize,
+  _applyFilters: applyFilters,
+  _jsonPath: jsonPath,
+  _buildSearchUrl: buildSearchUrl,
+  _buildMagnet: buildMagnet,
+  _runDefOnBody: runDefOnBody,
+  _validateIndexerDef: validateIndexerDef,
+  _webSearchAll: webSearchAll,
+  _resolveWebFileUrl: resolveWebFileUrl,
+  _downloaderFor: downloaderFor,
+  _WEB_DEFS: WEB_DEFS,
   _resolveBudgets: {
     searchMaxMs: RESOLVE_SEARCH_MAX_MS,
     attachAttempts: RESOLVE_ATTACH_ATTEMPTS,

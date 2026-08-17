@@ -302,9 +302,56 @@ reads.
 
 ## Searching
 
-The **Search** tab drives the search plugins you have installed in qBittorrent —
-this plugin ships none of its own. Results are sorted by seeders and stream in as
-each indexer answers.
+The **Search** tab searches two sources at once and merges them: the **web
+indexers** below (built in — no setup) and any **search plugins you have
+installed in qBittorrent**. Results are sorted by seeders and stream in as each
+source answers, with the site shown under each row.
+
+### Web indexers
+
+The plugin searches torrent sites directly, so search — and automatic
+discovery (see "Playing and downloading ANY track from torrents") — works with no
+qBittorrent search plugins at all. Four are built in and on by default:
+
+- **The Pirate Bay** (via its JSON API), **Nyaa** (RSS), **1337x** and
+  **TorrentGalaxy** (HTML).
+
+Toggle each under **Settings → qBittorrent → Search …**, where a per-site health
+note shows how it's doing this session. A site that's down or blocking you shows
+as a single notice row (`web:1337x: HTTP 403`) and never sinks the others.
+
+Each indexer is a **definition, not code** — a small JSON document saying how to
+build the search URL and read the result rows. You can **paste your own** for any
+other site under *Add a web indexer* (it's validated with plain-English errors
+first). The format, briefly:
+
+```json
+{
+  "id": "mysite",
+  "name": "My Site",
+  "siteUrl": "https://mysite.example",
+  "type": "html",                       // "json" | "rss" | "html"
+  "search": { "url": "https://mysite.example/search?q={q}" },
+  "rows": { "selector": "table.results tbody > tr" },
+  "fields": {
+    "fileName":  { "selector": "td.name a" },
+    "fileUrl":   { "selector": "a[href^=magnet]", "attribute": "href" },
+    "fileSize":  { "selector": "td.size", "filters": [["parseSize"]] },
+    "nbSeeders": { "selector": "td.se", "filters": [["parseInt"]] },
+    "nbLeechers":{ "selector": "td.le", "filters": [["parseInt"]] }
+  }
+}
+```
+
+`{q}` is the URL-encoded query. For a **JSON** site, fields use `path` (a dot
+path like `info_hash`) and `fileUrl` can be a computed `magnet` built from an
+info-hash field. For **RSS**, fields use `tag` (e.g. `nyaa:seeders`). Filters
+(`regex`, `parseSize`, `parseInt`, `prepend`, `append`, `querystring`, `replace`,
+`trim`) clean a value up. If a site only exposes the magnet on the torrent's
+detail page, add `"magnetFollow": { "selector": "a[href^=magnet]" }` and the
+magnet is fetched lazily, only when you actually add that result. Selectors
+support tag / `.class` / `#id` / `[attr]` / `[attr^=v]` / `[attr*=v]` /
+compounds / descendant / `>` / `:nth-child(n)`.
 
 Results are a normal row list, the same one every other search surface in the app
 uses. Each row leads with the **name**, carries its **size** in the trailing
@@ -351,9 +398,10 @@ Right-clicking a track, album or artist in your library offers **Find torrents�
 which opens the tab and searches for it. A track searches its *album*, since
 that's the unit indexers actually publish.
 
-If qBittorrent has no search plugins enabled, the tab says so and tells you where
-to add them (qBittorrent → View → Search Engine → Search plugins) rather than
-claiming nothing was found.
+With the web indexers on, the tab always has somewhere to search. If you turn
+them all off *and* qBittorrent has no search plugins enabled, the tab says so and
+tells you where to add them (qBittorrent → View → Search Engine → Search plugins)
+rather than claiming nothing was found.
 
 ## Playing and downloading ANY track from torrents
 
@@ -428,9 +476,9 @@ download test can genuinely add torrents and download files.
 Planned: RSS auto-download rules for artists you follow, and playing a file
 while it's still downloading.
 
-This plugin controls a torrent client. It ships no indexers and no content, and
-searching uses whatever search plugins you have installed in qBittorrent
-itself.
+This plugin controls a torrent client and searches public torrent sites; it
+ships **definitions** for a handful of them but **no content of its own**, and
+you can add or remove indexers freely.
 
 ## Development
 
