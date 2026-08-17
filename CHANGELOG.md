@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.19.0
+
+**The torrent list has a filter box, and it searches *inside* torrents.**
+
+Space-separated terms, all of which must appear, matched as you type against
+torrent names **and the file paths inside them** — `jóga flac` finds the
+compilation whose release name never says Björk, and a folder name like `live`
+finds every release carrying one.
+
+- **A torrent pulled in by its files says why.** Its row leads with *matches
+  "07 - Jóga.flac" +2 more* — otherwise a compilation showing up for a name it
+  doesn't carry reads as a bug — and opening it lands on the contents already
+  narrowed to those files.
+- **The file lists come from a cache that fills itself, once ever.** The list
+  was already fetching every torrent's full file list just to print its file
+  count, then keeping only the number; the names are now kept and **persisted**.
+  A torrent's hash *is* its file list, so an entry can never go stale — which
+  also means file counts stop being refetched every session.
+- **Typing turns the trickle into a burst.** The background count fetch runs at
+  4 per poll so it never crowds the connection; against 1000 uncached torrents
+  that is an 8-minute warm-up nobody typing into a search box will wait out.
+  A typed filter switches the missing fetches to a bounded burst (6 in flight),
+  filling results in as they land — about a minute for a 1000-torrent seedbox,
+  once ever, then instant.
+- **An unfinished search says so.** A torrent whose files aren't cached yet is
+  *unknown*, not a non-match: the view reads *"Searching inside torrents — N
+  still to check…"* and only says *"Nothing matches"* once everything has
+  actually been checked.
+- **Start all / Stop all honour the filter.** They have always acted on "what
+  the list shows you"; with a filter typed, that is the filtered rows — *Stop
+  all* over a filter for one release must not halt a hundred other transfers
+  sitting off-screen.
+
 ## 0.18.0
 
 **Tracks are named by the file, not by the filename.**

@@ -81,7 +81,27 @@ because they were one pair — so two buttons posting to the same endpoint would
 be a lie about what the client can do. *Stop* is the pause.
 
 *Start all* / *Stop all* act on every torrent the list shows you — which, with
-the category filter on, is only the ones this plugin added.
+the category filter on, is only the ones this plugin added, and with the filter
+box typed into, only the rows it shows.
+
+### Filtering the list — including *inside* torrents
+
+The filter box above the list matches as you type, space-separated terms all of
+which must appear. It searches **torrent names and the file paths inside
+them** — so `jóga flac` finds the compilation whose release name never says
+Björk, and a folder name like `live` finds every release carrying one. A
+torrent pulled in by its files says why on its row (*matches "07 - Jóga.flac"
++2 more*), and opening it lands on the contents already narrowed to those files.
+
+The file lists come from a cache that fills itself. The list already fetches
+each torrent's files once to print its file count; the names are kept, stored
+persistently, and — because a torrent's hash *is* its file list — never go
+stale and never need refetching, even across restarts. While you type against
+torrents not yet cached, the fetches switch from a background trickle to a
+bounded burst (six at a time), and the view says *"Searching inside torrents —
+N still to check…"* rather than passing off an unfinished search as "no
+matches". On a 1000-torrent seedbox the first-ever search fills in over about a
+minute; every one after that is instant.
 
 ## Status
 

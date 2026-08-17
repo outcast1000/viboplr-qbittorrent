@@ -166,6 +166,11 @@ var previousCategory = "";
 var activeTab = "torrents";
 var pollTimer = null;
 var stopped = false;
+// The torrents tab's filter box. One string, because there is one list — it is
+// matched against torrent NAMES and against the FILE NAMES inside them (via
+// fileNamesByHash), so "jóga flac" finds the compilation that never says Björk
+// in its release name.
+var listFilter = "";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -850,6 +855,65 @@ function filterFiles(files, query) {
   return out;
 }
 
+// Same matcher, over plain name strings — the shape the cross-torrent name
+// cache holds, where there is no file object to carry.
+function matchingNames(names, query) {
+  var list = names || [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (matchesFilter(list[i], query)) out.push(list[i]);
+  }
+  return out;
+}
+
+// The torrents-tab filter, over names AND the files inside. Three verdicts per
+// torrent, and the third is the one that keeps the view honest: a torrent whose
+// name doesn't match and whose file list ISN'T CACHED YET is not a non-match,
+// it is unknown — it goes in `unchecked`, and the view says "still checking N"
+// instead of letting a cold cache read as "nothing found".
+//
+// `fileMatches` is empty for a name match on purpose: it feeds the row's
+// "matches …" note, which exists to explain a torrent whose OWN name gives no
+// clue why it is in the filtered list. A name match explains itself.
+function filterTorrentList(list, query, namesByHash) {
+  var q = String(query == null ? "" : query).trim();
+  var shown = [];
+  var unchecked = 0;
+  var all = list || [];
+  var byHash = namesByHash || {};
+  for (var i = 0; i < all.length; i++) {
+    var t = all[i];
+    if (!q) {
+      shown.push({ torrent: t, fileMatches: [] });
+      continue;
+    }
+    var title = t.name || magnetDisplayName(t.magnet_uri) || t.hash;
+    if (matchesFilter(title, q)) {
+      shown.push({ torrent: t, fileMatches: [] });
+      continue;
+    }
+    var names = byHash[t.hash];
+    if (names) {
+      var m = matchingNames(names, q);
+      if (m.length) shown.push({ torrent: t, fileMatches: m });
+    } else if (hasMetadata(t)) {
+      // A magnet without metadata has no file list to check — its name (tested
+      // above) was the whole truth, so it is not pending anything.
+      unchecked++;
+    }
+  }
+  return { shown: shown, unchecked: unchecked };
+}
+
+// Why a torrent whose name says nothing is in the filtered list. One file is
+// named; more are named-and-counted — pasting a dozen paths into a subtitle
+// helps nobody, and the click-through opens the contents already filtered.
+function fileMatchNote(names) {
+  var first = baseName(names[0] || "");
+  if (names.length === 1) return "matches “" + first + "”";
+  return "matches " + names.length + " files — “" + first + "” +" + (names.length - 1) + " more";
+}
+
 // The files the contents panel is currently SHOWING. The single source of truth
 // for both the list and the Download toolbar above it — the buttons act on what
 // you can see, so a button labelled "Audio (3)" must be reading the same three
@@ -1531,6 +1595,9 @@ function refresh() {
       // Same isolation: a background file count or file-list refresh that fails
       // must not be reported as "can't reach qBittorrent".
       ensureFileCounts();
+      // Torrents added while a list filter is active join the burst here —
+      // and a reconnection resumes one the disconnect stalled.
+      pumpNameBurst();
       refreshOpenFiles();
       return handleCompletions(visibleTorrents()).catch(function (e) {
         console.error("qBittorrent: handling completions failed:", e);
@@ -2234,6 +2301,7 @@ function fetchFiles(hash) {
     })
     .then(function (list) {
       filesByHash[hash] = parseFileList(list);
+      rememberFileNames(hash, filesByHash[hash]);
       // Tags for this torrent's finished media, once, in the background. The
       // user is looking at this file list — reading the tags now is what makes
       // the ROWS say what the files are, not just the queue entries built from
@@ -2318,6 +2386,9 @@ function refreshOpenFiles() {
       // unchanged list is work for nothing.
       if (fileListSignature(next) !== fileListSignature(filesByHash[hash])) {
         filesByHash[hash] = next;
+        // The one path that can observe an in-qBittorrent rename — refresh the
+        // name cache too, or the list filter keeps searching the old names.
+        rememberFileNames(hash, next);
         render();
       }
     })
@@ -2471,10 +2542,78 @@ var fileCountByHash = {};
 var countInFlight = {};
 var COUNT_FETCH_PER_CYCLE = 4;
 
+// File names per torrent, kept so the list filter can search INSIDE torrents.
+// The count fetch above was already downloading every torrent's full file list
+// and keeping only `.length` — this holds on to the names it was throwing away.
+//
+// Content-addressed and therefore PERSISTED: a hash IS its file list, so an
+// entry can never go stale (an in-qBittorrent rename is the one exception, and
+// refreshOpenFiles corrects the open torrent when it happens), and it stays
+// valid across sessions and even across servers. With a thousand torrents,
+// fetching each list once EVER instead of once per session is the difference
+// between an instant search and a minute of filling in.
+var fileNamesByHash = {};
+var NAMES_STORAGE_KEY = "fileNames";
+var namesPersistTimer = null;
+
+function rememberFileNames(hash, files) {
+  var list = files || [];
+  // An empty list means "qBittorrent isn't ready to describe it", never a fact
+  // about the torrent — same reasoning as the count's -1 marker below.
+  if (!list.length) return;
+  var names = [];
+  for (var i = 0; i < list.length; i++) names.push(String(list[i].name || ""));
+  fileNamesByHash[hash] = names;
+  schedulePersistNames();
+}
+
+// Debounced: a burst can land hundreds of lists in under a minute, and writing
+// the whole cache to storage after every one of them would be quadratic I/O.
+function schedulePersistNames() {
+  if (namesPersistTimer) return;
+  namesPersistTimer = setTimeout(function () {
+    namesPersistTimer = null;
+    persistNames();
+  }, 2000);
+}
+
+function persistNames() {
+  // A stray debounce timer can outlive deactivate(); there is nowhere to write.
+  if (!api) return Promise.resolve();
+  // Prune entries for torrents the server no longer has — but only while
+  // connected, when `torrents` is the full picture. `torrents` is unfiltered
+  // maindata, so the category filter cannot make this drop live entries.
+  if (connected) {
+    var kept = {};
+    for (var hash in fileNamesByHash) {
+      if (!Object.prototype.hasOwnProperty.call(fileNamesByHash, hash)) continue;
+      if (torrents[hash]) kept[hash] = fileNamesByHash[hash];
+    }
+    fileNamesByHash = kept;
+  }
+  return api.storage.set(NAMES_STORAGE_KEY, { byHash: fileNamesByHash }).catch(function (e) {
+    console.error("qBittorrent: could not save the file-name cache:", e);
+  });
+}
+
+function loadNamesCache() {
+  return api.storage
+    .get(NAMES_STORAGE_KEY)
+    .then(function (saved) {
+      var byHash = saved && saved.byHash;
+      if (byHash && typeof byHash === "object") fileNamesByHash = byHash;
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not read the file-name cache:", e);
+    });
+}
+
 function fileCountOf(t) {
   if (!t) return null;
   var files = filesByHash[t.hash];
   if (files) return files.length;
+  var names = fileNamesByHash[t.hash];
+  if (names) return names.length;
   var n = fileCountByHash[t.hash];
   // -1 is the "asked and it failed" marker, which is unknown as far as the row
   // is concerned but must not be asked again.
@@ -2491,7 +2630,7 @@ function ensureFileCounts() {
     // not retried on every poll for the rest of the session — that would be a
     // request loop against a torrent qBittorrent has already refused to
     // describe, for a field the row can simply omit.
-    if (filesByHash[t.hash] || fileCountByHash[t.hash] !== undefined || countInFlight[t.hash]) continue;
+    if (filesByHash[t.hash] || fileNamesByHash[t.hash] || fileCountByHash[t.hash] !== undefined || countInFlight[t.hash]) continue;
     // A magnet still asking the swarm what is in it has no file list to count.
     if (!hasMetadata(t)) continue;
     countInFlight[t.hash] = true;
@@ -2513,6 +2652,7 @@ function fetchFileCount(hash) {
       // marker rather than a count of 0. Printing "0 files" on a row would be
       // stating a fact that cannot be true.
       fileCountByHash[hash] = n > 0 ? n : -1;
+      rememberFileNames(hash, list);
       render();
     })
     .catch(function (e) {
@@ -2523,6 +2663,36 @@ function fetchFileCount(hash) {
     .then(function () {
       delete countInFlight[hash];
     });
+}
+
+// The trickle above (4 per ~2s poll) exists to decorate rows nobody asked
+// about; it would take 8 minutes to cover a 1000-torrent list. When the user
+// has TYPED into the list filter they are asking now, so the missing lists are
+// fetched in a self-refilling burst instead — still bounded, because 1000
+// sockets at once is a connection-pool stampede against a home server.
+var BURST_LIMIT = 6;
+var burstInFlight = 0;
+
+function pumpNameBurst() {
+  if (!connected || !String(listFilter).trim()) return;
+  var list = visibleTorrents();
+  for (var i = 0; i < list.length && burstInFlight < BURST_LIMIT; i++) {
+    var t = list[i];
+    if (filesByHash[t.hash] || fileNamesByHash[t.hash] || countInFlight[t.hash]) continue;
+    // Respect the count fetch's "asked and it failed" marker — a burst that
+    // retried every refused torrent on each keystroke would be the request
+    // loop that marker exists to prevent.
+    if (fileCountByHash[t.hash] === -1) continue;
+    if (!hasMetadata(t)) continue;
+    countInFlight[t.hash] = true;
+    burstInFlight++;
+    fetchFileCount(t.hash).then(function () {
+      burstInFlight--;
+      // Clearing the box cancels the burst here: the pump re-checks listFilter
+      // before starting anything new, so at most BURST_LIMIT stragglers land.
+      pumpNameBurst();
+    });
+  }
 }
 
 // Absolute path of one file on THIS machine, or null when it can't be known.
@@ -2883,9 +3053,15 @@ function torrentStatusText(t, pending) {
 //
 // The tile carries the percentage (colour-coded by state), the trailing column
 // carries the size, and the subtitle leads with the status and the file count.
-function torrentRow(t) {
+function torrentRow(t, fileMatches) {
   var pending = needsChoice(t);
   var bits = [torrentStatusText(t, pending)];
+
+  // Filtered in by its FILES, not its name. The explanation leads the subtitle:
+  // with a filter active, "why is this row here" is the question being read,
+  // and a note at the end of this long line would be the first thing ellipsis
+  // eats.
+  if (fileMatches && fileMatches.length) bits.unshift(fileMatchNote(fileMatches));
 
   var count = fileCountOf(t);
   if (count !== null) bits.push(count + (count === 1 ? " file" : " files"));
@@ -3414,6 +3590,37 @@ function render() {
     statusVariant: lastError ? "error" : connected ? "success" : "default"
   });
 
+  // Also shown while the box holds text over an emptied list — hiding the
+  // input WITH the last row would strand a filter nobody can clear.
+  if (list.length || String(listFilter).trim()) {
+    // Live filter, like the per-torrent files box: no button label, so the
+    // host fires it on every keystroke.
+    children.push({
+      type: "search-input",
+      placeholder: "Filter torrents — names and the files inside them",
+      action: "qbt:list-filter",
+      value: listFilter,
+      stateKey: "qbt-list-filter"
+    });
+  }
+
+  var filtered = filterTorrentList(list, listFilter, fileNamesByHash);
+
+  // A search over a cold cache: some torrents genuinely cannot answer yet.
+  // Said out loud, or "no matches" below would be a verdict the plugin doesn't
+  // have — the burst is filling these in and each landing re-renders.
+  if (String(listFilter).trim() && filtered.unchecked) {
+    children.push({
+      type: "text",
+      className: "muted",
+      content:
+        "Searching inside torrents — " +
+        filtered.unchecked +
+        (filtered.unchecked === 1 ? " torrent" : " torrents") +
+        " still to check…"
+    });
+  }
+
   if (!list.length) {
     children.push({
       type: "text",
@@ -3423,9 +3630,23 @@ function render() {
           : "No torrents yet. Paste a magnet link or .torrent URL above."
         : "Not connected to qBittorrent."
     });
+  } else if (!filtered.shown.length) {
+    // Only a verdict once everything HAS been checked; before that the
+    // "still to check" line above is the honest state of the search.
+    if (!filtered.unchecked) {
+      children.push({ type: "text", className: "muted", content: "Nothing matches “" + listFilter + "”." });
+      children.push({
+        type: "button",
+        label: "Clear the filter",
+        action: "qbt:list-filter-clear",
+        variant: "secondary"
+      });
+    }
   } else {
     var rows = [];
-    for (var i = 0; i < list.length; i++) rows.push(torrentRow(list[i]));
+    for (var i = 0; i < filtered.shown.length; i++) {
+      rows.push(torrentRow(filtered.shown[i].torrent, filtered.shown[i].fileMatches));
+    }
     children.push({
       type: "track-row-list",
       selectable: true,
@@ -4396,6 +4617,21 @@ function registerActions() {
     var hash = hashOf(data);
     if (!hash) return;
     expandedHash = hash;
+    // Arriving from a list filter that matched this torrent's FILES: open the
+    // contents already narrowed to them — the row's "matches …" note promised
+    // exactly that. Only when the torrent's own name did NOT match (a name
+    // match means the user wants the torrent, not three files of it), and only
+    // when they have never typed a files filter for this torrent — the host
+    // input's stateKey memory would replay their text over ours, leaving the
+    // box and the list disagreeing.
+    var q = String(listFilter).trim();
+    if (q && fileFilters[hash] === undefined) {
+      var t = torrents[hash];
+      var names = fileNamesByHash[hash];
+      if (t && names && !matchesFilter(t.name || "", q) && matchingNames(names, q).length) {
+        fileFilters[hash] = q;
+      }
+    }
     render();
     ensureFiles(hash);
   });
@@ -4477,6 +4713,19 @@ function registerActions() {
     if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 0);
   });
 
+  api.ui.onAction("qbt:list-filter", function (data) {
+    listFilter = String((data && data.query) || "");
+    // Typing is the demand signal: start (or keep) filling the name cache for
+    // whatever the filter can't answer yet.
+    pumpNameBurst();
+    render();
+  });
+
+  api.ui.onAction("qbt:list-filter-clear", function () {
+    listFilter = "";
+    render();
+  });
+
   api.ui.onAction("qbt:file-filter", function (data) {
     if (!expandedHash) return;
     fileFilters[expandedHash] = String((data && data.query) || "");
@@ -4486,7 +4735,11 @@ function registerActions() {
   api.ui.onAction("qbt:file-filter-clear", function (data) {
     var hash = hashOf(data) || expandedHash;
     if (!hash) return;
-    delete fileFilters[hash];
+    // Empty string, not delete: `undefined` means "never touched", which is
+    // what lets the list filter pre-seed this box on open. A torrent the user
+    // explicitly cleared has been touched — pre-seeding it again would replay
+    // the very text they just dismissed.
+    fileFilters[hash] = "";
     render();
   });
 
@@ -4559,11 +4812,13 @@ function registerActions() {
 }
 
 // Bulk actions act on exactly what the user can see — which, with the category
-// restriction on, is only this plugin's own torrents.
+// restriction on, is only this plugin's own torrents, and with the list filter
+// typed, only the rows it shows. "Stop all" over a filter for one release must
+// not halt the other hundred transfers sitting off-screen.
 function hashesInView() {
-  var list = visibleTorrents();
+  var filtered = filterTorrentList(visibleTorrents(), listFilter, fileNamesByHash);
   var out = [];
-  for (var i = 0; i < list.length; i++) out.push(list[i].hash);
+  for (var i = 0; i < filtered.shown.length; i++) out.push(filtered.shown[i].torrent.hash);
   return out;
 }
 
@@ -4588,6 +4843,7 @@ function activate(hostApi) {
   renderSettings();
 
   loadSettings()
+    .then(loadNamesCache)
     .then(loadCollections)
     .then(function () {
       render();
@@ -4613,6 +4869,14 @@ function deactivate() {
     disposeSearch(strandedJob).catch(function (e) {
       console.error("qBittorrent: could not dispose of the search job on deactivate:", e);
     });
+  }
+  // A debounced name-cache write still waiting its 2s must land before the
+  // api handle is gone — otherwise the last burst of a session is refetched
+  // next time, which is exactly what the cache exists to prevent.
+  if (namesPersistTimer) {
+    clearTimeout(namesPersistTimer);
+    namesPersistTimer = null;
+    persistNames();
   }
   // The session dies with the plugin; nothing about it is worth persisting.
   api = null;
@@ -4692,6 +4956,9 @@ return {
   _partitionByKind: partitionByKind,
   _matchesFilter: matchesFilter,
   _filterFiles: filterFiles,
+  _matchingNames: matchingNames,
+  _filterTorrentList: filterTorrentList,
+  _fileMatchNote: fileMatchNote,
   _selectionSummary: selectionSummary,
   _formatAge: formatAge,
   _formatDuration: formatDuration,
