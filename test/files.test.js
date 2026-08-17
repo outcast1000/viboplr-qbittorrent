@@ -412,6 +412,21 @@ test("a finished NON-media file offers nothing at all", () => {
   assert.deepEqual(plugin._fileRowActions(null, true, true), { actions: [], action: null });
 });
 
+test("a deselected file offers ONLY Download, even when its bytes are here", () => {
+  // The bug: a file with priority 0 in an otherwise-complete torrent reads
+  // "Not selected for download" (fileState ranks skipped first) but the row
+  // offered Play / Add to queue because fileRowActions checked done first.
+  // Skipped must win in both, so the row is consistent with its own status.
+  assert.deepEqual(plugin._fileRowActions("audio", true, true), {
+    actions: ["qbt:file-download"],
+    action: "qbt:file-download",
+  });
+  assert.deepEqual(plugin._fileRowActions("video", true, true), {
+    actions: ["qbt:file-download"],
+    action: "qbt:file-download",
+  });
+});
+
 test("an unfinished file offers the choice it is not already in", () => {
   // This applies to junk as much as to media: skipping a 4 GB video extra is a
   // main reason to open the list at all.

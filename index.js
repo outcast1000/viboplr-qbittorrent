@@ -1297,14 +1297,24 @@ function parseFileTrack(name) {
 // something the row did not put first on purpose — and it is null when the row
 // offers nothing, rather than falling through to an action that isn't there.
 function fileRowActions(kind, done, skipped) {
+  // Skipped wins, exactly as fileState() ranks it: a deselected file reads
+  // "Not selected for download", so the row must not also offer Play / Add to
+  // queue — that contradiction is what a file with priority 0 but bytes on
+  // disk (a deselected file in an otherwise-complete torrent) showed. The only
+  // action that matches "not selected" is to include it. A finished non-media
+  // file is the one exception with nothing to offer: its bytes are here and it
+  // can't be played, and "download" would re-select something already present.
+  if (skipped) {
+    return done && !kind
+      ? { actions: [], action: null }
+      : { actions: ["qbt:file-download"], action: "qbt:file-download" };
+  }
   if (done) {
     return kind
       ? { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" }
       : { actions: [], action: null };
   }
-  return skipped
-    ? { actions: ["qbt:file-download"], action: "qbt:file-download" }
-    : { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
+  return { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
 }
 
 function qbtUri(hash, index) {
@@ -7036,7 +7046,10 @@ function fileRowsNode(hash) {
       action: offered.action,
       // Only a finished, reachable, PLAYABLE file gets a path — that is what
       // makes the host's right-click menu and drag-to-queue work on these rows.
-      path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
+      // A deselected file is deliberately excluded even when its bytes exist,
+      // so "Not selected for download" reads the same on the row, its overlay
+      // buttons, and the host's right-click menu.
+      path: kind && done && !skipped && filesAreReachable() ? qbtUri(hash, f.index) : null,
       artistName: kind ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
       albumTitle: kind && torrent ? firstText([tags && tags.album, torrent.name]) : null
     });

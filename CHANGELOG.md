@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.1
+
+**A "Not selected for download" file now offers only Download.** A file with
+priority 0 that already had bytes on disk (a deselected file in an otherwise
+complete torrent) read *"Not selected for download"* on its row but still
+offered **Play** and **Add to queue** — the status ranked "skipped" first while
+the buttons ranked "downloaded" first. Skipped now wins in both, so such a row
+offers only **Download**, and it is no longer treated as playable by drag-to-
+queue or the right-click menu either. The row and its actions finally agree.
+
 ## 0.25.0
 
 **Search torrent websites directly — no qBittorrent search plugins needed.**
