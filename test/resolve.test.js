@@ -194,6 +194,24 @@ test("ranking caps at the candidate budget", () => {
   assert.equal(rank(many, CTX).length, budgets.maxCandidates);
 });
 
+const queries = plugin._discoveryQueries;
+
+test("the search ladder is artist-album, then artist, and title only artistless", () => {
+  // Torrent releases are named by artist/album — a track title is a useless
+  // torrent query unless it is genuinely all we have.
+  assert.deepEqual(
+    queries({ title: "Jóga", artist: "Björk", album: "Homogenic" }),
+    ["Björk Homogenic", "Björk"]
+  );
+  assert.deepEqual(queries({ title: "Jóga", artist: "Björk", album: "" }), ["Björk"]);
+  assert.deepEqual(queries({ title: "Jóga", artist: "", album: "Homogenic" }), ["Jóga"]);
+  assert.deepEqual(queries({ title: "Jóga", artist: "", album: "" }), ["Jóga"]);
+  assert.deepEqual(queries({ title: "", artist: "", album: "" }), []);
+  // The ladder is never longer than two — the budget tripwire below depends
+  // on that.
+  assert.ok(queries({ title: "t", artist: "a", album: "b" }).length <= 2);
+});
+
 // --- Stall detection, percent mapping, budgets ---------------------------------
 
 const stall = plugin._detectResolveStall;

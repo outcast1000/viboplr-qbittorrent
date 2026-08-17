@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.1
+
+**Discovery searches the way torrents are named.** The query ladder is now
+*artist album* → *artist alone*, with the bare title used only when the track
+has no artist at all. The old second query, "artist title", asked indexers for
+a torrent named after a track — which torrents almost never are — so its slot
+now goes to the plain artist search, which catches singles, EPs and releases
+whose name doesn't mention the album. The candidate filter still requires the
+artist in the release name and the file matcher still finds the exact track
+inside, so the broader query widens the net without loosening what qualifies.
+
 ## 0.21.0
 
 **Any track in the app can now be served from your torrents.**

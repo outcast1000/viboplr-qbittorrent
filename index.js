@@ -5052,11 +5052,27 @@ function discoverAndFetch(want, format) {
   });
 }
 
+// The queries discovery tries, in order. Torrent releases are named by ARTIST
+// and ALBUM, never by track titles — so "artist album" leads, the artist alone
+// follows (catches singles, EPs, and releases whose name doesn't say the
+// album), and the bare title is used ONLY when there is no artist to search
+// by: "One" as a torrent search is noise, but it is all a titled-only track
+// has to offer.
+function discoveryQueries(want) {
+  var artist = String((want && want.artist) || "").trim();
+  var album = String((want && want.album) || "").trim();
+  var title = String((want && want.title) || "").trim();
+  var out = [];
+  if (artist && album) out.push(artist + " " + album);
+  if (artist) out.push(artist);
+  if (!artist && title) out.push(title);
+  return out;
+}
+
 function runDiscovery(want, format) {
   var ctx = { title: want.title, artist: want.artist, album: want.album, format: format };
-  var q1 = [want.artist, want.album].filter(Boolean).join(" ").trim();
-  var q2 = [want.artist, want.title].filter(Boolean).join(" ").trim();
-  if (!q1 && !q2) return Promise.resolve(null);
+  var queries = discoveryQueries(want);
+  if (!queries.length) return Promise.resolve(null);
   resolveJob = { hashes: {}, startedAt: Date.now() };
   reportPct(resolvePercent("search", 0, 0));
   var searchStep = function (q) {
@@ -5067,16 +5083,16 @@ function runDiscovery(want, format) {
       }
     });
   };
-  return (q1 ? searchStep(q1) : Promise.resolve([]))
-    .then(function (results) {
+  // Walk the ladder until a query yields something worth examining.
+  var trySearch = function (idx) {
+    if (idx >= queries.length) return Promise.resolve([]);
+    return searchStep(queries[idx]).then(function (results) {
       var ranked = rankTier3Candidates(results, ctx);
-      // The album query found nothing usable — the track may only exist as a
-      // single or on a differently-named release.
-      if (ranked.length || !q2 || q2 === q1) return ranked;
-      return searchStep(q2).then(function (more) {
-        return rankTier3Candidates(more, ctx);
-      });
-    })
+      if (ranked.length) return ranked;
+      return trySearch(idx + 1);
+    });
+  };
+  return trySearch(0)
     .then(function (candidates) {
       if (!candidates.length) return null;
       return examineCandidates(candidates, 0, want);
@@ -6217,6 +6233,7 @@ return {
   _isResolveOrphan: isResolveOrphan,
   _pickFileForTrack: pickFileForTrack,
   _pickFileForQuery: pickFileForQuery,
+  _discoveryQueries: discoveryQueries,
   _resolveBudgets: {
     searchMaxMs: RESOLVE_SEARCH_MAX_MS,
     attachAttempts: RESOLVE_ATTACH_ATTEMPTS,
