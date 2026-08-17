@@ -277,7 +277,7 @@ test("the debug tab runs the real stream resolver and narrates each step", async
     for (const action of ["qbt:debug-title", "qbt:debug-artist", "qbt:debug-album"]) {
       assert.ok(nodes.some((n) => n.type === "text-input" && n.action === action), "missing input " + action);
     }
-    for (const action of ["qbt:debug-stream", "qbt:debug-download", "qbt:debug-clear"]) {
+    for (const action of ["qbt:debug-stream", "qbt:debug-stream-fetch", "qbt:debug-download", "qbt:debug-clear"]) {
       assert.ok(nodes.some((n) => n.action === action), "missing button " + action);
     }
     // A miss narrates the decline instead of failing silently.
@@ -300,6 +300,62 @@ test("the debug tab runs the real stream resolver and narrates each step", async
     const after = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
     assert.ok(!after.includes("STREAM resolve"), after);
   });
+});
+
+test("the downloaded-only stream resolver serves a finished file as qbt://", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:tab"]({ tabId: "debug" });
+    // "01 - First.flac" is complete in torrent aaa, whose name carries the
+    // artist — a clean tier-1 hit end to end through the debug runner.
+    handlers["qbt:debug-title"]({ value: "First" });
+    handlers["qbt:debug-artist"]({ value: "Some Artist" });
+    handlers["qbt:debug-stream"]({});
+    // The resolve re-fetches the torrent's file list; give the chain a moment.
+    await new Promise((r) => setTimeout(r, 50));
+    await settle();
+    const texts = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
+    assert.ok(texts.includes("RESULT: qbt://aaa/0"), texts);
+  });
+});
+
+test("fetch & play waits out the download and then answers", async () => {
+  // The file starts incomplete and DESELECTED; the server flips it to done
+  // once the plugin has posted the start — exactly the select-start-wait walk.
+  const holder = { posts: null };
+  const files = () => {
+    const started = !!(holder.posts && holder.posts.some((p) => p.url.includes("/torrents/start") || p.url.includes("/torrents/resume")));
+    return [{ index: 0, name: "01 - First.flac", size: 30 * 1024 * 1024, progress: started ? 1 : 0.2, priority: 0 }];
+  };
+  const torrents = {
+    aaa: {
+      hash: "aaa",
+      name: "Some Artist - Album (1998) [FLAC]",
+      state: "stoppedDL",
+      progress: 0.2,
+      size: 500 * 1024 * 1024,
+      added_on: 200,
+      category: "viboplr",
+    },
+  };
+  await withPlugin(
+    async (ctx) => {
+      holder.posts = ctx.posts;
+      ctx.handlers["qbt:tab"]({ tabId: "debug" });
+      ctx.handlers["qbt:debug-title"]({ value: "First" });
+      ctx.handlers["qbt:debug-artist"]({ value: "Some Artist" });
+      ctx.handlers["qbt:debug-stream-fetch"]({});
+      await new Promise((r) => setTimeout(r, 100));
+      await settle();
+      const texts = walk(last(ctx.views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
+      assert.ok(texts.includes("starting it and waiting"), texts);
+      assert.ok(texts.includes("RESULT: qbt://aaa/0"), texts);
+      // It selected the deselected file and started the paused torrent.
+      assert.ok(ctx.posts.some((p) => p.url.includes("/torrents/filePrio") && p.form.priority === "1"), "file selected");
+      assert.ok(ctx.posts.some((p) => p.url.includes("/torrents/start") || p.url.includes("/torrents/resume")), "torrent started");
+    },
+    undefined,
+    { files, torrents }
+  );
 });
 
 // --- the unconfigured setup screen -------------------------------------------

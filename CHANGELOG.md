@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.23.0
+
+**Two Source-priority entries instead of one, split by what a play may cost.**
+
+- **qBittorrent (downloaded)** — what shipped before: answers instantly from
+  files your torrents already hold, primes a found-but-undownloaded file, and
+  otherwise declines fast.
+- **qBittorrent (fetch & play)** — new: when an existing torrent HOLDS the
+  track but hasn't downloaded it, this one selects the file, starts the
+  torrent, and **waits for the download** (up to 50 seconds, under the host's
+  hard 60s cap) — then plays it. On a healthy swarm a single track lands well
+  inside that. If time runs out the download keeps running and the entry
+  declines, so the next play is instant.
+
+Order them to taste: *(downloaded)* high — it costs nothing; *(fetch & play)*
+below your other sources, so it only fires when nothing else could play, which
+is exactly when waiting is acceptable. Neither entry searches for NEW torrents
+— adding torrents because a track failed to play would write to your client on
+a trigger you never see; discovery stays on the download path.
+
+The Debug tab gained a matching **Test play (fetch & play)** button.
+
 ## 0.22.1
 
 **The Debug log now names the search string and the target.** Every lookup

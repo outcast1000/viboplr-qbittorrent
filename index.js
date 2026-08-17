@@ -4651,13 +4651,15 @@ function runDebugResolve(kind) {
   debugRunning = true;
   debugStartedAt = Date.now();
   dbg(
-    (kind === "stream" ? "STREAM resolve" : "DOWNLOAD resolve") +
+    (kind === "stream" ? "STREAM resolve" : kind === "stream-fetch" ? "STREAM+FETCH resolve" : "DOWNLOAD resolve") +
       ": title=“" + t + "” artist=“" + a + "” album=“" + al + "”"
   );
   var run =
     kind === "stream"
       ? resolveStreamByMetadata(t, a || null, al || null, null, {})
-      : resolveDownloadByMetadata(t, a || null, al || null, null, "");
+      : kind === "stream-fetch"
+        ? resolveStreamByMetadataFetching(t, a || null, al || null, null, {})
+        : resolveDownloadByMetadata(t, a || null, al || null, null, "");
   run
     .then(function (result) {
       dbg(
@@ -4692,7 +4694,8 @@ function debugTabNodes() {
       type: "layout",
       direction: "horizontal",
       children: [
-        { type: "button", label: "Test play (stream)", action: "qbt:debug-stream", variant: "accent", disabled: debugRunning },
+        { type: "button", label: "Test play (downloaded)", action: "qbt:debug-stream", variant: "accent", disabled: debugRunning },
+        { type: "button", label: "Test play (fetch & play)", action: "qbt:debug-stream-fetch", variant: "secondary", disabled: debugRunning },
         { type: "button", label: "Test download (tiers 1–3)", action: "qbt:debug-download", variant: "secondary", disabled: debugRunning },
         { type: "button", label: "Clear log", action: "qbt:debug-clear", variant: "secondary", disabled: debugRunning || !debugLog.length }
       ]
@@ -4810,68 +4813,124 @@ function primeFoundFile(hash, file) {
     });
 }
 
-// The handler itself, named so the Debug tab can run it directly and narrate.
-function resolveStreamByMetadata(title, artistName, albumName, durationSecs, opts) {
+// TWO Source-priority entries share this core, split by what they may cost:
+//
+// - "qBittorrent (downloaded)" (mayFetch=false) answers only from files that
+//   are already here — instant or decline, with a found-but-missing file
+//   primed for next time.
+// - "qBittorrent (fetch & play)" (mayFetch=true) may WAIT for the download of
+//   a file an existing torrent holds, up to STREAM_FETCH_MAX_MS — safely
+//   under the host's hard 60s cap. Placed low in Source priority it fires
+//   only when nothing else could play, which is exactly when waiting is
+//   acceptable. On timeout or stall the download keeps running (it is a
+//   prime with a head start) and the resolver declines.
+//
+// Neither runs discovery: auto-ADDING torrents because a track failed to play
+// would be a write to the user's client on a trigger they never see. Finding
+// new torrents stays on the download-provider path.
+var STREAM_FETCH_MAX_MS = 50000;
+
+function streamResolveCore(title, artistName, albumName, durationSecs, opts, mayFetch) {
+  var tag = mayFetch ? "stream+fetch:" : "stream:";
   // Every decline must be FAST — this fires for every track no other source
   // could play, and a slow "no" here drags the whole app's playback.
   if (!connected || !baseUrl) {
-    dbg("stream: not connected to qBittorrent — decline");
+    dbg(tag + " not connected to qBittorrent — decline");
     return Promise.resolve(null);
   }
   if (!filesAreReachable()) {
-    dbg("stream: qBittorrent's files aren't reachable on this machine — decline");
+    dbg(tag + " qBittorrent's files aren't reachable on this machine — decline");
     return Promise.resolve(null);
   }
   var want = wantFromArgs(title, artistName, albumName, durationSecs);
-  dbgCacheTarget("stream:", want);
+  dbgCacheTarget(tag, want);
   var best = findTrackInTorrents(want, torrents, fileNamesByHash);
   if (!best) {
-    dbg("stream: [local cache] no match — decline");
+    dbg(tag + " [local cache] no match — decline");
     return Promise.resolve(null);
   }
   var t = torrents[best.hash];
-  dbg("stream: [local cache] matched “" + best.name + "” in “" + ((t && t.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
+  dbg(tag + " [local cache] matched “" + best.name + "” in “" + ((t && t.name) || best.hash) + "” (score " + best.score.toFixed(2) + ")");
+
+  var answer = function (file) {
+    return verifyMatchByTags(torrents[best.hash] || t, file, want).then(function (verdict) {
+      dbg(tag + " tag check — " + verdict);
+      if (verdict === "contradict") return null;
+      // Our own scheme: the host recurses into the qbt:// by-URI resolver,
+      // which owns path mapping and source-panel attribution already.
+      var result = { url: qbtUri(best.hash, file.index), label: "qBittorrent" };
+      if (opts && opts.preferVideo) result.video = mediaKindOf(file.name) === "video";
+      dbg(tag + " answering " + result.url);
+      return result;
+    });
+  };
+
   // One request to learn the file's REAL index and progress — the name cache
   // holds neither, and the position in it is not the qBittorrent index.
   return fetchFilesQuiet(best.hash)
     .then(function (files) {
       var file = locateFileByName(files, best.name);
       if (!file) {
-        dbg("stream: the matched file is no longer in the torrent — decline");
+        dbg(tag + " the matched file is no longer in the torrent — decline");
         return null;
       }
-      if (numOr(file.progress, 0) < 1) {
-        // The torrent HOLDS it but hasn't downloaded it. Torrents can't
-        // answer in stream-resolve time, so start the file (setting only)
-        // and decline — the next source plays it now, this one next time.
+      if (numOr(file.progress, 0) >= 1) return answer(file);
+
+      if (!mayFetch) {
+        // The torrent HOLDS it but hasn't downloaded it. This entry can't
+        // wait, so start the file (setting only) and decline — the next
+        // source plays it now, this one next time.
         dbg(
-          "stream: file is only " + Math.round(numOr(file.progress, 0) * 100) + "% downloaded — " +
+          tag + " file is only " + Math.round(numOr(file.progress, 0) * 100) + "% downloaded — " +
             (autoFetchFound ? "priming its download and declining" : "auto-fetch is off, declining")
         );
         if (autoFetchFound) primeFoundFile(best.hash, file);
         return null;
       }
-      return verifyMatchByTags(t, file, want).then(function (verdict) {
-        dbg("stream: tag check — " + verdict);
-        if (verdict === "contradict") return null;
-        // Our own scheme: the host recurses into the qbt:// by-URI resolver,
-        // which owns path mapping and source-panel attribution already.
-        var result = { url: qbtUri(best.hash, file.index), label: "qBittorrent" };
-        if (opts && opts.preferVideo) result.video = mediaKindOf(file.name) === "video";
-        dbg("stream: answering " + result.url);
-        return result;
-      });
+
+      // Fetch & play: select the file, start the torrent, and wait it out
+      // inside the stream budget.
+      dbg(
+        tag + " file is " + Math.round(numOr(file.progress, 0) * 100) + "% here — starting it and waiting up to " +
+          Math.round(STREAM_FETCH_MAX_MS / 1000) + "s"
+      );
+      var dbgTick = dbgEvery10(tag + " downloading —");
+      var ensureWanted = numOr(file.priority, 1) === 0 ? postFilePriority(best.hash, [file.index], 1) : Promise.resolve();
+      return ensureWanted
+        .then(function () {
+          return isPaused(t) ? postAction(startEndpoint(), [best.hash], "Starting the torrent") : null;
+        })
+        .then(function () {
+          return waitForFileDownload(best.hash, file.index, dbgTick, { maxMs: STREAM_FETCH_MAX_MS });
+        })
+        .then(answer)
+        .catch(function (e) {
+          // Timeout or stall: leave the download running — it is a prime with
+          // a head start, and the next play of this track is a tier-1 hit.
+          dbg(tag + " " + errText(e) + " — the download keeps running, decline");
+          return null;
+        });
     })
     .catch(function (e) {
       console.error("qBittorrent: stream resolve failed:", e);
-      dbg("stream: failed — " + errText(e));
+      dbg(tag + " failed — " + errText(e));
       return null;
     });
+}
+
+// The handlers themselves, named so the Debug tab can run them directly.
+function resolveStreamByMetadata(title, artistName, albumName, durationSecs, opts) {
+  return streamResolveCore(title, artistName, albumName, durationSecs, opts, false);
+}
+
+function resolveStreamByMetadataFetching(title, artistName, albumName, durationSecs, opts) {
+  return streamResolveCore(title, artistName, albumName, durationSecs, opts, true);
 }
 
 function registerMetadataStreamResolver() {
   if (!api.playback || typeof api.playback.onStreamResolve !== "function") return;
   api.playback.onStreamResolve("qbt-stream", resolveStreamByMetadata);
+  api.playback.onStreamResolve("qbt-stream-fetch", resolveStreamByMetadataFetching);
 }
 
 // --- Download provider: tiers 1–2 --------------------------------------------
@@ -4904,7 +4963,8 @@ function downloadResultFor(torrent, file) {
 // patience, and the caller decides what to do with the corpse.
 var FILE_WAIT_POLL_MS = 2000;
 
-function waitForFileDownload(hash, fileIndex, onProgress) {
+function waitForFileDownload(hash, fileIndex, onProgress, waitOpts) {
+  var maxMs = (waitOpts && waitOpts.maxMs) || RESOLVE_MAX_MS;
   var startedAt = Date.now();
   var stall = { bytes: -1, at: Date.now() };
   var step = function () {
@@ -4924,7 +4984,7 @@ function waitForFileDownload(hash, fileIndex, onProgress) {
       if (progress >= 1) return file;
       if (onProgress) onProgress(progress);
       var now = Date.now();
-      if (now - startedAt > RESOLVE_MAX_MS) throw new Error("The download didn't finish in time");
+      if (now - startedAt > maxMs) throw new Error("The download didn't finish in time");
       var bytes = Math.floor(progress * numOr(file.size, 0));
       var check = detectResolveStall(stall, bytes, now, RESOLVE_STALL_MS);
       stall = check.next;
@@ -6230,6 +6290,9 @@ function registerActions() {
   });
   api.ui.onAction("qbt:debug-stream", function () {
     runDebugResolve("stream");
+  });
+  api.ui.onAction("qbt:debug-stream-fetch", function () {
+    runDebugResolve("stream-fetch");
   });
   api.ui.onAction("qbt:debug-download", function () {
     runDebugResolve("download");

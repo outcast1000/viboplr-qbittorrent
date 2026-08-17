@@ -357,10 +357,22 @@ claiming nothing was found.
 
 ## Playing and downloading ANY track from torrents
 
-The plugin registers with Viboplr as a **stream source** (Settings → Streaming →
-Source priority, entry “qBittorrent”) and as a **download provider** — so a track
-from anywhere in the app (library, playlist, another plugin's search results)
-can be served out of your torrents. Three tiers, cheapest first:
+The plugin registers with Viboplr as **two stream sources** (Settings →
+Streaming → Source priority) and as a **download provider** — so a track from
+anywhere in the app (library, playlist, another plugin's search results) can be
+served out of your torrents.
+
+The two Source-priority entries split by what a play may cost:
+
+- **qBittorrent (downloaded)** answers instantly from files already here, and
+  otherwise declines fast — put it high, it costs nothing.
+- **qBittorrent (fetch & play)** may **wait for the download** (up to 50s) of a
+  file an existing torrent holds, then play it — put it *below* your other
+  sources, so it fires only when nothing else could play, which is exactly when
+  waiting is acceptable. If time runs out, the download keeps running and the
+  next play is instant.
+
+Underneath, three tiers, cheapest first:
 
 1. **Already downloaded.** The track is matched against every file your
    torrents hold (the same persistent name cache the list filter uses), the
