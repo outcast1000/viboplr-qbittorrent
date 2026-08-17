@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.24.0
+
+**"Fetch & play" now goes and finds the torrent too.** 0.23.0's second
+Source-priority entry only waited for files that existing torrents already
+held — on a track in no torrent it declined exactly like the instant entry,
+which made the two look identical. Now a cache miss on the fetch & play entry
+triggers the full **discovery pipeline** (search → score → examine → download
+one file, same engine, same janitor, same keep-seeding disposition), raced
+against the 50-second stream budget:
+
+- On a fast swarm a single track occasionally lands inside the budget and
+  plays right then.
+- Usually the budget wins: the entry declines so your next source plays the
+  track NOW, the discovery job runs to its bounded end in the background, a
+  notification announces the arrival, and the next play comes from the
+  torrent.
+- Replaying the track while its search is still running does not enqueue a
+  second copy of the same job.
+
+Gated on the existing *Search torrents for downloads* setting — enabling that
+plus the fetch & play entry is the consent for adding torrents on a play. The
+instant *(downloaded)* entry is untouched: it never writes anything.
+
 ## 0.23.0
 
 **Two Source-priority entries instead of one, split by what a play may cost.**

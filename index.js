@@ -4825,10 +4825,67 @@ function primeFoundFile(hash, file) {
 //   acceptable. On timeout or stall the download keeps running (it is a
 //   prime with a head start) and the resolver declines.
 //
-// Neither runs discovery: auto-ADDING torrents because a track failed to play
-// would be a write to the user's client on a trigger they never see. Finding
-// new torrents stays on the download-provider path.
+// (fetch & play) ALSO runs discovery when no existing torrent has the track —
+// enabling that entry plus the "Search torrents for downloads" setting is the
+// consent for adding torrents on a play. The job is raced against the stream
+// budget: a fast swarm occasionally lands a single track inside it, and when
+// it doesn't, the resolver declines while the job runs to its bounded end in
+// the background — the next source plays the track today, the torrent serves
+// it next time, and a notification says so when the file arrives.
 var STREAM_FETCH_MAX_MS = 50000;
+
+// One background discovery per track, keyed by artist+title — replaying a
+// track that declined must not enqueue the same search again while the first
+// is still working.
+var backgroundDiscovery = {};
+
+function streamDiscoveryRace(tag, want) {
+  var key = normalizeForMatch(String(want.artist || "") + " " + String(want.title || ""));
+  if (backgroundDiscovery[key]) {
+    dbg(tag + " discovery for this track is already running — decline");
+    return Promise.resolve(null);
+  }
+  backgroundDiscovery[key] = true;
+  dbg(tag + " [local cache] no match — starting discovery, racing it against the " + Math.round(STREAM_FETCH_MAX_MS / 1000) + "s budget");
+  var job = discoverAndFetch(want, "")
+    .catch(function (e) {
+      console.error("qBittorrent: play-triggered discovery failed:", e);
+      return null;
+    })
+    .then(function (r) {
+      delete backgroundDiscovery[key];
+      return r;
+    });
+  return new Promise(function (resolve) {
+    var answered = false;
+    var timer = setTimeout(function () {
+      answered = true;
+      dbg(tag + " budget spent — discovery keeps running in the background, decline");
+      resolve(null);
+    }, STREAM_FETCH_MAX_MS);
+    job.then(function (r) {
+      if (!answered) {
+        clearTimeout(timer);
+        answered = true;
+        if (r && r.url) {
+          dbg(tag + " discovery finished inside the budget — answering " + r.url);
+          // A file:// URL is a legal stream answer; the host classifies it.
+          resolve({ url: r.url, label: "qBittorrent", sourceUrl: r.url });
+        } else {
+          dbg(tag + " discovery found nothing — decline");
+          resolve(null);
+        }
+        return;
+      }
+      // The play has long moved on — say what arrived, or the download the
+      // user implicitly ordered finishes invisibly.
+      if (r && r.url) {
+        var got = (r.metadata && r.metadata.title) || want.title;
+        api.ui.showNotification("Fetched “" + got + "” from a torrent — it will play from there next time");
+      }
+    });
+  });
+}
 
 function streamResolveCore(title, artistName, albumName, durationSecs, opts, mayFetch) {
   var tag = mayFetch ? "stream+fetch:" : "stream:";
@@ -4846,7 +4903,9 @@ function streamResolveCore(title, artistName, albumName, durationSecs, opts, may
   dbgCacheTarget(tag, want);
   var best = findTrackInTorrents(want, torrents, fileNamesByHash);
   if (!best) {
-    dbg(tag + " [local cache] no match — decline");
+    // (fetch & play) goes and FINDS one; the instant entry just declines.
+    if (mayFetch && discoveryEnabled) return streamDiscoveryRace(tag, want);
+    dbg(tag + " [local cache] no match — decline" + (mayFetch ? " (discovery is off in settings)" : ""));
     return Promise.resolve(null);
   }
   var t = torrents[best.hash];

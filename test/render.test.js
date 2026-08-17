@@ -302,6 +302,29 @@ test("the debug tab runs the real stream resolver and narrates each step", async
   });
 });
 
+test("fetch & play runs discovery on a cache miss; the instant entry never does", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:tab"]({ tabId: "debug" });
+    handlers["qbt:debug-title"]({ value: "No Such Song" });
+    handlers["qbt:debug-artist"]({ value: "Nobody" });
+    // The instant entry declines flat on a miss…
+    handlers["qbt:debug-stream"]({});
+    await settle();
+    let texts = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
+    assert.ok(texts.includes("stream: [local cache] no match — decline"), texts);
+    assert.ok(!texts.includes("discovery"), texts);
+    // …while fetch & play goes searching (the harness has no search plugins,
+    // so the race settles immediately on "found nothing").
+    handlers["qbt:debug-clear"]({});
+    handlers["qbt:debug-stream-fetch"]({});
+    await new Promise((r) => setTimeout(r, 50));
+    await settle();
+    texts = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
+    assert.ok(texts.includes("starting discovery, racing it against the 50s budget"), texts);
+    assert.ok(texts.includes("discovery found nothing — decline"), texts);
+  });
+});
+
 test("the downloaded-only stream resolver serves a finished file as qbt://", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:tab"]({ tabId: "debug" });

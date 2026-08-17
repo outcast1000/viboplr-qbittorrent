@@ -366,11 +366,15 @@ The two Source-priority entries split by what a play may cost:
 
 - **qBittorrent (downloaded)** answers instantly from files already here, and
   otherwise declines fast — put it high, it costs nothing.
-- **qBittorrent (fetch & play)** may **wait for the download** (up to 50s) of a
-  file an existing torrent holds, then play it — put it *below* your other
-  sources, so it fires only when nothing else could play, which is exactly when
-  waiting is acceptable. If time runs out, the download keeps running and the
-  next play is instant.
+- **qBittorrent (fetch & play)** may **download to answer**: a file an existing
+  torrent holds is selected, started and waited out (up to 50s); a track in no
+  torrent at all triggers the full **discovery** pipeline (search → score →
+  examine → fetch one file), raced against the same budget. When time runs out
+  the work keeps going in the background — the next source plays the track
+  today, a notification announces the arrival, and the next play comes from the
+  torrent. Put this entry *below* your other sources, so it fires only when
+  nothing else could play; enabling it (plus *Search torrents for downloads*)
+  is the consent for it to add torrents on a play.
 
 Underneath, three tiers, cheapest first:
 
