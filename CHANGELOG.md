@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.20.0
+
+**The files a search finds are now rows, not a clause in a subtitle.**
+
+0.19.0 found files inside torrents but reported them as *matches "07 -
+Jóga.flac" +2 more* squeezed into the front of an already-long torrent
+subtitle — one filename shown, the rest hidden, and all of it the first thing
+ellipsis ate on a narrow window.
+
+- **A "Matching files" list renders under the torrents**: one row per found
+  file — basename as the title, folder and torrent underneath, the file's
+  media glyph over the torrent's progress badge. Clicking a row opens its
+  torrent with the contents already narrowed to the matching files.
+- **The torrent row keeps only the count** (*matches 3 files*) — it still
+  explains why a torrent whose name says nothing is in the filtered list, and
+  the naming now happens where there is room to read it.
+- **Capped honestly.** A torrent matching an entire discography shows its
+  first 5 with a *"+N more — open it to see them all"* row, the list tops out
+  at 100 rows, and when that cap cuts anything the view says so instead of
+  letting a truncated list read as the whole answer. The header carries the
+  true total either way.
+
 ## 0.19.0
 
 **The torrent list has a filter box, and it searches *inside* torrents.**

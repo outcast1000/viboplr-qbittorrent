@@ -84,17 +84,79 @@ test("all terms must match, across a name or within one file", () => {
   assert.equal(matchingNames(NAMES.h2, "sigur joga").length, 0);
 });
 
-test("the match note names one file, counts the rest", () => {
-  assert.equal(note(["CD1/07 - Bjork - Joga.flac"]), "matches “07 - Bjork - Joga.flac”");
-  assert.equal(
-    note(["A/one.flac", "A/two.flac", "A/three.flac"]),
-    "matches 3 files — “one.flac” +2 more"
-  );
+test("the match note counts; the files list below does the naming", () => {
+  assert.equal(note(["CD1/07 - Bjork - Joga.flac"]), "matches 1 file");
+  assert.equal(note(["A/one.flac", "A/two.flac", "A/three.flac"]), "matches 3 files");
 });
 
 test("the row leads its subtitle with the match note", () => {
   const r = row(T.comp, ["CD1/07 - Bjork - Joga (Chill Edit).flac"]);
-  assert.ok(r.subtitle.startsWith("matches “07 - Bjork - Joga (Chill Edit).flac”"));
+  assert.ok(r.subtitle.startsWith("matches 1 file"));
   // And without matches the row is exactly what it always was.
   assert.ok(!row(T.comp).subtitle.includes("matches"));
+});
+
+// --- The "Matching files" list -----------------------------------------------
+
+const matchItems = plugin._fileMatchItems;
+
+function entry(torrent, files) {
+  return { torrent, fileMatches: files };
+}
+
+test("every found file becomes a readable row of its own", () => {
+  const r = matchItems([
+    entry(T.comp, ["CD1/07 - Bjork - Joga (Chill Edit).flac", "CD1/08 - Sigur Ros - Svefn.flac"]),
+  ]);
+  assert.equal(r.rows.length, 2);
+  assert.equal(r.total, 2);
+  assert.equal(r.shown, 2);
+  assert.equal(r.overflow, false);
+  // Basename as the title; folder and torrent in the subtitle.
+  assert.equal(r.rows[0].title, "07 - Bjork - Joga (Chill Edit).flac");
+  assert.ok(r.rows[0].subtitle.includes("CD1"));
+  assert.ok(r.rows[0].subtitle.includes("VA - Nordic Chill Compilation"));
+  // The hash rides in the id so the click can find its torrent.
+  assert.equal(r.rows[0].id, "qbtm:h2:0");
+  assert.equal(r.rows[0].action, "qbt:open-match");
+});
+
+test("name-matched torrents contribute no file rows", () => {
+  const r = matchItems([entry(T.bjork, []), entry(T.comp, ["CD1/07 - Joga.flac"])]);
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0].id, "qbtm:h2:0");
+});
+
+test("a torrent with many matches is capped with a '+N more' row", () => {
+  const files = [];
+  for (let i = 0; i < 9; i++) files.push("Disc/" + (i + 1) + ".flac");
+  const r = matchItems([entry(T.comp, files)]);
+  // 5 real rows plus the stand-in.
+  assert.equal(r.rows.length, 6);
+  assert.equal(r.shown, 5);
+  assert.equal(r.total, 9);
+  const more = r.rows[5];
+  assert.equal(more.id, "qbtm:h2:more");
+  assert.ok(more.title.startsWith("+4 more"));
+  // Per-torrent capping is represented, so it is not an overflow.
+  assert.equal(r.overflow, false);
+});
+
+test("the total cap cuts the list and says so via overflow", () => {
+  // 30 torrents × 4 matches = 120 file rows wanted, cap is 100.
+  const entries = [];
+  for (let i = 0; i < 30; i++) {
+    entries.push(entry({ hash: "t" + i, name: "Torrent " + i, size: 1, state: "stalledUP" },
+      ["a.flac", "b.flac", "c.flac", "d.flac"]));
+  }
+  const r = matchItems(entries);
+  assert.equal(r.rows.length, 100);
+  assert.equal(r.shown, 100);
+  assert.equal(r.total, 120);
+  assert.equal(r.overflow, true);
+});
+
+test("a file straight in the torrent root has no folder prefix", () => {
+  const r = matchItems([entry(T.comp, ["single.flac"])]);
+  assert.ok(r.rows[0].subtitle.startsWith("in “"));
 });

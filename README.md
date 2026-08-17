@@ -90,8 +90,12 @@ The filter box above the list matches as you type, space-separated terms all of
 which must appear. It searches **torrent names and the file paths inside
 them** — so `jóga flac` finds the compilation whose release name never says
 Björk, and a folder name like `live` finds every release carrying one. A
-torrent pulled in by its files says why on its row (*matches "07 - Jóga.flac"
-+2 more*), and opening it lands on the contents already narrowed to those files.
+torrent pulled in by its files says why on its row (*matches 3 files*), and the
+files themselves appear as a **"Matching files" list under the torrents** — one
+row per found file, with its folder and torrent named underneath. Clicking a
+match (or the torrent) opens the contents already narrowed to the matching
+files. A torrent matching dozens of files shows its first five plus a *"+N
+more"* row; the list caps at 100 rows and says when the cap cut anything.
 
 The file lists come from a cache that fills itself. The list already fetches
 each torrent's files once to print its file count; the names are kept, stored

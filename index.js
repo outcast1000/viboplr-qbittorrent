@@ -905,13 +905,12 @@ function filterTorrentList(list, query, namesByHash) {
   return { shown: shown, unchecked: unchecked };
 }
 
-// Why a torrent whose name says nothing is in the filtered list. One file is
-// named; more are named-and-counted — pasting a dozen paths into a subtitle
-// helps nobody, and the click-through opens the contents already filtered.
+// Why a torrent whose name says nothing is in the filtered list. Just a count:
+// the files themselves get real rows in the "Matching files" list below, where
+// they are readable — a filename crammed into this subtitle was the first thing
+// ellipsis ate, and with several matches it named one and hid the rest.
 function fileMatchNote(names) {
-  var first = baseName(names[0] || "");
-  if (names.length === 1) return "matches “" + first + "”";
-  return "matches " + names.length + " files — “" + first + "” +" + (names.length - 1) + " more";
+  return "matches " + (names.length === 1 ? "1 file" : names.length + " files");
 }
 
 // The files the contents panel is currently SHOWING. The single source of truth
@@ -3107,6 +3106,74 @@ function torrentRow(t, fileMatches) {
   };
 }
 
+// The "Matching files" list under the filtered torrents: the files the search
+// FOUND, as rows of their own. The torrent row can only say "matches 3 files";
+// this is where the three are readable — basename as the title, folder and
+// torrent underneath, the file's media glyph over the torrent's progress badge
+// (per-file progress isn't in the name cache, and the torrent's is the honest
+// approximation the badge colour already encodes).
+//
+// Capped twice. Per torrent, because "flac" matches an entire discography and
+// forty rows of one release bury every other result — the "+N more" row stands
+// in and opens the torrent like any other. And in total, because the renderer
+// will happily draw 5000 rows and nobody will read them; the caller prints the
+// remainder so truncation never masquerades as completeness.
+var MATCH_ROWS_PER_TORRENT = 5;
+var MATCH_ROWS_TOTAL = 100;
+
+function fileMatchItems(entries) {
+  var rows = [];
+  var shown = 0; // matches with a row of their own (the "+N more" rows aren't)
+  var total = 0; // every match found, shown or not
+  // True only when the TOTAL cap cut something. The per-torrent cap leaves a
+  // "+N more" row behind, so it needs no extra apology.
+  var overflow = false;
+  var all = entries || [];
+  for (var i = 0; i < all.length; i++) {
+    var t = all[i].torrent;
+    var m = all[i].fileMatches || [];
+    if (!m.length) continue;
+    total += m.length;
+    if (rows.length >= MATCH_ROWS_TOTAL) {
+      overflow = true;
+      continue;
+    }
+    var torrentName = t.name || magnetDisplayName(t.magnet_uri) || t.hash;
+    var pending = needsChoice(t);
+    var cap = Math.min(m.length, MATCH_ROWS_PER_TORRENT);
+    for (var j = 0; j < cap; j++) {
+      if (rows.length >= MATCH_ROWS_TOTAL) {
+        overflow = true;
+        break;
+      }
+      var folder = folderSegments(m[j]).join(" / ");
+      rows.push({
+        id: "qbtm:" + t.hash + ":" + j,
+        title: baseName(m[j]),
+        subtitle: (folder ? folder + "  ·  " : "") + "in “" + torrentName + "”",
+        imageUrl: tileIcon(mediaKindOf(m[j]) || "unknown", pending ? "0%" : torrentPercent(t), progressBand(t, pending)),
+        action: "qbt:open-match"
+      });
+      shown++;
+    }
+    if (m.length > cap) {
+      if (rows.length < MATCH_ROWS_TOTAL) {
+        rows.push({
+          id: "qbtm:" + t.hash + ":more",
+          title: "+" + (m.length - cap) + " more " + (m.length - cap === 1 ? "match" : "matches"),
+          subtitle: "in “" + torrentName + "” — open it to see them all",
+          imageUrl: torrentIconFor(t, pending),
+          action: "qbt:open-match"
+        });
+      } else {
+        // Matches left with no row at all — not even a "+N more" to stand in.
+        overflow = true;
+      }
+    }
+  }
+  return { rows: rows, shown: shown, total: total, overflow: overflow };
+}
+
 // The facts the Info tab prints, as label/value pairs. Pure and exported, so
 // the set can be asserted without rendering: it is the one place a field is
 // silently dropped by a typo in a property name.
@@ -3674,6 +3741,29 @@ function render() {
     });
   }
 
+  // The files the filter FOUND, as rows of their own under the torrents. The
+  // torrent rows above only count their matches; this is where a match is
+  // readable, and clicking one opens its torrent narrowed to the matching
+  // files. Not selectable: the toolbar above acts on torrents, and a second
+  // selection scope under the same toolbar would make "Stop all" ambiguous.
+  var matches = fileMatchItems(filtered.shown);
+  if (matches.rows.length) {
+    children.push({
+      type: "text",
+      content: "Matching files (" + matches.total + ")",
+      className: "muted"
+    });
+    children.push({ type: "track-row-list", items: matches.rows });
+    if (matches.overflow) {
+      children.push({
+        type: "text",
+        className: "muted",
+        content:
+          "Only the first " + matches.shown + " are listed here — narrow the search, or open a torrent to see its matches."
+      });
+    }
+  }
+
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: activeTab });
 }
 
@@ -4119,6 +4209,30 @@ function stopPolling() {
 function hashOf(data) {
   var list = hashesOf(data);
   return list.length ? list[0] : null;
+}
+
+// Open one torrent's contents — the shared tail of clicking a torrent row and
+// clicking a row in the "Matching files" list.
+//
+// Arriving from a list filter that matched this torrent's FILES: open the
+// contents already narrowed to them — the torrent row's "matches N files" note
+// and the match rows both promise exactly that. Only when the torrent's own
+// name did NOT match (a name match means the user wants the torrent, not three
+// files of it), and only when they have never typed a files filter for this
+// torrent — the host input's stateKey memory would replay their text over
+// ours, leaving the box and the list disagreeing.
+function openTorrentContents(hash) {
+  expandedHash = hash;
+  var q = String(listFilter).trim();
+  if (q && fileFilters[hash] === undefined) {
+    var t = torrents[hash];
+    var names = fileNamesByHash[hash];
+    if (t && names && !matchesFilter(t.name || "", q) && matchingNames(names, q).length) {
+      fileFilters[hash] = q;
+    }
+  }
+  render();
+  ensureFiles(hash);
 }
 
 // Torrent actions now arrive from two shapes: the contents panel's buttons send
@@ -4615,25 +4729,16 @@ function registerActions() {
     // One at a time: the contents panel replaces the list, so a multi-row
     // selection opens the first of them rather than nothing at all.
     var hash = hashOf(data);
-    if (!hash) return;
-    expandedHash = hash;
-    // Arriving from a list filter that matched this torrent's FILES: open the
-    // contents already narrowed to them — the row's "matches …" note promised
-    // exactly that. Only when the torrent's own name did NOT match (a name
-    // match means the user wants the torrent, not three files of it), and only
-    // when they have never typed a files filter for this torrent — the host
-    // input's stateKey memory would replay their text over ours, leaving the
-    // box and the list disagreeing.
-    var q = String(listFilter).trim();
-    if (q && fileFilters[hash] === undefined) {
-      var t = torrents[hash];
-      var names = fileNamesByHash[hash];
-      if (t && names && !matchesFilter(t.name || "", q) && matchingNames(names, q).length) {
-        fileFilters[hash] = q;
-      }
-    }
-    render();
-    ensureFiles(hash);
+    if (hash) openTorrentContents(hash);
+  });
+
+  // A row in the "Matching files" list. The hash rides in the row id — the
+  // plain row list reports only `itemId`, and a torrent hash is hex so the
+  // colon framing cannot appear inside it.
+  api.ui.onAction("qbt:open-match", function (data) {
+    var id = String((data && data.itemId) || "");
+    var m = /^qbtm:([^:]+):/.exec(id);
+    if (m && torrents[m[1]]) openTorrentContents(m[1]);
   });
 
   api.ui.onAction("qbt:detail-tab", function (data) {
@@ -4959,6 +5064,7 @@ return {
   _matchingNames: matchingNames,
   _filterTorrentList: filterTorrentList,
   _fileMatchNote: fileMatchNote,
+  _fileMatchItems: fileMatchItems,
   _selectionSummary: selectionSummary,
   _formatAge: formatAge,
   _formatDuration: formatDuration,
