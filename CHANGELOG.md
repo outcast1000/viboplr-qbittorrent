@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.21.0
+
+**Any track in the app can now be served from your torrents.**
+
+The plugin registers with Viboplr as a **stream source** ("qBittorrent" in
+Settings → Streaming → Source priority) and as a **download provider**. Three
+tiers, cheapest first:
+
+- **Already downloaded** — the track is matched against every file your
+  torrents hold (the same persistent name cache the list filter uses),
+  verified against the file's own tags when readable, and plays instantly.
+- **Held but not downloaded** — a *play* can't wait for a swarm, so the file is
+  selected and its torrent started while the play falls through to your next
+  source; the torrent serves it next time (the *Fetch found tracks
+  automatically* setting). A *download* does wait, with live progress in the
+  download modal.
+- **In no torrent at all** — a download searches qBittorrent's search plugins
+  ("artist album", then "artist title"), scores results — seeders are a floor,
+  not the ranking: format keywords weighted by your preferred format, size
+  sanity, single albums over discographies — and examines up to three
+  candidates by adding them **paused** and reading their file lists. The winner
+  downloads **just the one file**; every rejected candidate is removed on the
+  spot, and a janitor sweeps anything a crashed job left behind.
+
+**Matching is precision-first, because a wrong match plays the wrong song.**
+A title alone never qualifies — the artist or album must appear in the file
+path, the torrent name, or the tags; matching folds diacritics (Jóga finds
+Joga) and strips remaster/feat. noise; a duration 30 seconds off is a
+different recording; and a file whose tags contradict the request is rejected
+even after it downloaded.
+
+**The winning torrent keeps seeding by default** — safe for private-tracker
+ratios, and the rest of that release becomes an instant local hit. The *After
+a searched download finishes* setting can instead import the file and remove
+the torrent, or remove the torrent and keep the file.
+
+Also: an interactive picker (the download modal's search) lists candidate
+torrents with size, seeders and source, and downloading a picked torrent runs
+through the same select-one-file pipeline. The stream resolver declines fast
+when qBittorrent is unreachable or its files aren't on this machine — it fires
+for every track no other source could play, and hanging there would drag the
+whole app.
+
 ## 0.20.0
 
 **The files a search finds are now rows, not a clause in a subtitle.**

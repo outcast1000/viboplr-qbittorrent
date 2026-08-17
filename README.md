@@ -355,14 +355,58 @@ If qBittorrent has no search plugins enabled, the tab says so and tells you wher
 to add them (qBittorrent → View → Search Engine → Search plugins) rather than
 claiming nothing was found.
 
+## Playing and downloading ANY track from torrents
+
+The plugin registers with Viboplr as a **stream source** (Settings → Streaming →
+Source priority, entry “qBittorrent”) and as a **download provider** — so a track
+from anywhere in the app (library, playlist, another plugin's search results)
+can be served out of your torrents. Three tiers, cheapest first:
+
+1. **Already downloaded.** The track is matched against every file your
+   torrents hold (the same persistent name cache the list filter uses), the
+   match is verified against the file's own tags when they can be read, and it
+   plays instantly — straight off the disk.
+2. **In a torrent, not downloaded.** Playing it can't wait for a swarm, so with
+   *Fetch found tracks automatically* on, the file is selected and its torrent
+   started — the play falls through to your next source (say, yt-dlp) today,
+   and the torrent serves it tomorrow. A *download* of such a track does wait:
+   the file is selected, the torrent started, and the download modal tracks it
+   to completion.
+3. **In no torrent at all.** With *Search torrents for downloads* on, a
+   download for the track searches qBittorrent's search plugins (“artist
+   album”, falling back to “artist title”), scores the results — seeders are a
+   floor, not the ranking: format keywords weighted by your preferred format,
+   size sanity, single albums over discographies — and examines up to three
+   candidates by adding them **paused**, fetching their file lists, and looking
+   for the exact track. The winner downloads **just that file**; every rejected
+   candidate is removed on the spot.
+
+**Matching is precision-first.** A wrong match plays the wrong song, so a title
+match alone is never enough — the artist or the album has to appear in the file
+path, the torrent name, or the file's tags, matching is diacritics-folded
+(Jóga finds Joga), and a file whose tags or duration contradict the request is
+rejected even after it downloaded.
+
+**What happens to the winning torrent** is the *After a searched download
+finishes* setting: **keep it seeding** (default — safe for private-tracker
+ratios, and the rest of that release becomes instantly playable), import the
+files and remove the torrent, or remove the torrent and keep the file. Torrents
+added only for examination never linger: a janitor sweeps anything the resolver
+left behind (a crash, a plugin reload) after ten minutes.
+
+Two requirements, both checked before any work starts: the torrents' files must
+be **reachable on this machine** (local qBittorrent, or the path mapping set),
+and tier 3 needs **search plugins installed in qBittorrent** — without them the
+resolver declines and says so once.
+
 ## Not here yet
 
 Planned: RSS auto-download rules for artists you follow, and playing a file
 while it's still downloading.
 
 This plugin controls a torrent client. It ships no indexers and no content, and
-searching (when it lands) will use whatever search plugins you have installed in
-qBittorrent itself.
+searching uses whatever search plugins you have installed in qBittorrent
+itself.
 
 ## Development
 

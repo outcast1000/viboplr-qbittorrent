@@ -1,7 +1,7 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, choose what downloads, watch progress, and play or import finished files. Requires qBittorrent 5.2.3+ and an API key.",
   "minAppVersion": "1.0.27",
@@ -29,9 +29,29 @@
     {
       "api": "collections.resync",
       "reason": "Rescan your library when a download finishes inside it"
+    },
+    {
+      "api": "playback.onStreamResolve",
+      "reason": "Play any track straight from a file your torrents already hold"
+    },
+    {
+      "api": "downloads.onResolveByMetadata",
+      "reason": "Download a track by finding it in your torrents — or, if enabled, by searching for a torrent that has it"
     }
   ],
   "contributes": {
+    "streamResolvers": [
+      {
+        "id": "qbt-stream",
+        "name": "qBittorrent"
+      }
+    ],
+    "downloadProviders": [
+      {
+        "id": "qbt-download",
+        "name": "qBittorrent"
+      }
+    ],
     "sidebarItems": [
       {
         "id": "qbittorrent",

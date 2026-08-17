@@ -90,6 +90,19 @@ var destCollectionId = "";
 var autoImport = true;
 // Add torrents paused so their contents can be chosen before anything downloads.
 var chooseFilesFirst = false;
+// When a play request matches a file a torrent HOLDS but hasn't downloaded,
+// quietly start that file downloading (the play itself falls through to the
+// next source — torrents can't answer in stream-resolve time).
+var autoFetchFound = true;
+// Let the download provider go and FIND a torrent (search, examine, fetch)
+// when no existing torrent has the track.
+var discoveryEnabled = true;
+// What happens to a torrent the discovery engine downloaded, once its file is
+// delivered: "seed" keeps it (safe for private-tracker ratios, and the rest of
+// the album becomes instantly playable), "import" copies the file into the
+// library flow and removes the torrent, "remove" drops the torrent but keeps
+// the file on disk.
+var tier3Disposition = "seed";
 
 // Draft settings — what the settings panel's inputs currently hold. Kept apart
 // from the live values so a half-typed password never reaches storage and never
@@ -913,6 +926,139 @@ function fileMatchNote(names) {
   return "matches " + (names.length === 1 ? "1 file" : names.length + " files");
 }
 
+// --- Metadata matching (the stream / download resolver) ----------------------
+//
+// The resolver answers "play/download THIS song" with a file out of a torrent,
+// and a false positive plays the WRONG song — strictly worse than declining.
+// So the matcher is built for precision: normalized token containment, a hard
+// corroboration requirement (a title alone never clears the threshold; artist
+// or album evidence must exist somewhere in the path, the torrent name, or the
+// file's tags), and a duration veto when both sides know their length.
+
+// Case-folded, diacritics-folded (Jóga == Joga), with release qualifiers
+// stripped — "(Remastered 2015)" and "feat. …" say how a file was cut, not
+// which song it is. Letters outside Latin (Greek, Cyrillic) are kept as-is:
+// NFD only decomposes what has a decomposition.
+function normalizeForMatch(s) {
+  var out = String(s == null ? "" : s).toLowerCase();
+  // Older webviews without String.normalize just skip the fold — the match
+  // gets stricter, never wronger.
+  if (typeof out.normalize === "function") {
+    out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+  out = out.replace(
+    /[([][^)\]]*(remaster|deluxe|edition|version|mono|stereo|live|demo|bonus|anniversary|reissue|explicit|remix)[^)\]]*[)\]]/g,
+    " "
+  );
+  out = out.replace(/\b(feat|ft|featuring)\.?\s.+$/g, " ");
+  out = out.replace(/[^a-z0-9\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff]+/g, " ");
+  return out.replace(/\s+/g, " ").trim();
+}
+
+// Every token of `needle`, as a whole word, somewhere in the normalized `hay`.
+// Whole words so "One" doesn't hide inside "Someone".
+function containsAllTokens(hayNorm, needle) {
+  var n = normalizeForMatch(needle);
+  if (!n) return false;
+  var hay = " " + hayNorm + " ";
+  var toks = n.split(" ");
+  for (var i = 0; i < toks.length; i++) {
+    if (hay.indexOf(" " + toks[i] + " ") === -1) return false;
+  }
+  return true;
+}
+
+var MATCH_THRESHOLD = 0.7;
+
+// Score one file against the wanted track. `cand` = { fileName, torrentName,
+// tags?: {title, artist, album}, durationSecs? }; `want` = { title, artist?,
+// album?, durationSecs? }. Returns 0..1; only >= MATCH_THRESHOLD is a match.
+function titleMatchScore(cand, want) {
+  if (!want || !want.title) return 0;
+  var base = normalizeForMatch(baseName((cand && cand.fileName) || ""));
+  var path = normalizeForMatch((cand && cand.fileName) || "");
+  var torrent = normalizeForMatch((cand && cand.torrentName) || "");
+  var tags = (cand && cand.tags) || null;
+  var tagTitle = tags ? normalizeForMatch(tags.title) : "";
+  var tagArtist = tags ? normalizeForMatch(tags.artist) : "";
+  var tagAlbum = tags ? normalizeForMatch(tags.album) : "";
+
+  // Title evidence, best source first: an exact tag title, a contained tag
+  // title, the filename.
+  var wantTitleNorm = normalizeForMatch(want.title);
+  var titleHit =
+    tagTitle && tagTitle === wantTitleNorm
+      ? 1
+      : tagTitle && containsAllTokens(tagTitle, want.title)
+        ? 0.9
+        : containsAllTokens(base, want.title)
+          ? 0.8
+          : 0;
+  if (!titleHit) return 0;
+
+  // Corroboration: the artist or the album, ANYWHERE around the file.
+  var artistEv =
+    !!want.artist &&
+    (containsAllTokens(path, want.artist) ||
+      containsAllTokens(torrent, want.artist) ||
+      (!!tagArtist && containsAllTokens(tagArtist, want.artist)));
+  var albumEv =
+    !!want.album &&
+    (containsAllTokens(path, want.album) ||
+      containsAllTokens(torrent, want.album) ||
+      (!!tagAlbum && containsAllTokens(tagAlbum, want.album)));
+  // Title alone caps at half its weight — deliberately below the threshold.
+  if (!artistEv && !albumEv) return titleHit * 0.5;
+
+  var score = titleHit * 0.7 + 0.2 + (artistEv && albumEv ? 0.05 : 0);
+
+  // Duration: the one signal that can't be fooled by a name. Both known and
+  // 30s apart = a different recording, whatever the words say.
+  if (want.durationSecs > 0 && cand.durationSecs > 0) {
+    var d = Math.abs(cand.durationSecs - want.durationSecs);
+    if (d > 30) return 0;
+    if (d <= 5) score += 0.1;
+  }
+  return Math.min(1, score);
+}
+
+// The tier-1/2 entry point: is the wanted track already inside ANY torrent?
+// Scans the persistent name cache (namesByHash), scoring only audio/video
+// files, and returns the best { hash, name, score } at or above the threshold
+// — or null. The caller re-fetches that torrent's parsed file list to get the
+// file's REAL index and progress; the position in the name cache is not
+// trusted for that.
+function findTrackInTorrents(want, torrentsMap, namesByHash) {
+  var best = null;
+  var byHash = namesByHash || {};
+  for (var hash in byHash) {
+    if (!Object.prototype.hasOwnProperty.call(byHash, hash)) continue;
+    var t = (torrentsMap || {})[hash];
+    if (!t) continue; // cache entry for a torrent the server no longer has
+    var names = byHash[hash] || [];
+    for (var i = 0; i < names.length; i++) {
+      if (!mediaKindOf(names[i])) continue;
+      var score = titleMatchScore({ fileName: names[i], torrentName: t.name || "" }, want);
+      if (score < MATCH_THRESHOLD) continue;
+      if (!best || score > best.score) best = { hash: hash, name: names[i], score: score };
+    }
+  }
+  return best;
+}
+
+// A late tag read can settle a match for good — or expose it. "contradict"
+// means the file SAYS what it is and it isn't the wanted song; "unknown" means
+// the tags are silent and the name-based score stands.
+function confirmByTags(tags, want) {
+  if (!tags || !want) return "unknown";
+  var tagTitle = normalizeForMatch(tags.title);
+  if (!tagTitle) return "unknown";
+  if (containsAllTokens(tagTitle, want.title) || containsAllTokens(normalizeForMatch(want.title), tags.title)) {
+    return "confirm";
+  }
+  return "contradict";
+}
+
 // The files the contents panel is currently SHOWING. The single source of truth
 // for both the list and the Download toolbar above it — the buttons act on what
 // you can see, so a button labelled "Audio (3)" must be reading the same three
@@ -1597,6 +1743,9 @@ function refresh() {
       // Torrents added while a list filter is active join the burst here —
       // and a reconnection resumes one the disconnect stalled.
       pumpNameBurst();
+      // Remove leftovers of discovery jobs that never finished (plugin reload
+      // or host crash mid-examine strands a paused torrent otherwise).
+      sweepResolveOrphans();
       refreshOpenFiles();
       return handleCompletions(visibleTorrents()).catch(function (e) {
         console.error("qBittorrent: handling completions failed:", e);
@@ -1721,15 +1870,18 @@ function matchAddedTorrent(knownBefore, expectedHash, nameHint) {
 }
 
 // The same matching, retried while qBittorrent gets around to registering it.
-function waitForAddedTorrent(knownBefore, expectedHash, nameHint, attempt) {
+// `maxAttempts` lets a background caller give up sooner than the interactive
+// default — a dead indexer link isn't worth 25 seconds of a resolve budget.
+function waitForAddedTorrent(knownBefore, expectedHash, nameHint, attempt, maxAttempts) {
   var tries = attempt || 0;
+  var cap = maxAttempts || ATTACH_ATTEMPTS;
   var hash = matchAddedTorrent(knownBefore, expectedHash, nameHint);
   if (hash) return Promise.resolve(hash);
-  if (tries >= ATTACH_ATTEMPTS) return Promise.resolve(null);
+  if (tries >= cap) return Promise.resolve(null);
   return delay(ATTACH_POLL_MS)
     .then(refresh)
     .then(function () {
-      return waitForAddedTorrent(knownBefore, expectedHash, nameHint, tries + 1);
+      return waitForAddedTorrent(knownBefore, expectedHash, nameHint, tries + 1, cap);
     });
 }
 
@@ -1856,34 +2008,57 @@ function waitForMetadata(hash, elapsed) {
   });
 }
 
+// waitForMetadata for a torrent NO USER is looking at: same start-a-paused-
+// magnet-to-fetch-metadata dance (metaDL moves no file data), but quiet — no
+// pendingSelection gate, no notifications, no fetchFiles, no armPeek, no
+// render. Resolves { ok, gone } so the caller can tell "timed out" from
+// "someone removed it".
+function waitForMetadataQuiet(hash, opts) {
+  var maxMs = (opts && opts.maxMs) || METADATA_MAX_MS;
+  var onTick = (opts && opts.onTick) || null;
+  var step = function (elapsed, startedByUs) {
+    return refresh().then(function () {
+      var t = torrents[hash];
+      if (!t) return { ok: false, gone: true };
+      if (hasMetadata(t)) {
+        // Put it back to stopped if we started it — nothing may download
+        // before the caller has decided anything.
+        var settle = startedByUs && !isPaused(t)
+          ? postAction(stopEndpoint(), [hash], "Pausing after the file list arrived")
+          : Promise.resolve();
+        return settle.then(function () {
+          return { ok: true, gone: false };
+        });
+      }
+      if (elapsed >= maxMs) return { ok: false, gone: false };
+      if (onTick) onTick(elapsed);
+      var mustStart = isPaused(t) && !startedByUs;
+      var kick = mustStart
+        ? postAction(startEndpoint(), [hash], "Fetching the file list")
+        : Promise.resolve();
+      return kick
+        .then(function () {
+          return delay(METADATA_POLL_MS);
+        })
+        .then(function () {
+          return step(elapsed + METADATA_POLL_MS, startedByUs || mustStart);
+        });
+    });
+  };
+  return step(0, false);
+}
+
 function delay(ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
   });
 }
 
-// `opts.peek` forces the paused-and-choose flow for this one add, whatever the
-// setting says. It backs "View contents": qBittorrent has no way to read a
-// torrent's file list WITHOUT adding it — metadata comes from the swarm or the
-// .torrent itself — so looking inside means adding it paused and offering an
-// easy way back out.
-function addTorrent(source, opts) {
-  var uri = String(source || "").trim();
-  var peek = !!(opts && opts.peek);
-  var holdForSelection = peek || chooseFilesFirst;
-  // What the thing is called, for matching it once qBittorrent has it. The
-  // search result knows; a magnet carries it as dn.
-  var nameHint = (opts && opts.name) || magnetDisplayName(source) || "";
-  // The search plugin that produced this result. Indexers routinely return a
-  // DESCRIPTION PAGE as the download link, and only their own plugin knows how
-  // to turn that into a .torrent — qBittorrent does the resolving, but only if
-  // told which plugin to use. Without it, it fetches the HTML, fails to bdecode
-  // it, and discards it, having already answered "Ok." to the add.
-  var downloader = (opts && opts.downloader) || "";
-  if (!looksLikeTorrentSource(uri)) {
-    api.ui.showNotification("That doesn't look like a magnet link or a .torrent URL");
-    return Promise.resolve();
-  }
+// The wire half of an add: build the form, POST it, and turn qBittorrent's
+// "Fails." into a real error. No notifications, no tab change, no selection
+// flow — the interactive addTorrent() and the metadata resolver both sit on
+// top of this.
+function addTorrentRaw(uri, opts) {
   var form = {
     urls: uri,
     // Sequential + first/last piece priority are what make a partially
@@ -1892,23 +2067,14 @@ function addTorrent(source, opts) {
     sequentialDownload: "true",
     firstLastPiecePrio: "true"
   };
-  if (holdForSelection) {
+  if (opts && opts.paused) {
     // Both spellings: 5.0 renamed paused -> stopped, and qBittorrent ignores a
     // form field it doesn't know, so this needs no version branch.
     form.paused = "true";
     form.stopped = "true";
   }
-  if (holdForSelection) {
-    preparingAdd = true;
-    preparingElapsed = 0;
-    render();
-  }
-  var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
-  // The plain add verifies its own outcome, so it needs the same snapshot.
-  var plainBefore = holdForSelection ? null : shallowHashSet(torrents);
-  var expectedHash = holdForSelection ? magnetHash(uri) : null;
   if (category) form.category = category;
-  if (downloader) form.downloader = downloader;
+  if (opts && opts.downloader) form.downloader = opts.downloader;
   // Saving into a collection folder is what makes the finished download reach
   // the library at all — without it the files land somewhere the app never
   // scans. The path sent is the one qBittorrent understands, so a mapping is
@@ -1933,6 +2099,44 @@ function addTorrent(source, opts) {
           "qBittorrent refused it. The link may have expired, the save folder may not be writable, or it may already be in the list."
         );
       }
+      return null;
+    });
+}
+
+// `opts.peek` forces the paused-and-choose flow for this one add, whatever the
+// setting says. It backs "View contents": qBittorrent has no way to read a
+// torrent's file list WITHOUT adding it — metadata comes from the swarm or the
+// .torrent itself — so looking inside means adding it paused and offering an
+// easy way back out.
+function addTorrent(source, opts) {
+  var uri = String(source || "").trim();
+  var peek = !!(opts && opts.peek);
+  var holdForSelection = peek || chooseFilesFirst;
+  // What the thing is called, for matching it once qBittorrent has it. The
+  // search result knows; a magnet carries it as dn.
+  var nameHint = (opts && opts.name) || magnetDisplayName(source) || "";
+  // The search plugin that produced this result. Indexers routinely return a
+  // DESCRIPTION PAGE as the download link, and only their own plugin knows how
+  // to turn that into a .torrent — qBittorrent does the resolving, but only if
+  // told which plugin to use. Without it, it fetches the HTML, fails to bdecode
+  // it, and discards it, having already answered "Ok." to the add.
+  var downloader = (opts && opts.downloader) || "";
+  if (!looksLikeTorrentSource(uri)) {
+    api.ui.showNotification("That doesn't look like a magnet link or a .torrent URL");
+    return Promise.resolve();
+  }
+  if (holdForSelection) {
+    preparingAdd = true;
+    preparingElapsed = 0;
+    render();
+  }
+  var knownBefore = holdForSelection ? shallowHashSet(torrents) : null;
+  // The plain add verifies its own outcome, so it needs the same snapshot.
+  var plainBefore = holdForSelection ? null : shallowHashSet(torrents);
+  var expectedHash = holdForSelection ? magnetHash(uri) : null;
+
+  return addTorrentRaw(uri, { paused: holdForSelection, downloader: downloader })
+    .then(function () {
       var name = magnetDisplayName(uri);
       api.ui.showNotification(
         peek
@@ -1970,15 +2174,24 @@ function addTorrent(source, opts) {
     });
 }
 
+// The quiet wire half of actOn(): POST an action at a set of hashes and
+// nothing else — no busy state, no notification, no refresh. Failures
+// propagate to the caller. Background flows (the metadata resolver) use this
+// so their housekeeping never flashes the list or talks over a working view.
+function postAction(path, hashes, label) {
+  var list = [].concat(hashes || []);
+  if (!list.length) return Promise.resolve();
+  return authed(path, { method: "POST", form: { hashes: list.join("|") } }).then(function (resp) {
+    expectOk(resp, label);
+  });
+}
+
 function actOn(path, hashes, label) {
   var list = [].concat(hashes || []);
   if (!list.length) return Promise.resolve();
   busy = list.length === 1 ? list[0] : "*";
   render();
-  return authed(path, { method: "POST", form: { hashes: list.join("|") } })
-    .then(function (resp) {
-      expectOk(resp, label);
-    })
+  return postAction(path, list, label)
     .catch(function (e) {
       console.error("qBittorrent: " + label + " failed:", e);
       api.ui.showNotification(label + " failed: " + errText(e));
@@ -2091,13 +2304,18 @@ function runSearch(query) {
     });
 }
 
+// One page of a search job's results — shared by the Search tab's poll loop
+// and the headless collector below.
+function readSearchResultsPage(id, limit) {
+  return authed("/search/results?id=" + encodeURIComponent(id) + "&limit=" + limit).then(function (resp) {
+    expectOk(resp, "Reading search results");
+    return resp.json();
+  });
+}
+
 function pollSearch(id, gen, elapsed) {
   if (gen !== searchGen) return Promise.resolve();
-  return authed("/search/results?id=" + encodeURIComponent(id) + "&limit=" + SEARCH_LIMIT)
-    .then(function (resp) {
-      expectOk(resp, "Reading search results");
-      return resp.json();
-    })
+  return readSearchResultsPage(id, SEARCH_LIMIT)
     .then(function (data) {
       if (gen !== searchGen) return null;
       searchResults = sortSearchResults((data && data.results) || []);
@@ -2126,6 +2344,64 @@ function pollSearch(id, gen, elapsed) {
       render();
       return disposeSearch(id);
     });
+}
+
+// A headless search: start a job, poll it to completion, dispose of it, return
+// the raw results. It owns its OWN job id and never touches searchGen /
+// searchResults / searchRunning — qBittorrent supports concurrent search jobs,
+// so the Search tab is unaffected even if the user runs a search mid-collect.
+// Throws Error("no-plugins") exactly like runSearch when qBittorrent has no
+// search plugins to ask.
+var headlessSearchJobId = null; // disposed on deactivate, like the tab's job
+
+function collectSearchResults(pattern, opts) {
+  var q = String(pattern || "").trim();
+  if (!q) return Promise.resolve([]);
+  var maxMs = (opts && opts.maxMs) || SEARCH_MAX_MS;
+  var onTick = (opts && opts.onTick) || null;
+  var jobId = null;
+  var run = (searchPlugins === null ? loadSearchPlugins() : Promise.resolve(searchPlugins))
+    .then(function (plugins) {
+      if (!plugins.length) throw new Error("no-plugins");
+      return authed("/search/start", {
+        method: "POST",
+        form: { pattern: q, plugins: "enabled", category: "all" }
+      });
+    })
+    .then(function (resp) {
+      expectOk(resp, "Starting the search");
+      return resp.json();
+    })
+    .then(function (job) {
+      jobId = job && job.id;
+      headlessSearchJobId = jobId;
+      var step = function (elapsed) {
+        return readSearchResultsPage(jobId, SEARCH_LIMIT).then(function (data) {
+          var results = (data && data.results) || [];
+          if (onTick) onTick(results.length, elapsed);
+          if (String((data && data.status) || "") !== "Running" || elapsed >= maxMs) return results;
+          return delay(SEARCH_POLL_MS).then(function () {
+            return step(elapsed + SEARCH_POLL_MS);
+          });
+        });
+      };
+      return step(0);
+    });
+  // Dispose on BOTH exits — a finished job holds server resources either way.
+  return run.then(
+    function (results) {
+      if (headlessSearchJobId === jobId) headlessSearchJobId = null;
+      return disposeSearch(jobId).then(function () {
+        return results;
+      });
+    },
+    function (e) {
+      if (headlessSearchJobId === jobId) headlessSearchJobId = null;
+      return disposeSearch(jobId).then(function () {
+        throw e;
+      });
+    }
+  );
 }
 
 // Stop a running search, keeping whatever came back.
@@ -2527,6 +2803,23 @@ function setFilePriority(hash, indices, priority) {
 function ensureFiles(hash) {
   if (filesByHash[hash]) return Promise.resolve(filesByHash[hash]);
   return fetchFiles(hash);
+}
+
+// One torrent's parsed file list, quietly: no spinner, no notification, no
+// filesByHash write (a background caller must not race the contents panel's
+// own cache), failures propagated. Feeds the name cache as a side effect —
+// examined torrents warm the cross-torrent search for free.
+function fetchFilesQuiet(hash) {
+  return authed("/torrents/files?hash=" + encodeURIComponent(hash))
+    .then(function (resp) {
+      expectOk(resp, "Reading the torrent's files");
+      return resp.json();
+    })
+    .then(function (list) {
+      var files = parseFileList(list);
+      rememberFileNames(hash, files);
+      return files;
+    });
 }
 
 // The torrents list endpoint does NOT report how many files a torrent holds, so
@@ -3802,7 +4095,10 @@ function currentDraft() {
       pathMapTo: pathMapTo,
       destCollectionId: destCollectionId,
       autoImport: autoImport,
-      chooseFilesFirst: chooseFilesFirst
+      chooseFilesFirst: chooseFilesFirst,
+      autoFetchFound: autoFetchFound,
+      discoveryEnabled: discoveryEnabled,
+      tier3Disposition: tier3Disposition
     };
   }
   return draft;
@@ -3984,6 +4280,40 @@ function settingsTree(d, destOptions, status, statusChildren) {
           },
           {
             type: "settings-row",
+            label: "Fetch found tracks automatically",
+            description:
+              "When a track you play matches a file one of your torrents holds but hasn't downloaded, start that file " +
+              "downloading. The play itself falls through to the next source — the torrent serves it once it's here.",
+            control: { type: "toggle", label: "", action: "qbt:set-auto-fetch", checked: !!d.autoFetchFound }
+          },
+          {
+            type: "settings-row",
+            label: "Search torrents for downloads",
+            description:
+              "When you download a track no existing torrent has, search qBittorrent's search plugins for a torrent that " +
+              "does, pick the best-fitting release, and download just that file. Torrents examined and rejected are removed automatically.",
+            control: { type: "toggle", label: "", action: "qbt:set-discovery", checked: !!d.discoveryEnabled }
+          },
+          {
+            type: "settings-row",
+            label: "After a searched download finishes",
+            description:
+              "What happens to the torrent that delivered the track. Keeping it seeding is the safe default — it protects " +
+              "private-tracker ratios, and the rest of that release becomes instantly playable.",
+            control: {
+              type: "select",
+              label: "",
+              action: "qbt:set-disposition",
+              value: d.tier3Disposition || "seed",
+              options: [
+                { value: "seed", label: "Keep it seeding" },
+                { value: "import", label: "Import the files, remove the torrent" },
+                { value: "remove", label: "Remove the torrent, keep the file" }
+              ]
+            }
+          },
+          {
+            type: "settings-row",
             label: "Their download folder",
             description: "Only needed when qBittorrent runs on another machine. The path IT saves to, e.g. /downloads.",
             control: { type: "text-input", placeholder: "/downloads", action: "qbt:set-map-from", value: d.pathMapFrom }
@@ -4043,6 +4373,9 @@ function loadSettings() {
       destCollectionId = s.destCollectionId == null ? "" : String(s.destCollectionId);
       autoImport = s.autoImport !== false;
       chooseFilesFirst = !!s.chooseFilesFirst;
+      autoFetchFound = s.autoFetchFound !== false;
+      discoveryEnabled = s.discoveryEnabled !== false;
+      tier3Disposition = s.tier3Disposition === "import" || s.tier3Disposition === "remove" ? s.tier3Disposition : "seed";
       previousCategory = s.previousCategory || "";
       draft = null;
     })
@@ -4068,6 +4401,9 @@ function persistSettings() {
       destCollectionId: destCollectionId,
       autoImport: autoImport,
       chooseFilesFirst: chooseFilesFirst,
+      autoFetchFound: autoFetchFound,
+      discoveryEnabled: discoveryEnabled,
+      tier3Disposition: tier3Disposition,
       previousCategory: previousCategory
     })
     .catch(function (e) {
@@ -4093,6 +4429,9 @@ function saveSettings() {
   destCollectionId = d.destCollectionId == null ? "" : String(d.destCollectionId);
   autoImport = !!d.autoImport;
   chooseFilesFirst = !!d.chooseFilesFirst;
+  autoFetchFound = !!d.autoFetchFound;
+  discoveryEnabled = !!d.discoveryEnabled;
+  tier3Disposition = d.tier3Disposition === "import" || d.tier3Disposition === "remove" ? d.tier3Disposition : "seed";
 
   // Any of these can invalidate the session (a new host, new credentials, a
   // different TLS stance), so drop it rather than discovering that on the next
@@ -4259,6 +4598,779 @@ function hashesOf(data) {
 // Resolve qbt://<hash>/<index> to the file on disk. The host slices off exactly
 // "file://" and hands the rest to mpv, so the path goes back RAW — no percent
 // encoding, forward slashes on every platform.
+// ---------------------------------------------------------------------------
+// Metadata resolver — serve ANY track from torrents
+// ---------------------------------------------------------------------------
+//
+// Two host surfaces, deliberately different in what they're allowed to cost:
+//
+// - The STREAM resolver ("qBittorrent" in Settings → Streaming → Source
+//   priority) fires on every unplayable track in the app, has a hard 60s cap,
+//   and has no progress channel — so it answers ONLY from what torrents
+//   already hold, and declines fast. A found-but-undownloaded file is primed
+//   (started) and still declined, so the next source plays it today and the
+//   torrent serves it tomorrow.
+// - The DOWNLOAD provider may work for minutes: the host's 60s timeout is
+//   idle-based and every reportProgress() resets it. Tiers 2 (wait for a file
+//   the torrent holds) and 3 (go find a torrent) live here.
+
+// Progress to the host's download modal. Best-effort by design: the host may
+// have abandoned the resolve, and a throw here must not kill a working job.
+function reportPct(percent) {
+  if (api && api.downloads && typeof api.downloads.reportProgress === "function") {
+    try {
+      api.downloads.reportProgress({ percent: Math.max(0, Math.min(100, Math.round(percent))) });
+    } catch (e) {
+      // Progress is decoration on the resolve, never the resolve itself.
+    }
+  }
+}
+
+function locateFileByName(files, name) {
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].name === name) return list[i];
+  }
+  return null;
+}
+
+function wantFromArgs(title, artistName, albumName, durationSecs) {
+  return {
+    title: String(title || ""),
+    artist: artistName == null ? "" : String(artistName),
+    album: albumName == null ? "" : String(albumName),
+    durationSecs: numOr(durationSecs, 0)
+  };
+}
+
+// Tier-1 verification by the file's own tags, when they can be read. Only a
+// CONTRADICTION blocks — silent tags leave the name-based match standing.
+// The duration check rides along: tags carry the real length, and 30s apart
+// is a different recording whatever the filename says.
+function verifyMatchByTags(torrent, file, want) {
+  if (!canReadTags() || !filesAreReachable() || numOr(file.progress, 0) < 1) {
+    return Promise.resolve("unknown");
+  }
+  return readTagsForFiles(torrent, [file]).then(function () {
+    var tags = tagsFor(torrent, file);
+    if (tags && want.durationSecs > 0 && numOr(tags.duration_secs, 0) > 0) {
+      if (Math.abs(tags.duration_secs - want.durationSecs) > 30) return "contradict";
+    }
+    return confirmByTags(tags, want);
+  });
+}
+
+// --- Stream resolver (tier 1 + prime) ----------------------------------------
+
+// Torrents already primed this session, so replaying a track that is mid-
+// download doesn't restack priorities and re-toast on every attempt.
+var primedFetches = {};
+
+function primeFoundFile(hash, file) {
+  if (primedFetches[hash + ":" + file.index]) return;
+  primedFetches[hash + ":" + file.index] = true;
+  var t = torrents[hash];
+  var name = (t && t.name) || "torrent";
+  var ensureWanted = numOr(file.priority, 1) === 0 ? postFilePriority(hash, [file.index], 1) : Promise.resolve();
+  ensureWanted
+    .then(function () {
+      return t && isPaused(t) ? postAction(startEndpoint(), [hash], "Starting the torrent") : null;
+    })
+    .then(function () {
+      api.ui.showNotification("That song is in “" + name + "” — downloading it now so it can play from the torrent next time");
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not start the found file's download:", e);
+      // Let a failed prime be retried on the next play.
+      delete primedFetches[hash + ":" + file.index];
+    });
+}
+
+function registerMetadataStreamResolver() {
+  if (!api.playback || typeof api.playback.onStreamResolve !== "function") return;
+  api.playback.onStreamResolve("qbt-stream", function (title, artistName, albumName, durationSecs, opts) {
+    // Every decline must be FAST — this fires for every track no other source
+    // could play, and a slow "no" here drags the whole app's playback.
+    if (!connected || !baseUrl) return Promise.resolve(null);
+    if (!filesAreReachable()) return Promise.resolve(null);
+    var want = wantFromArgs(title, artistName, albumName, durationSecs);
+    var best = findTrackInTorrents(want, torrents, fileNamesByHash);
+    if (!best) return Promise.resolve(null);
+    var t = torrents[best.hash];
+    // One request to learn the file's REAL index and progress — the name cache
+    // holds neither, and the position in it is not the qBittorrent index.
+    return fetchFilesQuiet(best.hash)
+      .then(function (files) {
+        var file = locateFileByName(files, best.name);
+        if (!file) return null;
+        if (numOr(file.progress, 0) < 1) {
+          // The torrent HOLDS it but hasn't downloaded it. Torrents can't
+          // answer in stream-resolve time, so start the file (setting only)
+          // and decline — the next source plays it now, this one next time.
+          if (autoFetchFound) primeFoundFile(best.hash, file);
+          return null;
+        }
+        return verifyMatchByTags(t, file, want).then(function (verdict) {
+          if (verdict === "contradict") return null;
+          // Our own scheme: the host recurses into the qbt:// by-URI resolver,
+          // which owns path mapping and source-panel attribution already.
+          var result = { url: qbtUri(best.hash, file.index), label: "qBittorrent" };
+          if (opts && opts.preferVideo) result.video = mediaKindOf(file.name) === "video";
+          return result;
+        });
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: stream resolve failed:", e);
+        return null;
+      });
+  });
+}
+
+// --- Download provider: tiers 1–2 --------------------------------------------
+
+function extOf(name) {
+  var m = /\.([A-Za-z0-9]{1,5})$/.exec(String(name || ""));
+  return m ? m[1].toLowerCase() : null;
+}
+
+function downloadResultFor(torrent, file) {
+  var path = localPathFor(torrent, file);
+  if (!path) throw new Error("qBittorrent didn't report where it saved this torrent");
+  var track = mergeFileTrack(torrent, file, tagsFor(torrent, file));
+  return {
+    url: "file://" + path,
+    headers: null,
+    ext: extOf(file.name),
+    metadata: {
+      title: track.title,
+      artist: track.artist_name,
+      album: track.album_title,
+      trackNumber: track.track_number
+    }
+  };
+}
+
+// Poll one file until it is fully here. Progress feeds the modal AND resets
+// the host's idle timeout; the stall guard is ours — a swarm that stops
+// delivering bytes for two minutes is not going to finish inside anyone's
+// patience, and the caller decides what to do with the corpse.
+var FILE_WAIT_POLL_MS = 2000;
+
+function waitForFileDownload(hash, fileIndex, onProgress) {
+  var startedAt = Date.now();
+  var stall = { bytes: -1, at: Date.now() };
+  var step = function () {
+    return fetchFilesQuiet(hash).then(function (files) {
+      var file = null;
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].index === fileIndex) {
+          file = files[i];
+          break;
+        }
+      }
+      if (!file) throw new Error("That file is no longer in the torrent");
+      var t = torrents[hash];
+      if (!t) throw new Error("That torrent is no longer in qBittorrent");
+      if (isErrored(t)) throw new Error("qBittorrent reports the torrent as errored");
+      var progress = numOr(file.progress, 0);
+      if (progress >= 1) return file;
+      if (onProgress) onProgress(progress);
+      var now = Date.now();
+      if (now - startedAt > RESOLVE_MAX_MS) throw new Error("The download didn't finish in time");
+      var bytes = Math.floor(progress * numOr(file.size, 0));
+      var check = detectResolveStall(stall, bytes, now, RESOLVE_STALL_MS);
+      stall = check.next;
+      if (check.stalled) throw new Error("The download stalled — no data arrived for " + Math.round(RESOLVE_STALL_MS / 60000) + " minutes");
+      return refresh().then(function () {
+        return delay(FILE_WAIT_POLL_MS).then(step);
+      });
+    });
+  };
+  return step();
+}
+
+// Tier 1/2: the wanted track is in an EXISTING torrent. Serve it if it is
+// here; select-and-wait if it isn't.
+function fetchExistingMatch(best, want) {
+  var t = torrents[best.hash];
+  if (!t) return Promise.resolve(null);
+  return fetchFilesQuiet(best.hash).then(function (files) {
+    var file = locateFileByName(files, best.name);
+    if (!file) return null;
+    if (numOr(file.progress, 0) >= 1) {
+      return verifyMatchByTags(t, file, want).then(function (verdict) {
+        if (verdict === "contradict") return null;
+        reportPct(100);
+        return downloadResultFor(t, file);
+      });
+    }
+    // Tier 2. The file may be deselected (priority 0) — wanting to download it
+    // IS the selection now.
+    reportPct(5);
+    var ensureWanted = numOr(file.priority, 1) === 0 ? postFilePriority(best.hash, [file.index], 1) : Promise.resolve();
+    return ensureWanted
+      .then(function () {
+        return isPaused(t) ? postAction(startEndpoint(), [best.hash], "Starting the torrent") : null;
+      })
+      .then(function () {
+        return waitForFileDownload(best.hash, file.index, function (frac) {
+          reportPct(5 + 94 * frac);
+        });
+      })
+      .then(function (done) {
+        var t2 = torrents[best.hash] || t;
+        return verifyMatchByTags(t2, done, want).then(function (verdict) {
+          if (verdict === "contradict") {
+            throw new Error("The downloaded file's tags say it is a different song — not handing it over");
+          }
+          reportPct(100);
+          return downloadResultFor(t2, done);
+        });
+      });
+  });
+}
+
+// --- Tier 3: discovery -------------------------------------------------------
+
+var RESOLVE_SEARCH_MAX_MS = 15000;
+var RESOLVE_ATTACH_ATTEMPTS = 12;
+var RESOLVE_META_MAX_MS = 25000;
+var RESOLVE_MAX_CANDIDATES = 3;
+var RESOLVE_STALL_MS = 120000;
+var RESOLVE_MAX_MS = 900000;
+var RESOLVE_MIN_SIZE = 5 * 1024 * 1024;
+var RESOLVE_MAX_SIZE = 30 * 1024 * 1024 * 1024;
+var ORPHAN_MAX_MS = 10 * 60 * 1000;
+
+// Pure: byte-progress stall arithmetic. `prev` = { bytes, at }; returns the
+// carried state plus the verdict, so callers can't misplace the bookkeeping.
+function detectResolveStall(prev, bytes, nowMs, stallMs) {
+  if (bytes > prev.bytes) return { stalled: false, next: { bytes: bytes, at: nowMs } };
+  return { stalled: nowMs - prev.at >= stallMs, next: prev };
+}
+
+// Pure: the modal's percent for each stage, monotonic 0→100 so the bar never
+// walks backwards. Candidates split the 10–34 band between them.
+function resolvePercent(stage, candidateIndex, frac) {
+  var f = Math.max(0, Math.min(1, numOr(frac, 0)));
+  if (stage === "search") return 2 + 8 * f;
+  if (stage === "candidate") return 10 + numOr(candidateIndex, 0) * 8 + 8 * f;
+  if (stage === "commit") return 35;
+  if (stage === "download") return 35 + 64 * f;
+  return 0;
+}
+
+// Hard filters — everything a candidate must be before scoring even starts.
+// Matching uses the NORMALIZED matcher, not matchesFilter: "Björk" has to find
+// a torrent that spells it "Bjork".
+function filterTier3Candidates(results, ctx) {
+  var out = [];
+  var list = results || [];
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i];
+    if (!r || isPluginNotice(r)) continue;
+    if (!r.fileUrl) continue; // a description page cannot be added
+    if (classifyTorrentMedia(r.fileName) === "video") continue;
+    if (swarmCount(r.nbSeeders) === 0) continue; // dead; unknown (null) passes
+    var size = numOr(r.fileSize, 0);
+    if (size > 0 && (size < RESOLVE_MIN_SIZE || size > RESOLVE_MAX_SIZE)) continue;
+    if (ctx.artist && !containsAllTokens(normalizeForMatch(r.fileName || ""), ctx.artist)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+// Seeders are the availability FLOOR, not the ranking: the top-seeded result
+// is routinely a 128k rip or a 400 GB discography. Format keywords weighted by
+// what the host asked for, size sanity, and a discography demotion do the rest.
+function formatKeywordScore(name, format) {
+  var n = String(name || "");
+  var lossless = /\b(flac|alac|wav|lossless)\b/i.test(n);
+  var cbr320 = /\b320\b/.test(n);
+  var v0 = /\bv0\b/i.test(n);
+  var hiRes = /\b24[\s-]?(bit|96|192)\b/i.test(n);
+  var f = String(format || "").toLowerCase();
+  if (f === "flac" || f === "alac" || f === "wav") {
+    return (lossless ? 12 : 0) + (hiRes ? 4 : 0) + (cbr320 || /\bmp3\b/i.test(n) ? -4 : 0);
+  }
+  if (f === "mp3" || f === "aac" || f === "m4a" || f === "ogg" || f === "opus") {
+    return (cbr320 ? 12 : 0) + (v0 ? 8 : 0) + (lossless ? 2 : 0);
+  }
+  return (lossless ? 6 : 0) + (cbr320 ? 4 : 0);
+}
+
+function scoreSearchCandidate(r, ctx) {
+  var s = 0;
+  var seeds = swarmCount(r.nbSeeders);
+  s += seeds === null ? 2 : Math.min(40, (4 * Math.log(1 + seeds)) / Math.LN2);
+  var nameNorm = normalizeForMatch(r.fileName || "");
+  if (ctx.album && containsAllTokens(nameNorm, ctx.album)) s += 15;
+  if (ctx.title && containsAllTokens(nameNorm, ctx.title)) s += 6;
+  s += formatKeywordScore(r.fileName, ctx.format);
+  var size = numOr(r.fileSize, 0);
+  if (size >= 50 * 1024 * 1024 && size <= 2 * 1024 * 1024 * 1024) s += 8;
+  else if (size > 10 * 1024 * 1024 * 1024) s -= 8;
+  if (/discograph|complete|collection|anthology|box\s?set/i.test(String(r.fileName || ""))) s -= 10;
+  return s;
+}
+
+function rankTier3Candidates(results, ctx) {
+  var viable = filterTier3Candidates(results, ctx);
+  viable.sort(function (a, b) {
+    var d = scoreSearchCandidate(b, ctx) - scoreSearchCandidate(a, ctx);
+    if (d) return d;
+    return numOr(b.nbLeechers, 0) - numOr(a.nbLeechers, 0);
+  });
+  return viable.slice(0, RESOLVE_MAX_CANDIDATES);
+}
+
+// The file inside an examined torrent that IS the wanted track — the same
+// precision matcher tier 1 uses, so a candidate that merely looks like the
+// right release can still be rejected file by file.
+function pickFileForTrack(files, torrentName, want) {
+  var best = null;
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    if (!mediaKindOf(list[i].name)) continue;
+    var score = titleMatchScore({ fileName: list[i].name, torrentName: torrentName }, want);
+    if (score < MATCH_THRESHOLD) continue;
+    if (!best || score > best.score) best = { file: list[i], score: score };
+  }
+  return best ? best.file : null;
+}
+
+// Pure: should the janitor remove this torrent? Only ones WE added (tracked in
+// the orphan map), not owned by a live job, and old enough that no bounded
+// stage can still be working on them.
+function isResolveOrphan(torrent, addedAtMs, nowMs, ownedByLiveJob) {
+  if (!torrent || !addedAtMs || ownedByLiveJob) return false;
+  return nowMs - addedAtMs > ORPHAN_MAX_MS;
+}
+
+// Candidates this plugin added for examination, persisted so a plugin reload
+// or host crash mid-examine can't strand a paused torrent forever. The winner
+// leaves the map the moment its download is started.
+var tier3Orphans = {};
+var ORPHANS_STORAGE_KEY = "tier3Pending";
+
+function trackOrphan(hash) {
+  tier3Orphans[hash] = Date.now();
+  persistOrphans();
+}
+
+function untrackOrphan(hash) {
+  if (!(hash in tier3Orphans)) return;
+  delete tier3Orphans[hash];
+  persistOrphans();
+}
+
+function persistOrphans() {
+  if (!api) return;
+  api.storage.set(ORPHANS_STORAGE_KEY, tier3Orphans).catch(function (e) {
+    console.error("qBittorrent: could not save the examined-torrents list:", e);
+  });
+}
+
+function loadOrphans() {
+  return api.storage
+    .get(ORPHANS_STORAGE_KEY)
+    .then(function (saved) {
+      if (saved && typeof saved === "object") tier3Orphans = saved;
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: could not read the examined-torrents list:", e);
+    });
+}
+
+// Runs from the poll loop: remove leftovers of jobs that never finished.
+function sweepResolveOrphans() {
+  var owned = resolveJob ? resolveJob.hashes : {};
+  var now = Date.now();
+  for (var hash in tier3Orphans) {
+    if (!Object.prototype.hasOwnProperty.call(tier3Orphans, hash)) continue;
+    var t = torrents[hash];
+    if (!t) {
+      // Gone from the server — nothing left to clean.
+      delete tier3Orphans[hash];
+      persistOrphans();
+      continue;
+    }
+    if (isResolveOrphan(t, tier3Orphans[hash], now, !!owned[hash])) {
+      var stranded = hash;
+      untrackOrphan(stranded);
+      deleteTorrents([stranded], true).catch(function (e) {
+        console.error("qBittorrent: could not remove a stranded examined torrent:", e);
+      });
+    }
+  }
+}
+
+// One discovery at a time, FIFO for the next few (an album download fires
+// several resolves at once), a hard no beyond that. A waiter keeps the host's
+// idle timer alive and gives up if the queue doesn't reach it in 5 minutes.
+var resolveJob = null;
+var resolveQueueTail = Promise.resolve();
+var resolveQueueDepth = 0;
+var RESOLVE_QUEUE_MAX = 3;
+var RESOLVE_QUEUE_WAIT_MS = 5 * 60 * 1000;
+
+function enqueueDiscovery(fn) {
+  if (resolveQueueDepth >= RESOLVE_QUEUE_MAX) return Promise.resolve(null);
+  resolveQueueDepth++;
+  var waitedFrom = Date.now();
+  var keepAlive = setInterval(function () {
+    reportPct(1);
+  }, 15000);
+  var turn = resolveQueueTail.then(function () {
+    clearInterval(keepAlive);
+    if (Date.now() - waitedFrom > RESOLVE_QUEUE_WAIT_MS) return null;
+    return fn();
+  });
+  // The chain must survive a failed job, or one bad resolve wedges the queue.
+  resolveQueueTail = turn.catch(function () {
+    return null;
+  });
+  return turn.then(
+    function (r) {
+      resolveQueueDepth--;
+      return r;
+    },
+    function (e) {
+      clearInterval(keepAlive);
+      resolveQueueDepth--;
+      throw e;
+    }
+  );
+}
+
+// Told once per session, not once per failed track of an album.
+var saidNoSearchPlugins = false;
+
+function discoverAndFetch(want, format) {
+  return enqueueDiscovery(function () {
+    return runDiscovery(want, format);
+  });
+}
+
+function runDiscovery(want, format) {
+  var ctx = { title: want.title, artist: want.artist, album: want.album, format: format };
+  var q1 = [want.artist, want.album].filter(Boolean).join(" ").trim();
+  var q2 = [want.artist, want.title].filter(Boolean).join(" ").trim();
+  if (!q1 && !q2) return Promise.resolve(null);
+  resolveJob = { hashes: {}, startedAt: Date.now() };
+  reportPct(resolvePercent("search", 0, 0));
+  var searchStep = function (q) {
+    return collectSearchResults(q, {
+      maxMs: RESOLVE_SEARCH_MAX_MS,
+      onTick: function (count, elapsed) {
+        reportPct(resolvePercent("search", 0, elapsed / RESOLVE_SEARCH_MAX_MS));
+      }
+    });
+  };
+  return (q1 ? searchStep(q1) : Promise.resolve([]))
+    .then(function (results) {
+      var ranked = rankTier3Candidates(results, ctx);
+      // The album query found nothing usable — the track may only exist as a
+      // single or on a differently-named release.
+      if (ranked.length || !q2 || q2 === q1) return ranked;
+      return searchStep(q2).then(function (more) {
+        return rankTier3Candidates(more, ctx);
+      });
+    })
+    .then(function (candidates) {
+      if (!candidates.length) return null;
+      return examineCandidates(candidates, 0, want);
+    })
+    .catch(function (e) {
+      if (String(e && e.message) === "no-plugins") {
+        if (!saidNoSearchPlugins) {
+          saidNoSearchPlugins = true;
+          api.ui.showNotification(
+            "qBittorrent has no search plugins, so tracks can't be found automatically — install some under View → Search Engine in qBittorrent"
+          );
+        }
+        return null;
+      }
+      throw e;
+    })
+    .then(
+      function (r) {
+        resolveJob = null;
+        return r;
+      },
+      function (e) {
+        resolveJob = null;
+        throw e;
+      }
+    );
+}
+
+function examineCandidates(candidates, i, want) {
+  if (i >= candidates.length) return Promise.resolve(null);
+  var r = candidates[i];
+  var addedHash = null;
+  reportPct(resolvePercent("candidate", i, 0));
+  var before = shallowHashSet(torrents);
+  var expected = magnetHash(r.fileUrl);
+  return addTorrentRaw(r.fileUrl, { paused: true, downloader: r.engineName || "" })
+    .then(function () {
+      return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
+    })
+    .then(function (hash) {
+      if (!hash) return null; // dead link — nothing was added, nothing to clean
+      addedHash = hash;
+      if (resolveJob) resolveJob.hashes[hash] = true;
+      trackOrphan(hash);
+      return waitForMetadataQuiet(hash, {
+        maxMs: RESOLVE_META_MAX_MS,
+        onTick: function (elapsed) {
+          reportPct(resolvePercent("candidate", i, 0.2 + (0.6 * elapsed) / RESOLVE_META_MAX_MS));
+        }
+      }).then(function (res) {
+        if (!res.ok) return null;
+        return fetchFilesQuiet(hash).then(function (files) {
+          var t = torrents[hash];
+          var file = pickFileForTrack(files, (t && t.name) || r.fileName || "", want);
+          if (!file) return null;
+          return { hash: hash, files: files, file: file };
+        });
+      });
+    })
+    .catch(function (e) {
+      console.error("qBittorrent: examining a search candidate failed:", e);
+      return null;
+    })
+    .then(function (found) {
+      if (found) return commitCandidate(found, want);
+      // This candidate is a dud — remove what we added and move on.
+      var cleanup = addedHash
+        ? deleteTorrents([addedHash], true).catch(function (e) {
+            console.error("qBittorrent: could not remove an examined torrent:", e);
+          })
+        : Promise.resolve();
+      if (addedHash) untrackOrphan(addedHash);
+      return cleanup.then(function () {
+        return examineCandidates(candidates, i + 1, want);
+      });
+    });
+}
+
+function commitCandidate(found, want) {
+  var hash = found.hash;
+  reportPct(resolvePercent("commit", 0, 0));
+  var all = [];
+  for (var i = 0; i < found.files.length; i++) {
+    if (typeof found.files[i].index === "number") all.push(found.files[i].index);
+  }
+  // Deselect first, start second — the armPeek rule. Starting a torrent whose
+  // files are at their default priority downloads the entire release.
+  return postFilePriority(hash, all, 0)
+    .then(function () {
+      return postFilePriority(hash, [found.file.index], 1);
+    })
+    .then(function () {
+      return postAction(startEndpoint(), [hash], "Starting the download");
+    })
+    .then(function () {
+      // Started on purpose = no longer an orphan; from here it is an ordinary
+      // torrent the user can see, stop, or remove like any other.
+      untrackOrphan(hash);
+      return waitForFileDownload(hash, found.file.index, function (frac) {
+        reportPct(resolvePercent("download", 0, frac));
+      });
+    })
+    .then(function (file) {
+      var t = torrents[hash];
+      if (!t) throw new Error("That torrent is no longer in qBittorrent");
+      return verifyMatchByTags(t, file, want).then(function (verdict) {
+        if (verdict === "contradict") {
+          return deleteTorrents([hash], true).then(function () {
+            throw new Error("The downloaded file's tags say it is a different song");
+          });
+        }
+        var result = downloadResultFor(t, file);
+        return finalizeDisposition(hash, t).then(function () {
+          reportPct(100);
+          return result;
+        });
+      });
+    })
+    .catch(function (e) {
+      // A stalled or vanished download leaves nothing worth keeping — a
+      // partial track is useless and the torrent would sit there forever.
+      untrackOrphan(hash);
+      if (torrents[hash]) {
+        return deleteTorrents([hash], true).then(function () {
+          throw e;
+        });
+      }
+      throw e;
+    });
+}
+
+// What happens to the winning torrent once its file is delivered. "seed" is
+// the default: safe for private-tracker ratios, and the rest of the release
+// becomes an instant tier-1 hit. The result path stays valid in every branch —
+// deleteFiles is never true here.
+function finalizeDisposition(hash, torrent) {
+  if (tier3Disposition === "import") {
+    return importFinished([torrent])
+      .catch(function (e) {
+        console.error("qBittorrent: import after discovery failed:", e);
+      })
+      .then(function () {
+        return deleteTorrents([hash], false);
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: could not remove the discovered torrent after import:", e);
+      });
+  }
+  if (tier3Disposition === "remove") {
+    return deleteTorrents([hash], false).catch(function (e) {
+      console.error("qBittorrent: could not remove the discovered torrent:", e);
+    });
+  }
+  return Promise.resolve(); // "seed" — leave it be
+}
+
+// --- Registration -------------------------------------------------------------
+
+// What the last interactive search showed, so the pick can be resolved without
+// re-searching. Keyed the way search rows are keyed everywhere else.
+var interactiveMatches = {};
+var interactiveQuery = "";
+
+function pickFileForQuery(files, torrentName, query) {
+  var hay = null;
+  var best = null;
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    if (!mediaKindOf(list[i].name)) continue;
+    hay = normalizeForMatch(String(list[i].name || "") + " " + String(torrentName || ""));
+    if (containsAllTokens(hay, query)) {
+      if (!best) best = list[i];
+      else return null; // ambiguous — two files match the whole query
+    }
+  }
+  if (best) return best;
+  // No file carries the query. A torrent with exactly ONE media file is still
+  // unambiguous; anything else needs the user to open it and choose.
+  var media = [];
+  for (var j = 0; j < list.length; j++) {
+    if (mediaKindOf(list[j].name)) media.push(list[j]);
+  }
+  return media.length === 1 ? media[0] : null;
+}
+
+function registerDownloadProvider() {
+  if (!api.downloads || typeof api.downloads.onResolveByMetadata !== "function") return;
+
+  api.downloads.onResolveByMetadata("qbt-download", function (title, artistName, albumName, durationSecs, format) {
+    if (!connected || !baseUrl) return Promise.resolve(null);
+    if (!filesAreReachable()) {
+      api.log("warn", "download resolve declined: qBittorrent's files aren't reachable from this machine", "qbittorrent");
+      return Promise.resolve(null);
+    }
+    var want = wantFromArgs(title, artistName, albumName, durationSecs);
+    var best = findTrackInTorrents(want, torrents, fileNamesByHash);
+    if (best) {
+      return fetchExistingMatch(best, want).then(function (r) {
+        if (r) return r;
+        return discoveryEnabled ? discoverAndFetch(want, format) : null;
+      });
+    }
+    return discoveryEnabled ? discoverAndFetch(want, format) : Promise.resolve(null);
+  });
+
+  if (typeof api.downloads.onInteractiveSearch === "function") {
+    api.downloads.onInteractiveSearch("qbt-download", function (query, limit) {
+      if (!connected || !baseUrl || !filesAreReachable()) return Promise.resolve([]);
+      return collectSearchResults(query, { maxMs: RESOLVE_SEARCH_MAX_MS })
+        .then(function (results) {
+          var sorted = sortSearchResults(results || []);
+          interactiveMatches = {};
+          interactiveQuery = String(query || "");
+          var out = [];
+          for (var i = 0; i < sorted.length && out.length < (limit || 10); i++) {
+            var r = sorted[i];
+            if (isPluginNotice(r) || !r.fileUrl) continue;
+            var id = searchResultId(r);
+            interactiveMatches[id] = r;
+            out.push({
+              id: id,
+              title: String(r.fileName || ""),
+              // The row's second line — the download-relevant facts, since a
+              // torrent has no artist field of its own.
+              artistName: formatBytes(r.fileSize) + " · " + formatSeedCount(swarmCount(r.nbSeeders)) + " seeds · " + siteLabel(r.siteUrl),
+              durationSecs: null
+            });
+          }
+          return out;
+        })
+        .catch(function (e) {
+          if (String(e && e.message) === "no-plugins") return [];
+          throw e;
+        });
+    });
+  }
+
+  if (typeof api.downloads.onInteractiveResolve === "function") {
+    api.downloads.onInteractiveResolve("qbt-download", function (matchId, format) {
+      var r = interactiveMatches[String(matchId)];
+      if (!r) throw new Error("That result is no longer available — search again");
+      var query = interactiveQuery;
+      return enqueueDiscovery(function () {
+        resolveJob = { hashes: {}, startedAt: Date.now() };
+        var before = shallowHashSet(torrents);
+        var expected = magnetHash(r.fileUrl);
+        var addedHash = null;
+        return addTorrentRaw(r.fileUrl, { paused: true, downloader: r.engineName || "" })
+          .then(function () {
+            return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
+          })
+          .then(function (hash) {
+            if (!hash) throw new Error("qBittorrent never registered that torrent");
+            addedHash = hash;
+            resolveJob.hashes[hash] = true;
+            trackOrphan(hash);
+            return waitForMetadataQuiet(hash, { maxMs: RESOLVE_META_MAX_MS });
+          })
+          .then(function (res) {
+            if (!res.ok) throw new Error("Couldn't get that torrent's file list");
+            return fetchFilesQuiet(addedHash);
+          })
+          .then(function (files) {
+            var t = torrents[addedHash];
+            var file = pickFileForQuery(files, (t && t.name) || "", query);
+            if (!file) {
+              throw new Error("Couldn't tell which file in that torrent is the track — add it from the Torrents view and choose the file there");
+            }
+            return commitCandidate({ hash: addedHash, files: files, file: file }, { title: query });
+          })
+          .catch(function (e) {
+            if (addedHash && torrents[addedHash]) {
+              untrackOrphan(addedHash);
+              return deleteTorrents([addedHash], true).then(function () {
+                throw e;
+              });
+            }
+            throw e;
+          })
+          .then(
+            function (result) {
+              resolveJob = null;
+              return result;
+            },
+            function (e) {
+              resolveJob = null;
+              throw e;
+            }
+          );
+      });
+    });
+  }
+}
+
 function registerStreamResolver() {
   if (!api.playback || typeof api.playback.onResolveStreamByUri !== "function") return;
   api.playback.onResolveStreamByUri("qbt", function (id) {
@@ -4891,6 +6003,19 @@ function registerActions() {
     currentDraft().autoImport = !!(data && (data.checked === undefined ? data.value : data.checked));
     renderSettings();
   });
+  api.ui.onAction("qbt:set-auto-fetch", function (data) {
+    currentDraft().autoFetchFound = !!(data && (data.checked === undefined ? data.value : data.checked));
+    renderSettings();
+  });
+  api.ui.onAction("qbt:set-discovery", function (data) {
+    currentDraft().discoveryEnabled = !!(data && (data.checked === undefined ? data.value : data.checked));
+    renderSettings();
+  });
+  api.ui.onAction("qbt:set-disposition", function (data) {
+    var v = (data && data.value) || "seed";
+    currentDraft().tier3Disposition = v === "import" || v === "remove" ? v : "seed";
+    renderSettings();
+  });
   api.ui.onAction("qbt:set-map-from", function (data) {
     currentDraft().pathMapFrom = (data && data.value) || "";
   });
@@ -4943,12 +6068,15 @@ function activate(hostApi) {
   }
   registerActions();
   registerStreamResolver();
+  registerMetadataStreamResolver();
+  registerDownloadProvider();
   registerContextMenu();
   render();
   renderSettings();
 
   loadSettings()
     .then(loadNamesCache)
+    .then(loadOrphans)
     .then(loadCollections)
     .then(function () {
       render();
@@ -4973,6 +6101,15 @@ function deactivate() {
     searchRunning = false;
     disposeSearch(strandedJob).catch(function (e) {
       console.error("qBittorrent: could not dispose of the search job on deactivate:", e);
+    });
+  }
+  // A headless search job (the discovery engine's) holds server resources
+  // exactly like the tab's — dispose of it the same way.
+  if (headlessSearchJobId != null) {
+    var strandedHeadless = headlessSearchJobId;
+    headlessSearchJobId = null;
+    disposeSearch(strandedHeadless).catch(function (e) {
+      console.error("qBittorrent: could not dispose of the discovery search job on deactivate:", e);
     });
   }
   // A debounced name-cache write still waiting its 2s must land before the
@@ -5065,6 +6202,31 @@ return {
   _filterTorrentList: filterTorrentList,
   _fileMatchNote: fileMatchNote,
   _fileMatchItems: fileMatchItems,
+  _normalizeForMatch: normalizeForMatch,
+  _containsAllTokens: containsAllTokens,
+  _titleMatchScore: titleMatchScore,
+  _findTrackInTorrents: findTrackInTorrents,
+  _confirmByTags: confirmByTags,
+  _MATCH_THRESHOLD: MATCH_THRESHOLD,
+  _filterTier3Candidates: filterTier3Candidates,
+  _scoreSearchCandidate: scoreSearchCandidate,
+  _rankTier3Candidates: rankTier3Candidates,
+  _formatKeywordScore: formatKeywordScore,
+  _detectResolveStall: detectResolveStall,
+  _resolvePercent: resolvePercent,
+  _isResolveOrphan: isResolveOrphan,
+  _pickFileForTrack: pickFileForTrack,
+  _pickFileForQuery: pickFileForQuery,
+  _resolveBudgets: {
+    searchMaxMs: RESOLVE_SEARCH_MAX_MS,
+    attachAttempts: RESOLVE_ATTACH_ATTEMPTS,
+    attachPollMs: ATTACH_POLL_MS,
+    metaMaxMs: RESOLVE_META_MAX_MS,
+    maxCandidates: RESOLVE_MAX_CANDIDATES,
+    stallMs: RESOLVE_STALL_MS,
+    maxMs: RESOLVE_MAX_MS,
+    orphanMaxMs: ORPHAN_MAX_MS
+  },
   _selectionSummary: selectionSummary,
   _formatAge: formatAge,
   _formatDuration: formatDuration,
