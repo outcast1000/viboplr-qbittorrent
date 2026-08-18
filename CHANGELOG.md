@@ -15,6 +15,19 @@ nobody could read without a key. The state is still in the places that can carry
 it properly: the row's status text, the sort order, and which of Start / Stop
 the row offers.
 
+**Two toggles for what a search shows you.** Above the results, whenever a
+search found files: **Files only** hides the torrent rows and leaves the matches
+(when you're looking for a file, the torrents are the haystack), and
+**Downloaded only** drops every match that isn't on disk. The heading keeps both
+numbers — *downloaded only (12 of 40)* — so a narrowed list never passes for the
+whole answer, and while the file lists are still arriving it says so rather than
+showing an empty list as a verdict.
+
+Both stay on between searches, since "I'm looking for files I already have" is a
+mode you're in for a run of them; they only appear, and only take effect, when a
+search has file matches, so one left on can't blank a screen it isn't
+describing.
+
 **The "Matching files" list is a selection of its own.** Search across your
 torrents and the files it found now have **All / None**, a **Downloaded** preset
 that picks out exactly the matches whose bytes are on disk, and **▶ Play** /

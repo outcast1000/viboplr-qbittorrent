@@ -199,6 +199,13 @@ var listFilter = "";
 // addPanelVisible). `true`/`false` is the user having opened or closed it, and
 // outranks the list from then on.
 var addOpen = null;
+// The two view filters over a search's results. Deliberately NOT cleared when
+// the query changes: "I am looking for files I already have" is a mode the user
+// is in for a run of searches, not a property of one query. They only render —
+// and only take effect — while a search actually has file matches, so a mode
+// left on can never blank a screen it isn't describing.
+var viewFilesOnly = false;
+var viewDownloadedOnly = false;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -248,6 +255,20 @@ function numOr(v, fallback) {
   if (v === null || v === undefined || v === "") return fallback;
   var n = Number(v);
   return isFinite(n) ? n : fallback;
+}
+
+// A toggle's new state as the HOST reports it — `checked`, or `value` on an
+// older host that sent that instead. Reading the report rather than flipping a
+// local flag is what keeps a toggle honest when a re-render lands between the
+// press and the handler.
+//
+// With neither field present there is nothing to read, so it falls back to
+// flipping: a press that did nothing at all looks broken, and the next render
+// corrects the switch either way.
+function toggleState(data, current) {
+  if (data && data.checked !== undefined) return !!data.checked;
+  if (data && data.value !== undefined) return !!data.value;
+  return !current;
 }
 
 function formatBytes(n) {
@@ -3877,10 +3898,17 @@ function matchTracks(data) {
   });
 }
 
-function fileMatchItems(entries) {
+// `opts.downloadedOnly` drops every match that isn't on disk. It is a VIEW
+// filter, so `total` still counts every match found — the caller says "12 of
+// 40", which is the only honest way to show a narrowed list.
+function fileMatchItems(entries, opts) {
+  var downloadedOnly = !!(opts && opts.downloadedOnly);
   var rows = [];
-  var shown = 0; // matches with a row of their own (the "+N more" rows aren't)
+  var shown = 0; // matches with a row of their own
   var total = 0; // every match found, shown or not
+  // Matched torrents whose file lists haven't arrived. Only meaningful while
+  // filtering by downloaded: those are the matches that cannot be judged yet.
+  var unread = 0;
   // True only when the TOTAL cap cut something. The per-torrent cap leaves a
   // "+N more" row behind, so it needs no extra apology.
   var overflow = false;
@@ -3900,6 +3928,7 @@ function fileMatchItems(entries) {
     }
     var torrentName = t.name || magnetDisplayName(t.magnet_uri) || t.hash;
     var byName = fileIndexByName(knownFiles(t.hash));
+    if (!knownFiles(t.hash)) unread++;
     // The torrent's own figure, for rows whose file is not known yet — once per
     // torrent rather than once per row.
     var torrentDone = torrentFraction(t, knownFiles(t.hash));
@@ -3923,6 +3952,9 @@ function fileMatchItems(entries) {
       // play the wrong file.
       var id = "qbtm:" + t.hash + ":" + (f ? f.index : "n" + j);
       if (done) downloaded.push(id);
+      // Counted in `total` above, just not drawn: the heading reports both
+      // numbers, so a filtered list never passes for the whole answer.
+      if (downloadedOnly && !done) continue;
       rows.push({
         id: id,
         title: baseName(m[j]),
@@ -3951,7 +3983,7 @@ function fileMatchItems(entries) {
       shown++;
     }
   }
-  return { rows: rows, shown: shown, total: total, overflow: overflow, downloaded: downloaded };
+  return { rows: rows, shown: shown, total: total, overflow: overflow, downloaded: downloaded, unread: unread };
 }
 
 // The facts the Info tab prints, as label/value pairs. Pure and exported, so
@@ -4504,6 +4536,42 @@ function render() {
     });
   }
 
+  // The matching files are worked out BEFORE the torrent list is drawn, because
+  // one of the view toggles decides whether that list is drawn at all — and the
+  // toggles themselves only appear when there is something for them to act on.
+  //
+  // Their rows need real files, not just names (the name cache cannot say
+  // whether a match is on disk), so the lists behind the matches on screen are
+  // fetched in the background as the user reads.
+  pumpMatchFiles(filtered.shown);
+  var matches = fileMatchItems(filtered.shown, { downloadedOnly: viewDownloadedOnly });
+  var hasMatches = matches.total > 0;
+  // Only while there ARE file matches. Both toggles are about a list that isn't
+  // on screen otherwise, and a control whose effect is invisible is worse than
+  // no control — this is also what keeps "files only" from blanking a search
+  // that matched torrent names alone.
+  if (hasMatches) {
+    children.push({
+      type: "layout",
+      direction: "horizontal",
+      children: [
+        {
+          type: "toggle",
+          label: "Files only",
+          action: "qbt:view-files-only",
+          checked: !!viewFilesOnly
+        },
+        {
+          type: "toggle",
+          label: "Downloaded only",
+          action: "qbt:view-downloaded-only",
+          checked: !!viewDownloadedOnly
+        }
+      ]
+    });
+  }
+  var hideTorrents = hasMatches && viewFilesOnly;
+
   // A search over a cold cache: some torrents genuinely cannot answer yet.
   // Said out loud, or "no matches" below would be a verdict the plugin doesn't
   // have — the burst is filling these in and each landing re-renders.
@@ -4519,7 +4587,12 @@ function render() {
     });
   }
 
-  if (!list.length) {
+  if (hideTorrents) {
+    // "Files only": the torrent rows and their empty states are all skipped.
+    // Nothing else is — the toolbar above still carries Add torrent, Start all
+    // / Stop all and the connection status, and those act on the same filtered
+    // set they always did whether or not its rows are drawn.
+  } else if (!list.length) {
     children.push({
       type: "text",
       // Where it points depends on whether the box is on screen — telling
@@ -4601,28 +4674,46 @@ function render() {
     });
   }
 
-  // The files the filter FOUND, as rows of their own under the torrents. The
-  // torrent rows above only count their matches; this is where a match is
-  // readable.
+  // The files the filter FOUND, as rows of their own (under the torrents, or
+  // alone when "Files only" is on). The torrent rows only count their matches;
+  // this is where a match is readable.
   //
-  // It is a SELECTION of its own now, and can be because the torrent list above
+  // It is a SELECTION of its own, and can be because the torrent list above
   // stopped being one: a second multi-selection under a toolbar of Start all /
   // Stop all was ambiguous about what those acted on, and that toolbar's
-  // per-selection buttons are gone. So the answer to "select files, not
-  // torrents" is simply that this list is where a selection lives.
-  //
-  // Its rows need real files, not just names — the name cache cannot say
-  // whether a match is on disk — so the lists behind the matches on screen are
-  // fetched in the background as the user reads.
-  pumpMatchFiles(filtered.shown);
-  var matches = fileMatchItems(filtered.shown);
-  if (matches.rows.length) {
+  // per-selection buttons are gone.
+  if (hasMatches) {
     children.push({
       type: "text",
-      content: "Matching files (" + matches.total + ")",
+      // With the filter on, the count says what it is counting — "12" over a
+      // list the user just narrowed reads as "that is all there was".
+      content: viewDownloadedOnly
+        ? "Matching files — downloaded only (" + matches.shown + " of " + matches.total + ")"
+        : "Matching files (" + matches.total + ")",
       className: "muted"
     });
-    children.push({
+    // Whether a match is downloaded is only knowable once its torrent's file
+    // list has arrived, so a "Downloaded only" list can still be filling in.
+    // Said out loud, or an empty one reads as a verdict.
+    if (matches.unread) {
+      children.push({
+        type: "text",
+        className: "muted",
+        content:
+          "Reading " + matches.unread + (matches.unread === 1 ? " torrent" : " torrents") +
+          "' files — matches in " + (matches.unread === 1 ? "it" : "them") + " will appear as they land…"
+      });
+    }
+    if (!matches.rows.length) {
+      children.push({
+        type: "text",
+        className: "muted",
+        content: matches.unread
+          ? "Nothing downloaded among the matches read so far."
+          : "None of the " + matches.total + " matches has finished downloading."
+      });
+    }
+    if (matches.rows.length) children.push({
       type: "track-row-list",
       items: matches.rows,
       selectable: true,
@@ -7901,6 +7992,18 @@ function registerActions() {
     render();
   });
 
+  // The host sends the new state; it is not a blind flip, so a stale view can't
+  // invert the toggle the user just pressed.
+  api.ui.onAction("qbt:view-files-only", function (data) {
+    viewFilesOnly = toggleState(data, viewFilesOnly);
+    render();
+  });
+
+  api.ui.onAction("qbt:view-downloaded-only", function (data) {
+    viewDownloadedOnly = toggleState(data, viewDownloadedOnly);
+    render();
+  });
+
   api.ui.onAction("qbt:list-filter-clear", function () {
     listFilter = "";
     render();
@@ -8302,6 +8405,7 @@ return {
   _progressBand: progressBand,
   _torrentPercent: torrentPercent,
   _torrentFraction: torrentFraction,
+  _toggleState: toggleState,
   _matchRowGroups: matchRowGroups,
   _matchRowHash: matchRowHash,
   _torrentPlayable: torrentPlayable,

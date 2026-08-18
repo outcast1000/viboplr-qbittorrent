@@ -211,6 +211,18 @@ test("the hash is readable from every kind of match row", () => {
   assert.equal(plugin._matchRowHash("nonsense"), null);
 });
 
+test("a toggle takes the state the host reports, not a blind flip", () => {
+  // A re-render can land between the press and the handler, and flipping a
+  // local flag then inverts the switch the user just set.
+  assert.equal(plugin._toggleState({ checked: true }, false), true);
+  assert.equal(plugin._toggleState({ checked: false }, true), false);
+  // Older hosts sent `value` instead.
+  assert.equal(plugin._toggleState({ value: true }, false), true);
+  // Nothing to read: flip, because a press that did nothing looks broken.
+  assert.equal(plugin._toggleState({}, false), true);
+  assert.equal(plugin._toggleState(undefined, true), false);
+});
+
 test("a file straight in the torrent root has no folder prefix", () => {
   const r = matchItems([entry(T.comp, ["single.flac"])]);
   assert.ok(r.rows[0].subtitle.startsWith("in “"));

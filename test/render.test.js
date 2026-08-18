@@ -355,6 +355,90 @@ test("every match is listed and selectable, up to the whole-list limit", async (
   }, undefined, { files: () => many, torrents });
 });
 
+test("“Files only” hides the torrent rows, keeping the matches", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "first" });
+    await settle();
+    assert.equal(walk(last(views)).filter((n) => n.type === "track-row-list").length, 2);
+
+    handlers["qbt:view-files-only"]({ checked: true });
+    await settle();
+    const nodes = walk(last(views));
+    const lists = nodes.filter((n) => n.type === "track-row-list");
+    assert.equal(lists.length, 1, "the torrent list should be gone");
+    assert.ok(lists[0].items.every((i) => /^qbtm:/.test(i.id)), "what remains must be the file matches");
+    // The toolbar stays: it carries Add torrent, Start all / Stop all and the
+    // connection status, none of which are about the rows being hidden.
+    assert.ok(nodes.some((n) => n.type === "toolbar"));
+
+    handlers["qbt:view-files-only"]({ checked: false });
+    await settle();
+    assert.equal(walk(last(views)).filter((n) => n.type === "track-row-list").length, 2);
+  });
+});
+
+test("“Downloaded only” drops the matches that aren't on disk", async () => {
+  const files = () => [
+    { index: 0, name: "Disc/have.flac", size: 10, progress: 1, priority: 1 },
+    { index: 1, name: "Disc/want.flac", size: 10, progress: 0.5, priority: 1 },
+  ];
+  const torrents = {
+    aaa: { hash: "aaa", name: "A Release", state: "downloading", progress: 0.75, size: 20, added_on: 1, category: "viboplr" },
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "disc" });
+    await settle();
+    const matchList = () => walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    const heading = () => walk(last(views)).filter((n) => n.type === "text" && /Matching files/.test(n.content || ""))[0];
+    assert.equal(matchList().items.length, 2);
+
+    handlers["qbt:view-downloaded-only"]({ checked: true });
+    await settle();
+    assert.equal(matchList().items.length, 1);
+    assert.match(matchList().items[0].title, /have\.flac/);
+    // Both numbers, always: "1" over a list the user just narrowed would read
+    // as "that is all there was".
+    assert.match(heading().content, /downloaded only \(1 of 2\)/);
+  }, undefined, { files, torrents });
+});
+
+test("the view toggles only appear when there are file matches to view", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    // A query that matches a torrent's NAME contributes no file rows, so
+    // neither toggle would have anything to act on.
+    handlers["qbt:list-filter"]({ query: "movie" });
+    await settle();
+    const toggles = walk(last(views)).filter((n) => n.type === "toggle");
+    assert.equal(toggles.length, 0);
+
+    handlers["qbt:list-filter"]({ query: "first" });
+    await settle();
+    assert.deepEqual(
+      walk(last(views)).filter((n) => n.type === "toggle").map((n) => n.label),
+      ["Files only", "Downloaded only"],
+    );
+  });
+});
+
+test("a view filter left on cannot blank a later search", async () => {
+  // The modes are deliberately sticky across queries — "I'm looking for files I
+  // already have" is a mode, not a property of one query — so the guard is that
+  // they do nothing when a search has no file matches at all.
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "first" });
+    await settle();
+    handlers["qbt:view-files-only"]({ checked: true });
+    await settle();
+    assert.equal(walk(last(views)).filter((n) => n.type === "track-row-list").length, 1);
+
+    handlers["qbt:list-filter"]({ query: "movie" });
+    await settle();
+    const lists = walk(last(views)).filter((n) => n.type === "track-row-list");
+    assert.equal(lists.length, 1, "the torrent list must come back");
+    assert.ok(lists[0].items.every((i) => !/^qbtm:/.test(i.id)), "and it must be the torrents");
+  });
+});
+
 test("a single character filters names only, and says so", async () => {
   await withPlugin(async ({ views, handlers, posts }) => {
     const before = posts.length;

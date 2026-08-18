@@ -157,7 +157,23 @@ files themselves appear as a **"Matching files" list under the torrents** — on
 row per found file, with its state, its folder and its torrent named
 underneath.
 
-**That list is a selection of its own.** It has the usual **All / None**, a
+**Two toggles decide what a search shows you**, sitting above the results
+whenever a search found files at all:
+
+- **Files only** hides the torrent rows and leaves the matches. When what you
+  are looking for is a *file*, the torrents above are the haystack.
+- **Downloaded only** drops every match that isn't on disk, and the heading
+  keeps both numbers (*downloaded only (12 of 40)*) so a narrowed list never
+  passes for the whole answer.
+
+They stay on between searches — "I'm looking for files I already have" is a mode
+you're in for a run of searches, not a property of one query — and they only
+appear, or take effect, when a search actually has file matches, so a mode left
+on can't blank a screen it isn't describing. *Downloaded only* can still be
+filling in while the file lists arrive; it says so rather than showing an empty
+list as a verdict.
+
+**That list is also a selection of its own.** It has the usual **All / None**, a
 **Downloaded** preset that picks out exactly the matches whose bytes are on
 disk, and **▶ Play** / **+ Add to queue** — so "find every FLAC of this across
 my torrents and play the ones I actually have" is three clicks. Selecting
