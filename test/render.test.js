@@ -197,6 +197,25 @@ test("the row list offers exactly the four torrent actions", async () => {
   });
 });
 
+test("the torrent list is single-selection; the files inside one are not", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    const torrents = walk(last(views)).find((n) => n.type === "track-row-list");
+    // Every action here acts on one torrent and is on that torrent's own row,
+    // so the host's All / None / action toolbar had nothing left to act on.
+    assert.equal(torrents.selectionMode, "single");
+    assert.equal(torrents.selectable, true, "single-select still needs the listbox list");
+    assert.ok(!torrents.selectionPresets, "a preset selects several rows — meaningless here");
+
+    // The files inside a torrent are the opposite case: choosing which of them
+    // download is inherently a multi-row job, and the presets are the point.
+    handlers["qbt:show-files"]({ itemId: "aaa" });
+    await settle();
+    const files = walk(last(views)).find((n) => n.type === "track-row-list");
+    assert.ok(!files.selectionMode, "the files list must stay multi-selection");
+    assert.ok(files.selectionPresets.length > 0);
+  });
+});
+
 test("opening a torrent's contents replaces the list", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:show-files"]({ selectedIds: ["aaa"], itemId: "aaa" });

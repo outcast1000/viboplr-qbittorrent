@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.28.0
+
+**One torrent at a time, and no bar of buttons above the list.** The torrent
+list is now single-selection, and the *All / None / ▶ Play / ⏵ Start / ⏸ Stop /
+🗑 Remove* strip that sat above it is gone. Everything you do to a torrent you do
+to *that* torrent — and all four of those are already on the row's own hover
+tray — so the strip was a second copy of the same buttons, fed by a selection
+that existed only to feed it. Acting on everything at once is still *Start all*
+/ *Stop all*, which act on every row the list is showing.
+
+Modifier-clicks now open a torrent like any other click, since there is no
+multi-selection left for them to build.
+
+**The files inside a torrent are unchanged** — choosing what downloads is
+genuinely a many-rows job, so that list keeps its selection, its toolbar and its
+Audio / Video presets.
+
+Needs a host that understands single-selection lists; on an older Viboplr the
+torrent list behaves exactly as it did before.
+
 ## 0.27.0
 
 **The paste box is now a button.** *Paste a magnet link or .torrent URL* no

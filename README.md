@@ -67,9 +67,16 @@ grey stopped, red errored. Colour is the state and not the number on purpose:
 situations.
 
 **Clicking a row opens it** — a torrent is a container, and a click that only
-highlighted it read as nothing having happened. Cmd/Ctrl-click and Shift-click
-still build a selection, and Start / Stop / Remove in the toolbar above the list
-take the whole of it in one go (Remove asks once, naming the count).
+highlighted it read as nothing having happened. Modifier-clicks open it too:
+the list is **single-selection**, so there is no multi-selection for them to
+build.
+
+That is why there is no *All / None / Play / Start / Stop / Remove* bar above
+the list any more. Everything you do to a torrent you do to *that* torrent, and
+all four are on its own hover tray — so the bar was a second copy of the same
+buttons, fed by a selection that existed only to feed it. Acting on many at once
+is still *Start all* / *Stop all* below, which act on every row the list is
+showing you.
 
 Hovering a row reveals **▶ Play**, **⏵ Start**, **⏸ Stop** and **🗑 Remove**.
 There is no Contents button — the row itself opens the contents, so a button
@@ -195,9 +202,10 @@ you want when you're grabbing one album.
 ## Contents, and choosing what downloads
 
 **Click a torrent** to see everything inside — not only the playable files: the
-point of the list is often to skip the 4 GB video extra. (A plain click opens;
-Cmd/Ctrl-click and Shift-click still build a multi-selection for the list's own
-toolbar, and double-click or Enter opens it too.)
+point of the list is often to skip the 4 GB video extra. (Any click opens it,
+modifiers included, as does double-click or Enter. The **files** inside a
+torrent are a different matter — that list is multi-selection, with its own
+Audio / Video presets and toolbar.)
 
 The contents **replace the list** rather than expanding the row:
 

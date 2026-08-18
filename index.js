@@ -4215,8 +4215,18 @@ function render() {
     children.push({
       type: "track-row-list",
       selectable: true,
-      // A torrent is a container, so clicking one opens it. Cmd/Ctrl and Shift
-      // clicks still build the selection the toolbar acts on.
+      // One torrent at a time. Everything you do to a torrent you do to THAT
+      // torrent — start it, stop it, open it, remove it — and each of those is
+      // already on the row's own hover tray, so a selection existed only to
+      // feed a toolbar of All / None / Play / Start / Stop / Remove sitting
+      // above the list restating the same four buttons. Bulk start and stop
+      // are still there and always were: the list toolbar's Start all / Stop
+      // all act on every torrent shown, filter included.
+      //
+      // On an older host this field is ignored and the list behaves as it did.
+      selectionMode: "single",
+      // A torrent is a container, so clicking one opens it — and with no
+      // multi-selection to build, a modifier click opens it too.
       openOnClick: true,
       items: rows,
       // Play first: it takes the primary overlay slot, and it is the only one of
