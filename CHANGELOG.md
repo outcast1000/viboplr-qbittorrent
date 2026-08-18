@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.29.0
+
+**The percentage is of the whole torrent now.** qBittorrent's `progress`
+measures the files you *selected*, so picking one 3 MB cover out of a 700 MB
+release read **100%** with 697 MB missing. The badge, the torrent's own bar, its
+hero line and its Info tab all now report bytes on disk over the torrent's real
+weight — and for a torrent you have opened, counted file by file, so a file you
+downloaded and later deselected still counts as downloaded. The "parked torrents
+read 0%" special case is gone with it: measuring the torrent instead of the
+selection makes it true by construction rather than by exception.
+
+**A row only offers what would do something.**
+
+- **Play** shows when the torrent has a finished media file in it. A torrent
+  with no media at all, or with nothing on disk yet, no longer offers it. A
+  part-downloaded one still does — a Play button that turns out to have nothing
+  ready says so, where a missing one is a dead end.
+- **Start** and **Stop** are one control in two states, so each row shows the
+  one it isn't: Start on a stopped torrent, Stop on a running one. Before, every
+  row showed both and one of them was always a no-op.
+
+**New icons for the pair.** Only the glyph is on screen (the label is a
+tooltip), and **⏵ Start** next to **▶ Play** read as two goes at the same
+button. Start is now **⇅** — the transfer, in the same arrow vocabulary the file
+rows already use for downloading — and Stop is **⏹**, a square. **⏸** was worse
+than ambiguous: qBittorrent has no pause.
+
 ## 0.28.0
 
 **One torrent at a time, and no bar of buttons above the list.** The torrent

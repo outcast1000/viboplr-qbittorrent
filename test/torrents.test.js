@@ -105,6 +105,74 @@ test("a missing or absurd progress reads as 0%, not NaN%", () => {
   assert.equal(plugin._torrentPercent(null), "0%");
 });
 
+test("the percentage is of the whole torrent, not of the selected files", () => {
+  // `progress` is progress against the SELECTION, so a release with one small
+  // file picked out of it claims to be finished while nearly all of it is
+  // missing. completed/total_size is the honest figure, and both fields arrive
+  // on every poll — no extra request to draw a 1000-row list.
+  const cherryPicked = { progress: 1, completed: 3 * 1024 * 1024, total_size: 700 * 1024 * 1024, size: 3 * 1024 * 1024 };
+  assert.equal(plugin._torrentPercent(cherryPicked), "0%");
+  assert.equal(plugin._torrentPercent({ progress: 1, completed: 350, total_size: 700 }), "50%");
+  // The parked case this replaced a special-case for: nothing selected, so
+  // qBittorrent calls it complete and seeds it, having downloaded nothing.
+  assert.equal(plugin._torrentPercent({ progress: 1, completed: 0, total_size: 700 }), "0%");
+});
+
+test("a cached file list is used in preference, and counts deselected files", () => {
+  // The one thing completed/total_size cannot see: a file downloaded and LATER
+  // deselected. Its bytes are on disk and drop out of `completed`, so the
+  // torrent would appear to have lost half of itself.
+  const t = { progress: 1, completed: 0, total_size: 200 };
+  const files = [
+    { size: 100, progress: 1, priority: 0 },
+    { size: 100, progress: 0, priority: 1 },
+  ];
+  assert.equal(plugin._torrentPercent(t, files), "50%");
+  // Priority is ignored entirely — this is a question about bytes.
+  assert.equal(plugin._torrentPercent(t, [{ size: 100, progress: 1, priority: 0 }]), "100%");
+  // Sizeless entries can't be weighed, so the torrent's own numbers answer.
+  assert.equal(plugin._torrentPercent({ progress: 0.5 }, [{ progress: 1 }]), "50%");
+});
+
+test("a torrent with no size yet still reports its progress", () => {
+  // A magnet still asking the swarm has no total_size to divide by, and
+  // falling through to 0% would freeze the badge for the whole wait.
+  assert.equal(plugin._torrentPercent({ progress: 0.42 }), "42%");
+  assert.equal(plugin._torrentPercent({ progress: 0.42, total_size: 0 }), "42%");
+  // A torrent reporting a size but no `completed` field yet, likewise.
+  assert.equal(plugin._torrentPercent({ progress: 0.42, total_size: 700 }), "42%");
+});
+
+// --- which actions a row offers ----------------------------------------------
+
+test("a row offers Start or Stop, never both", () => {
+  // They are one control in two states — qBittorrent has no third — so showing
+  // both always left one that would do nothing on every row.
+  const stopped = plugin._torrentRowActions({ hash: "a", state: "stoppedDL" });
+  const running = plugin._torrentRowActions({ hash: "b", state: "downloading" });
+  assert.ok(stopped.indexOf("qbt:start") >= 0 && stopped.indexOf("qbt:stop") < 0, stopped.join());
+  assert.ok(running.indexOf("qbt:stop") >= 0 && running.indexOf("qbt:start") < 0, running.join());
+  // Seeding is running too, and paused-era state names still read as stopped.
+  assert.ok(plugin._torrentRowActions({ hash: "c", state: "stalledUP" }).indexOf("qbt:stop") >= 0);
+  assert.ok(plugin._torrentRowActions({ hash: "d", state: "pausedUP" }).indexOf("qbt:start") >= 0);
+});
+
+test("Remove is always there, whatever the torrent is doing", () => {
+  assert.ok(plugin._torrentRowActions({ hash: "a", state: "error" }).indexOf("qbt:delete-ask") >= 0);
+  assert.ok(plugin._torrentRowActions({ hash: "b", state: "metaDL" }).indexOf("qbt:delete-ask") >= 0);
+});
+
+test("Play is hidden when nothing in the torrent can be playing yet", () => {
+  // Not one byte on disk, so whatever is inside, none of it is playable.
+  const empty = { hash: "a", state: "downloading", progress: 0, completed: 0, total_size: 700 };
+  assert.ok(plugin._torrentRowActions(empty).indexOf("qbt:play-torrent") < 0);
+  // Part-downloaded with no per-file detail: it MIGHT be playable, and hiding
+  // Play on a torrent that turns out to be playable is the worse mistake —
+  // pressing it on one that isn't explains itself.
+  const partial = { hash: "b", state: "downloading", progress: 0.5, completed: 350, total_size: 700 };
+  assert.ok(plugin._torrentRowActions(partial).indexOf("qbt:play-torrent") >= 0);
+});
+
 test("the badge colour is the state, not the percentage", () => {
   // 90% stopped and 90% downloading are the same number and completely
   // different situations, and which rows are moving is what you scan for.

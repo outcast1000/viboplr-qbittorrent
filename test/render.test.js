@@ -53,7 +53,10 @@ function run(stored, opts) {
   const played = [];
   const resolvers = {};
   // A thunk, so a test can change what the server serves mid-run (qBittorrent
-  // reports the NEW priorities once they have been posted).
+  // reports the NEW priorities once they have been posted). It is passed the
+  // HASH being asked about, because the list fetches every torrent's files to
+  // decorate its rows — so "this torrent holds media and that one doesn't" is
+  // now a thing a test needs to be able to say.
   const filesFor = (opts && opts.files) || (() => FILES);
   // A thunk like `files`, so a test can change what the server reports between
   // polls — the only way to exercise the completion path, since the first poll
@@ -87,7 +90,7 @@ function run(stored, opts) {
         const body =
           url.includes("/app/webapiVersion") ? "2.11"
             : url.includes("/app/version") ? "v5.2.4"
-              : url.includes("/torrents/files") ? JSON.stringify(filesFor())
+              : url.includes("/torrents/files") ? JSON.stringify(filesFor(/hash=([^&]*)/.exec(url)?.[1] ?? ""))
                 : url.includes("/sync/maindata") ? JSON.stringify({ rid: 1, full_update: true, torrents: torrentsFor(), server_state: {} })
                   : "Ok.";
         return { status: 200, ok: true, text: async () => body, json: async () => JSON.parse(body) };
@@ -195,6 +198,76 @@ test("the row list offers exactly the four torrent actions", async () => {
     assert.equal(list.items[0].action, "qbt:show-files", "the row no longer opens at all");
     assert.equal(list.openOnClick, true);
   });
+});
+
+test("a row offers only the actions that would do something to it", async () => {
+  // "aaa" is downloading and holds a finished .flac; "bbb" is seeding a file
+  // with nothing playable in it.
+  const files = (hash) =>
+    hash === "bbb"
+      ? [{ index: 0, name: "readme.nfo", size: 1024, progress: 1, priority: 1 }]
+      : FILES;
+  await withPlugin(async ({ views }) => {
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    const row = (id) => list.items.find((i) => i.id === id).actions;
+    // Running, with a playable file: Play and Stop, and no Start that would be
+    // a no-op on something already going.
+    assert.deepEqual(row("aaa"), ["qbt:play-torrent", "qbt:stop", "qbt:delete-ask"]);
+    // Finished, so every file is on disk — and not one of them is media, so
+    // there is nothing to play however complete it is.
+    assert.deepEqual(row("bbb"), ["qbt:stop", "qbt:delete-ask"]);
+    // The list still DECLARES all four; the row names the subset it shows.
+    assert.deepEqual(list.actions.map((a) => a.id), [
+      "qbt:play-torrent",
+      "qbt:start",
+      "qbt:stop",
+      "qbt:delete-ask",
+    ]);
+  }, undefined, { files });
+});
+
+test("a stopped row offers Start instead of Stop", async () => {
+  const torrents = {
+    aaa: { hash: "aaa", name: "Parked", state: "stoppedDL", progress: 0.4, size: 100, added_on: 1, category: "viboplr" },
+  };
+  await withPlugin(async ({ views }) => {
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    const actions = list.items[0].actions;
+    assert.ok(actions.indexOf("qbt:start") >= 0, actions.join());
+    assert.ok(actions.indexOf("qbt:stop") < 0, actions.join());
+  }, undefined, { torrents });
+});
+
+test("Play and Start are not both triangles", async () => {
+  // Only the glyph is on screen — the label is a tooltip — and "▶" beside "⏵"
+  // read as two goes at the same button. Stop is a square, not a pause bar:
+  // qBittorrent has no pause.
+  await withPlugin(async ({ views }) => {
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    const icon = (id) => list.actions.find((a) => a.id === id).icon;
+    assert.equal(icon("qbt:play-torrent"), "▶");
+    assert.notEqual(icon("qbt:start"), icon("qbt:play-torrent"));
+    assert.ok(!/[▶⏵▷►]/.test(icon("qbt:start")), "Start still looks like Play: " + icon("qbt:start"));
+    assert.ok(!/[⏸‖]/.test(icon("qbt:stop")), "Stop still looks like Pause: " + icon("qbt:stop"));
+  });
+});
+
+test("the badge counts the whole torrent, not the selected files", async () => {
+  // One small file picked out of a big release: `progress` says 100%, and the
+  // badge must not.
+  const torrents = {
+    aaa: {
+      hash: "aaa", name: "Big Release", state: "stalledUP", progress: 1,
+      completed: 5 * 1024 * 1024, size: 5 * 1024 * 1024, total_size: 500 * 1024 * 1024,
+      added_on: 1, category: "viboplr",
+    },
+  };
+  await withPlugin(async ({ views }) => {
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    const svg = decodeURIComponent(list.items[0].imageUrl);
+    assert.match(svg, />1%</, svg.slice(-120));
+    assert.ok(!/>100%</.test(svg), "the badge still reads the selection's progress");
+  }, undefined, { torrents });
 });
 
 test("the torrent list is single-selection; the files inside one are not", async () => {

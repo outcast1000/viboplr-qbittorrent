@@ -66,6 +66,15 @@ grey stopped, red errored. Colour is the state and not the number on purpose:
 90% stopped and 90% downloading are the same figure and completely different
 situations.
 
+That percentage is **of the whole torrent**, not of the files you selected from
+it. qBittorrent's own `progress` measures the selection, so picking one 3 MB
+cover out of a 700 MB release reports it finished with 697 MB missing, and a
+torrent with nothing selected reports 100% having downloaded nothing at all.
+The figure here is bytes on disk over the torrent's real weight — and where the
+file list is in hand (any torrent you have opened), it is counted file by file,
+so a file you downloaded and later *deselected* still counts. The same number
+appears on the torrent's own page, its bar and its Info tab.
+
 **Clicking a row opens it** — a torrent is a container, and a click that only
 highlighted it read as nothing having happened. Modifier-clicks open it too:
 the list is **single-selection**, so there is no multi-selection for them to
@@ -78,14 +87,31 @@ buttons, fed by a selection that existed only to feed it. Acting on many at once
 is still *Start all* / *Stop all* below, which act on every row the list is
 showing you.
 
-Hovering a row reveals **▶ Play**, **⏵ Start**, **⏸ Stop** and **🗑 Remove**.
+Hovering a row reveals **▶ Play**, **⇅ Start** *or* **⏹ Stop**, and
+**🗑 Remove** — only the ones that would actually do something:
+
+- **Play** appears when the torrent holds a media file that is finished
+  downloading. On a torrent you have opened, that is read file by file; before
+  that it goes on what is knowable — a torrent with no media in it at all, or
+  with nothing on disk yet, has no Play button, and a part-downloaded one keeps
+  it (pressing it on a torrent with nothing ready explains itself, whereas a
+  missing button on a playable torrent is a dead end).
+- **Start** and **Stop** are one control in two states, so a row shows the one
+  it isn't: Start on a stopped torrent, Stop on a running one. Showing both
+  always meant one of them did nothing.
+
+Only the glyph is on screen — the label is its tooltip — so Play and Start
+deliberately don't share a shape. **⇅** is the transfer, in the same arrow
+vocabulary the file rows use for downloading; **▶** is the music.
+
 There is no Contents button — the row itself opens the contents, so a button
 would be a third route to the same place at the cost of tray width.
 
-There is deliberately **no separate Pause**. qBittorrent has Start and Stop and
-nothing between them — WebAPI 2.11 renamed pause/resume to stop/start precisely
-because they were one pair — so two buttons posting to the same endpoint would
-be a lie about what the client can do. *Stop* is the pause.
+There is deliberately **no separate Pause**, which is why Stop is a square and
+not a pause bar. qBittorrent has Start and Stop and nothing between them —
+WebAPI 2.11 renamed pause/resume to stop/start precisely because they were one
+pair — so a button posting to the same endpoint under a different name would be
+a lie about what the client can do. *Stop* is the pause.
 
 *Start all* / *Stop all* act on every torrent the list shows you — which, with
 the category filter on, is only the ones this plugin added, and with the filter

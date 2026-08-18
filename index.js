@@ -697,12 +697,55 @@ function progressBand(t, awaiting) {
   return PROGRESS_BANDS.waiting; // queued, stalled, checking, moving, allocating
 }
 
-function torrentPercent(t) {
-  var v = Number((t && t.progress) || 0);
-  if (!isFinite(v) || v < 0) v = 0;
-  if (v > 1) v = 1;
+function clamp01(v) {
+  var n = Number(v);
+  if (!isFinite(n) || n < 0) return 0;
+  return n > 1 ? 1 : n;
+}
+
+// How much of the WHOLE torrent is on disk, as a 0..1 fraction.
+//
+// `progress` cannot answer that, because it is progress against the SELECTED
+// files: pick one 3 MB cover out of a 700 MB release and it reads 100% with
+// 697 MB missing, and a torrent with nothing selected reads 100% having
+// downloaded nothing at all. The badge is a picture of the torrent, not of the
+// current selection — the selection is what the contents panel is for.
+//
+// Three sources, most exact first:
+//   1. The cached file list, when there is one: every file's own progress
+//      against every file's size, priority ignored entirely. This is the only
+//      one that counts a file downloaded and LATER deselected, whose bytes are
+//      still sitting there.
+//   2. `completed / total_size` — both live on every poll and need no extra
+//      request, which is what makes this right for a 1000-row list. `completed`
+//      is bytes of wanted data done and `total_size` is the whole torrent
+//      (where `size` is only the selected part), so the ratio is the answer in
+//      every ordinary case.
+//   3. `progress`, when a torrent reports no size at all (a magnet still asking
+//      the swarm) — the old behaviour, for the case where there is nothing
+//      better to say.
+function torrentFraction(t, files) {
+  var list = files || [];
+  var total = 0;
+  var done = 0;
+  for (var i = 0; i < list.length; i++) {
+    var size = numOr(list[i] && list[i].size, 0);
+    if (size <= 0) continue;
+    total += size;
+    done += size * clamp01(numOr(list[i].progress, 0));
+  }
+  if (total > 0) return clamp01(done / total);
+
+  var whole = numOr(t && t.total_size, 0);
+  var have = numOr(t && t.completed, -1);
+  if (whole > 0 && have >= 0) return clamp01(have / whole);
+
+  return clamp01(t && t.progress);
+}
+
+function torrentPercent(t, files) {
   // Floor, not round: 99.7% must not read as a finished download.
-  return Math.floor(v * 100) + "%";
+  return Math.floor(torrentFraction(t, files) * 100) + "%";
 }
 
 // The tile: the media glyph over a colour-coded badge. A data-URI SVG is the
@@ -747,13 +790,18 @@ function mediaIconFor(kind, seeds) {
   return tileIcon(kind, formatSeedCount(seeds), seedBand(seeds));
 }
 
-// Torrents: percentage downloaded, banded by state. A torrent awaiting a choice
-// reads 0% whatever qBittorrent says — with nothing selected it reports 100%,
-// having downloaded none of it.
+// Torrents: percentage of the whole torrent downloaded, banded by state.
+//
+// There is no "awaiting reads 0%" special case any more, and it is no longer
+// needed: it existed because `progress` reports 100% for a torrent with nothing
+// selected, and torrentFraction measures the whole torrent instead — so a
+// parked one reads the truth (usually 0%, or whatever really did land before
+// its files were deselected). The BAND still knows about it; the colour is what
+// says "this one is waiting on you".
 function torrentIconFor(t, awaiting) {
   return tileIcon(
     classifyTorrentMedia(t && t.name),
-    awaiting ? "0%" : torrentPercent(t),
+    torrentPercent(t, t && filesByHash[t.hash]),
     progressBand(t, awaiting)
   );
 }
@@ -2986,11 +3034,17 @@ function persistNames() {
   // maindata, so the category filter cannot make this drop live entries.
   if (connected) {
     var kept = {};
+    var keptMedia = {};
     for (var hash in fileNamesByHash) {
       if (!Object.prototype.hasOwnProperty.call(fileNamesByHash, hash)) continue;
-      if (torrents[hash]) kept[hash] = fileNamesByHash[hash];
+      if (!torrents[hash]) continue;
+      kept[hash] = fileNamesByHash[hash];
+      // The has-media memo is derived from these names, so it is pruned by the
+      // same rule rather than growing for the life of the session.
+      if (hasMediaByHash[hash] !== undefined) keptMedia[hash] = hasMediaByHash[hash];
     }
     fileNamesByHash = kept;
+    hasMediaByHash = keptMedia;
   }
   return api.storage.set(NAMES_STORAGE_KEY, { byHash: fileNamesByHash }).catch(function (e) {
     console.error("qBittorrent: could not save the file-name cache:", e);
@@ -3510,6 +3564,69 @@ function torrentStatusText(t, pending) {
 //
 // The tile carries the percentage (colour-coded by state), the trailing column
 // carries the size, and the subtitle leads with the status and the file count.
+// Is there something on this row to PLAY — a media file whose bytes are on
+// disk? The answer decides whether the row shows a Play button at all.
+//
+// The evidence is uneven, so this reports what it can prove and stays out of
+// the way otherwise. It answers "no" only when it KNOWS there is nothing:
+// hiding Play on a torrent that turns out to be playable is the one outcome
+// worth avoiding, and pressing it on a torrent that isn't already explains
+// itself (unplayableReason).
+//
+//   - Full file list cached (an opened torrent) → exact, via playableFiles.
+//   - Finished torrent → every file is on disk, so any media file will do, and
+//     the names cache is enough to say whether there is one.
+//   - Nothing downloaded at all → nothing can be playable, whatever is inside.
+//   - Names known and not one of them is media → nothing to play, ever.
+//   - Otherwise → part-downloaded with no per-file detail. Offer it.
+function torrentPlayable(t) {
+  if (!t) return false;
+  var files = filesByHash[t.hash];
+  if (files) return playableFiles(files).length > 0;
+
+  var hasMedia = torrentHasMediaFile(t.hash);
+  if (hasMedia === false) return false;
+  if (isFinished(t)) return true;
+  if (torrentFraction(t) <= 0) return false;
+  return true;
+}
+
+// Does this torrent contain a media file at all? `null` when its file list has
+// not been fetched yet — the caller must not read that as "no".
+//
+// Memoised because a torrent's hash IS its file list, so the answer can never
+// change for a hash; without it every row re-ran two regexes per file name on
+// every poll, which on a 1000-torrent list is tens of thousands of matches for
+// a fact that was settled the first time. Pruned with the names it reads.
+var hasMediaByHash = {};
+
+function torrentHasMediaFile(hash) {
+  if (hasMediaByHash[hash] !== undefined) return hasMediaByHash[hash];
+  var names = fileNamesByHash[hash];
+  if (!names) return null;
+  var found = false;
+  for (var i = 0; i < names.length; i++) {
+    if (mediaKindOf(names[i])) { found = true; break; }
+  }
+  hasMediaByHash[hash] = found;
+  return found;
+}
+
+// Which of the list's four declared actions this row shows. The host filters
+// the declared list down to these, keeping the declared order.
+//
+// Start and Stop are one control in two states — qBittorrent has no third —
+// so showing both always meant one of them was a no-op on every row: Start on
+// something already running, Stop on something already stopped. Only the one
+// that would do something is offered.
+function torrentRowActions(t) {
+  var ids = [];
+  if (torrentPlayable(t)) ids.push("qbt:play-torrent");
+  ids.push(isPaused(t) ? "qbt:start" : "qbt:stop");
+  ids.push("qbt:delete-ask");
+  return ids;
+}
+
 function torrentRow(t, fileMatches) {
   var pending = needsChoice(t);
   var bits = [torrentStatusText(t, pending)];
@@ -3557,6 +3674,9 @@ function torrentRow(t, fileMatches) {
     // torrent at a time, and the column only pulled the figure away from the
     // file count it belongs with.
     imageUrl: torrentIconFor(t, pending),
+    // Only the actions that would do something to THIS torrent — see
+    // torrentRowActions.
+    actions: torrentRowActions(t),
     // Double-click and Enter open the contents. For a container that is what
     // "open it" means — Play is the first overlay button, and playing a torrent
     // you have not looked inside is the rarer intent of the two.
@@ -3609,7 +3729,10 @@ function fileMatchItems(entries) {
         id: "qbtm:" + t.hash + ":" + j,
         title: baseName(m[j]),
         subtitle: (folder ? folder + "  ·  " : "") + "in “" + torrentName + "”",
-        imageUrl: tileIcon(mediaKindOf(m[j]) || "unknown", pending ? "0%" : torrentPercent(t), progressBand(t, pending)),
+        // The torrent's badge under the file's own glyph, and the same figure
+        // its row upstairs carries — one torrent must not report two
+        // percentages on one screen.
+        imageUrl: tileIcon(mediaKindOf(m[j]) || "unknown", torrentPercent(t, filesByHash[t.hash]), progressBand(t, pending)),
         action: "qbt:open-match"
       });
       shown++;
@@ -3635,14 +3758,18 @@ function fileMatchItems(entries) {
 // The facts the Info tab prints, as label/value pairs. Pure and exported, so
 // the set can be asserted without rendering: it is the one place a field is
 // silently dropped by a typo in a property name.
-function torrentInfoLines(t) {
+function torrentInfoLines(t, files) {
   if (!t) return [];
   var done = isFinished(t);
   var pending = needsChoice(t);
   var out = [{ heading: "Transfer" }];
 
   out.push({ label: "Status", value: torrentStatusText(t, pending) });
-  out.push({ label: "Progress", value: pending ? "0%" : torrentPercent(t) });
+  // The whole torrent, exactly as the list's badge counts it — and with the
+  // file list to hand here, counted file by file. A torrent that read 1% in the
+  // list and 100% on the page you opened from it would make both figures
+  // untrustworthy.
+  out.push({ label: "Progress", value: torrentPercent(t, files) });
   out.push({ label: "Size", value: formatBytes(t.total_size || t.size) });
   out.push({ label: "Downloaded", value: formatBytes(t.downloaded) });
   out.push({ label: "Uploaded", value: formatBytes(t.uploaded) });
@@ -3756,7 +3883,7 @@ function torrentDetailNodes(hash) {
     // no image of its own, and the title is what identifies it.
     plain: true,
     title: t.name || magnetDisplayName(t.magnet_uri) || hash,
-    subtitle: torrentStatusText(t, pending) + (pending ? "" : "  ·  " + torrentPercent(t)),
+    subtitle: torrentStatusText(t, pending) + "  ·  " + torrentPercent(t, files),
     meta: metaBits.join("  ·  "),
     backAction: "qbt:close-files",
     // In the hero, where every other detail page puts Play and Enqueue. These
@@ -3775,10 +3902,12 @@ function torrentDetailNodes(hash) {
     ]
   });
 
-  // 0% while nothing is selected: qBittorrent reports 100% for a torrent that
-  // wants no files, and a full bar over an empty download is the single most
-  // misleading thing this panel could draw.
-  var pct = pending ? 0 : Math.round(Math.min(1, Math.max(0, numOr(t.progress, 0))) * 1000) / 10;
+  // The whole torrent, file by file — the same figure as the badge and the
+  // hero. It used to be `progress`, which is the SELECTION's progress, with a
+  // special case forcing 0% while nothing was selected because otherwise
+  // qBittorrent's 100% drew a full bar over an empty download. Measuring the
+  // torrent instead removes both the lie and the special case.
+  var pct = Math.round(torrentFraction(t, files) * 1000) / 10;
   children.push({ type: "progress-bar", value: pct, max: 100, label: pct.toFixed(1) + "%" });
 
   if (isErrored(t)) {
@@ -3802,7 +3931,7 @@ function torrentDetailNodes(hash) {
     // PluginViewRenderer.css), not qBittorrent's. A heading has to LOOK like a
     // heading, and a label/value pair needs two columns — one "Label: value"
     // text node has nothing for the values to line up against.
-    var lines = torrentInfoLines(t);
+    var lines = torrentInfoLines(t, files);
     for (var li = 0; li < lines.length; li++) {
       if (lines[li].heading) {
         children.push({ type: "text", className: "plugin-heading", content: lines[li].heading });
@@ -4240,10 +4369,22 @@ function render() {
       // between them — WebAPI 2.11 renamed pause/resume to stop/start precisely
       // because they were one pair, and offering two buttons that post to the
       // same endpoint would be a lie about what the client can do.
+      // Only the glyph is on screen — the host renders the label as a tooltip —
+      // so Play and Start may not both be triangles. They mean different
+      // things: Play is about the music, Start is about the transfer, and "⏵"
+      // next to "▶" read as two goes at the same button.
+      //
+      // The transfer pair now speaks the arrow vocabulary the file rows already
+      // use for downloading ("↓", "⬇"): "⇅" is bytes moving in both directions,
+      // and "⏹" is the square that means stopped. "⏸" was worse than
+      // ambiguous — it was wrong. qBittorrent has no pause: WebAPI 2.11 renamed
+      // pause/resume to stop/start precisely because they were one pair.
+      //
+      // Which of Start / Stop a row actually shows is torrentRowActions'.
       actions: [
         { id: "qbt:play-torrent", label: "Play", icon: "▶" },
-        { id: "qbt:start", label: "Start", icon: "⏵" },
-        { id: "qbt:stop", label: "Stop", icon: "⏸" },
+        { id: "qbt:start", label: "Start", icon: "⇅" },
+        { id: "qbt:stop", label: "Stop", icon: "⏹" },
         { id: "qbt:delete-ask", label: "Remove", icon: "🗑" }
       ]
     });
@@ -7893,6 +8034,9 @@ return {
   _formatSeedCount: formatSeedCount,
   _progressBand: progressBand,
   _torrentPercent: torrentPercent,
+  _torrentFraction: torrentFraction,
+  _torrentPlayable: torrentPlayable,
+  _torrentRowActions: torrentRowActions,
   _torrentIconFor: torrentIconFor,
   _fileIconFor: fileIconFor,
   _fileState: fileState,
