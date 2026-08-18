@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.30.0
+
+**The "Matching files" list is a selection of its own.** Search across your
+torrents and the files it found now have **All / None**, a **Downloaded** preset
+that picks out exactly the matches whose bytes are on disk, and **▶ Play** /
+**+ Add to queue** — so "find every FLAC of this and play the ones I have" is
+three clicks. Selecting *files* rather than *torrents* is what the torrent list
+giving up its own multi-selection (0.28.0) made room for.
+
+Each row now says what its file is doing (*Downloaded*, *Downloading · 45%*,
+*Not selected*) and carries its own per-file badge instead of its torrent's
+average, a downloaded match can be dragged into the queue like any other track,
+and a selection spanning three releases queues as three releases in the order
+shown. A single click now selects; double-click, or **📂 Open torrent**, opens
+the torrent narrowed to that file as clicking used to.
+
+Knowing which matches are *here* needs each matched torrent's real file list —
+the name cache knows what a torrent contains, not what has arrived — so those
+are fetched in the background, six at a time, while you read. Until one lands
+its rows still show and open, they just don't offer to play. The fetch is kept
+out of the cache the contents panel uses, so a search can never change what the
+plugin *does* about a torrent (what it calls finished, what it imports), only
+what it shows.
+
+**"+N more matches" expands in place.** That row is the per-torrent cap of five,
+which stops one discography burying every other result; it used to open the
+torrent, which is a different list with a different filter. Now it just shows
+the rest — with a selection to build here, matches the cap hid were matches you
+could not pick. The overall 100-row cap still applies and now says that a
+selection can only act on rows that are shown.
+
 ## 0.29.0
 
 **The percentage is of the whole torrent now.** qBittorrent's `progress`

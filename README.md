@@ -141,10 +141,34 @@ them** — so `jóga flac` finds the compilation whose release name never says
 Björk, and a folder name like `live` finds every release carrying one. A
 torrent pulled in by its files says why on its row (*matches 3 files*), and the
 files themselves appear as a **"Matching files" list under the torrents** — one
-row per found file, with its folder and torrent named underneath. Clicking a
-match (or the torrent) opens the contents already narrowed to the matching
-files. A torrent matching dozens of files shows its first five plus a *"+N
-more"* row; the list caps at 100 rows and says when the cap cut anything.
+row per found file, with its state, its folder and its torrent named
+underneath.
+
+**That list is a selection of its own.** It has the usual **All / None**, a
+**Downloaded** preset that picks out exactly the matches whose bytes are on
+disk, and **▶ Play** / **+ Add to queue** — so "find every FLAC of this across
+my torrents and play the ones I actually have" is three clicks. Selecting
+*files* rather than torrents is possible because the torrent list above stopped
+being a selection (see above); a second multi-selection under a *Start all* /
+*Stop all* toolbar was ambiguous about what those acted on. A single click
+selects, double-click (or **📂 Open torrent**) opens the torrent narrowed to
+that file, and a downloaded match can be dragged into the queue like any other
+track.
+
+Play appears only on matches that are really here, which needs each matched
+torrent's real file list — the name cache knows what a torrent *contains*, not
+what has *arrived*. Those lists are fetched in the background, six at a time, as
+you read; until one lands its rows still show and open, they just don't offer to
+play. That fetch is deliberately kept out of the cache the contents panel uses,
+so searching can never change what the plugin *does* about a torrent (what it
+announces as finished, what it imports) — only what it shows you.
+
+A torrent matching dozens of files shows its first five plus a **"+N more"**
+row, which **expands in place** — the cap keeps one discography from burying
+every other result, and expanding is how you get past it. (It used to open the
+torrent instead. With a selection to build here, matches the cap hid were
+matches you couldn't pick.) The whole list still caps at 100 rows and says so
+when it cut anything.
 
 The file lists come from a cache that fills itself. The list already fetches
 each torrent's files once to print its file count; the names are kept, stored

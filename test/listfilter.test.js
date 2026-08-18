@@ -116,15 +116,21 @@ test("every found file becomes a readable row of its own", () => {
   assert.equal(r.rows[0].title, "07 - Bjork - Joga (Chill Edit).flac");
   assert.ok(r.rows[0].subtitle.includes("CD1"));
   assert.ok(r.rows[0].subtitle.includes("VA - Nordic Chill Compilation"));
-  // The hash rides in the id so the click can find its torrent.
-  assert.equal(r.rows[0].id, "qbtm:h2:0");
+  // The hash rides in the id so the click can find its torrent. With no file
+  // list fetched yet the row carries its POSITION behind an "n" — a position is
+  // not a file index, and an action that confused the two would play the wrong
+  // file. Nothing offers to play it, either.
+  assert.equal(r.rows[0].id, "qbtm:h2:n0");
   assert.equal(r.rows[0].action, "qbt:open-match");
+  assert.deepEqual(r.rows[0].actions, ["qbt:open-match"]);
+  assert.equal(r.rows[0].path, null);
+  assert.deepEqual(r.downloaded, []);
 });
 
 test("name-matched torrents contribute no file rows", () => {
   const r = matchItems([entry(T.bjork, []), entry(T.comp, ["CD1/07 - Joga.flac"])]);
   assert.equal(r.rows.length, 1);
-  assert.equal(r.rows[0].id, "qbtm:h2:0");
+  assert.equal(r.rows[0].id, "qbtm:h2:n0");
 });
 
 test("a torrent with many matches is capped with a '+N more' row", () => {
@@ -138,8 +144,34 @@ test("a torrent with many matches is capped with a '+N more' row", () => {
   const more = r.rows[5];
   assert.equal(more.id, "qbtm:h2:more");
   assert.ok(more.title.startsWith("+4 more"));
+  // It is not a file: nothing to play, nothing to enqueue, and it expands the
+  // list rather than navigating away from it.
+  assert.deepEqual(more.actions, []);
+  assert.equal(more.action, "qbt:expand-matches");
   // Per-torrent capping is represented, so it is not an overflow.
   assert.equal(r.overflow, false);
+});
+
+test("expanding a torrent lists every one of its matches", () => {
+  // The cap is why "+N more" exists at all, and with a selection to build here
+  // the hidden matches were matches you could not pick.
+  const files = [];
+  for (let i = 0; i < 9; i++) files.push("Disc/" + (i + 1) + ".flac");
+  const r = matchItems([entry(T.comp, files)], { h2: true });
+  assert.equal(r.rows.length, 9, "expanded, every match should have a row");
+  assert.equal(r.shown, 9);
+  assert.ok(!r.rows.some((x) => /:more$/.test(x.id)), "the stand-in should be gone");
+});
+
+test("the total cap still holds over an expanded torrent", () => {
+  // Expansion defeats the PER-TORRENT cap; the renderer's own limit is what
+  // stops 5000 rows nobody will read, so it must survive.
+  const files = [];
+  for (let i = 0; i < 400; i++) files.push("Disc/" + i + ".flac");
+  const r = matchItems([entry(T.comp, files)], { h2: true });
+  assert.equal(r.rows.length, 100);
+  assert.equal(r.total, 400);
+  assert.equal(r.overflow, true);
 });
 
 test("the total cap cuts the list and says so via overflow", () => {
@@ -154,6 +186,44 @@ test("the total cap cuts the list and says so via overflow", () => {
   assert.equal(r.shown, 100);
   assert.equal(r.total, 120);
   assert.equal(r.overflow, true);
+});
+
+// --- acting on a selection of matches ----------------------------------------
+
+test("a selection is grouped by torrent, in the order the list showed it", () => {
+  // Three releases must queue as three releases, not interleaved by whatever
+  // order the ids happen to arrive in.
+  const groups = plugin._matchRowGroups({
+    selectedIds: ["qbtm:h1:4", "qbtm:h2:0", "qbtm:h1:9", "qbtm:h3:2"],
+  });
+  assert.deepEqual(groups, [
+    { hash: "h1", indices: [4, 9] },
+    { hash: "h2", indices: [0] },
+    { hash: "h3", indices: [2] },
+  ]);
+});
+
+test("rows that name no file drop out of a selection", () => {
+  // A "+N more" stand-in and a row whose torrent has not been read yet both
+  // name no file index — acting on either would be acting on a guess.
+  const groups = plugin._matchRowGroups({
+    selectedIds: ["qbtm:h1:more", "qbtm:h1:n0", "qbtm:h1:3", "nonsense"],
+  });
+  assert.deepEqual(groups, [{ hash: "h1", indices: [3] }]);
+  assert.deepEqual(plugin._matchRowGroups({ selectedIds: ["qbtm:h1:more"] }), []);
+  assert.deepEqual(plugin._matchRowGroups({}), []);
+});
+
+test("a single row acted on without a selection still resolves", () => {
+  // The hover buttons send itemId, not selectedIds.
+  assert.deepEqual(plugin._matchRowGroups({ itemId: "qbtm:h1:7" }), [{ hash: "h1", indices: [7] }]);
+});
+
+test("the hash is readable from every kind of match row", () => {
+  assert.equal(plugin._matchRowHash("qbtm:h2:3"), "h2");
+  assert.equal(plugin._matchRowHash("qbtm:h2:n0"), "h2");
+  assert.equal(plugin._matchRowHash("qbtm:h2:more"), "h2");
+  assert.equal(plugin._matchRowHash("nonsense"), null);
 });
 
 test("a file straight in the torrent root has no folder prefix", () => {

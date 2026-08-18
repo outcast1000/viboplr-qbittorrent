@@ -270,6 +270,123 @@ test("the badge counts the whole torrent, not the selected files", async () => {
   }, undefined, { torrents });
 });
 
+// "first" is in both torrents' file lists and in neither torrent's NAME, so
+// both rows here are file matches — which is what the list under the torrents
+// is for. ("flac" would match one of them by name and contribute no file row.)
+test("the matching files are a selection of their own, with a Downloaded preset", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "first" });
+    await settle();
+    // Two lists on screen: the torrents (single-select, no toolbar) and the
+    // matches. The matches are the one you can build a selection in — which is
+    // only possible because the torrent list stopped being one.
+    const lists = walk(last(views)).filter((n) => n.type === "track-row-list");
+    assert.equal(lists.length, 2);
+    const matches = lists[1];
+    assert.equal(matches.selectable, true);
+    assert.ok(!matches.selectionMode, "the matches are where a MULTI selection lives");
+    assert.deepEqual(matches.actions.map((a) => a.id), [
+      "qbt:play-match",
+      "qbt:enqueue-match",
+      "qbt:open-match",
+    ]);
+    // "01 - First.flac" is downloaded in both torrents, so both rows are in the
+    // preset — and the preset names rows, which is what the host intersects.
+    const preset = matches.selectionPresets.find((p) => p.id === "downloaded");
+    assert.equal(preset.ids.length, matches.items.length);
+    assert.ok(preset.ids.every((id) => matches.items.some((i) => i.id === id)));
+    // The row's id is the FILE INDEX now — the background read landed — so it
+    // says what it is, offers to play, and carries a path for drag-to-queue.
+    const row = matches.items[0];
+    assert.match(row.id, /^qbtm:[^:]+:0$/);
+    assert.match(row.subtitle, /^Downloaded/);
+    assert.match(row.path, /^qbt:\/\/[^/]+\/0$/);
+    assert.deepEqual(row.actions, ["qbt:play-match", "qbt:enqueue-match", "qbt:open-match"]);
+  });
+});
+
+test("a match that isn't downloaded offers no Play and joins no preset", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    // "extras/bonus.mkv" is deselected and at 0%.
+    handlers["qbt:list-filter"]({ query: "bonus" });
+    await settle();
+    const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    const row = matches.items[0];
+    assert.deepEqual(row.actions, ["qbt:open-match"], "an absent file must not offer Play");
+    assert.equal(row.path, null);
+    assert.match(row.subtitle, /Not selected/);
+    assert.deepEqual(matches.selectionPresets.find((p) => p.id === "downloaded").ids, []);
+  });
+});
+
+test("playing a selection of matches queues them across torrents", async () => {
+  await withPlugin(async ({ views, handlers, played }) => {
+    handlers["qbt:list-filter"]({ query: "first" });
+    await settle();
+    const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    assert.equal(matches.items.length, 2, "precondition: one match in each torrent");
+    handlers["qbt:play-match"]({ selectedIds: matches.items.map((i) => i.id) });
+    await settle();
+    assert.equal(played.length, 1);
+    // One track per matched torrent, in the order the list showed them —
+    // through the same builder a torrent's own file list uses, so the entries
+    // carry real metadata rather than filenames.
+    assert.equal(played[0].tracks.length, 2);
+    assert.match(played[0].context.name, /Matching “first”/);
+    assert.ok(played[0].tracks.every((t) => /^qbt:\/\//.test(t.path)), "tracks must be playable qbt:// entries");
+  });
+});
+
+test("the '+N more' row expands in place instead of leaving the search", async () => {
+  const many = [];
+  for (let i = 0; i < 9; i++) many.push({ index: i, name: "Disc/" + i + ".flac", size: 10, progress: 1, priority: 1 });
+  const torrents = {
+    aaa: { hash: "aaa", name: "A Release", state: "stalledUP", progress: 1, size: 90, added_on: 1, category: "viboplr" },
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "disc" });
+    await settle();
+    const listOf = () => walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    const before = listOf();
+    const more = before.items.find((i) => /:more$/.test(i.id));
+    assert.ok(more, "expected a capped torrent to show a stand-in row");
+    assert.equal(more.action, "qbt:expand-matches");
+    assert.equal(before.items.length, 6, "5 matches plus the stand-in");
+
+    handlers["qbt:expand-matches"]({ itemId: more.id });
+    await settle();
+    const after = listOf();
+    // Still the search, with that torrent's matches all present — and they can
+    // now be selected, which is the point: a hidden match is one the Downloaded
+    // preset could never pick.
+    assert.ok(!after.items.some((i) => /:more$/.test(i.id)), "the stand-in should be gone");
+    assert.equal(after.items.length, 9);
+    assert.equal(after.selectionPresets.find((p) => p.id === "downloaded").ids.length, 9);
+  }, undefined, { files: () => many, torrents });
+});
+
+test("changing the filter forgets what was expanded", async () => {
+  // The rows are a different set for a different query, so a hash kept from
+  // the last one would expand something the user is no longer looking at.
+  const many = [];
+  for (let i = 0; i < 9; i++) many.push({ index: i, name: "Disc/" + i + ".flac", size: 10, progress: 1, priority: 1 });
+  const torrents = {
+    aaa: { hash: "aaa", name: "A Release", state: "stalledUP", progress: 1, size: 90, added_on: 1, category: "viboplr" },
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:list-filter"]({ query: "disc" });
+    await settle();
+    const listOf = () => walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    handlers["qbt:expand-matches"]({ itemId: listOf().items.find((i) => /:more$/.test(i.id)).id });
+    await settle();
+    assert.equal(listOf().items.length, 9);
+
+    handlers["qbt:list-filter"]({ query: "disc/" });
+    await settle();
+    assert.ok(listOf().items.some((i) => /:more$/.test(i.id)), "the cap should be back");
+  }, undefined, { files: () => many, torrents });
+});
+
 test("the torrent list is single-selection; the files inside one are not", async () => {
   await withPlugin(async ({ views, handlers }) => {
     const torrents = walk(last(views)).find((n) => n.type === "track-row-list");

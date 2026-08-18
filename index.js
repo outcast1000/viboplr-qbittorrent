@@ -199,6 +199,11 @@ var listFilter = "";
 // addPanelVisible). `true`/`false` is the user having opened or closed it, and
 // outranks the list from then on.
 var addOpen = null;
+// Torrents whose "+N more matches" row the user has opened, so their matching
+// files are all listed. Cleared whenever the filter changes: the rows are a
+// different set then, and a hash kept from the last query would expand
+// something the user is no longer looking at.
+var expandedMatches = {};
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -2962,6 +2967,66 @@ function ensureFiles(hash) {
   return fetchFiles(hash);
 }
 
+// File lists fetched for torrents the SEARCH turned up, kept apart from
+// filesByHash on purpose.
+//
+// The name cache can say a torrent contains "…/07 - Jóga.flac"; it cannot say
+// whether that file is on disk, and the whole point of the matching-files list
+// is picking the ones that are. So the real list is fetched for the torrents
+// with matches on screen.
+//
+// It is a SECOND cache because filesByHash is the contents panel's, and three
+// of the plugin's decisions read it: nothingSelected, needsChoice and — through
+// them — isFinished, which gate the "Finished downloading" toast, the library
+// import and the "waiting for you" row. Writing this data there would let a
+// background fetch change what the plugin DOES, silently, for torrents the user
+// only searched. The line held here: presentation reads whichever cache has an
+// answer (knownFiles), behaviour keeps reading the panel's own.
+var matchFilesByHash = {};
+
+// The best file list available for a torrent — the panel's if it is open, the
+// search's otherwise. For DISPLAY only; see above.
+function knownFiles(hash) {
+  return filesByHash[hash] || matchFilesByHash[hash] || null;
+}
+
+var matchFilesInFlight = {};
+var MATCH_FILES_PER_CYCLE = 6;
+
+// Fetch the file lists behind the matches on screen, a few at a time. Bounded
+// like the name burst and for the same reason: a filter that matched 200
+// torrents would otherwise open 200 sockets at a home server on one keystroke.
+function pumpMatchFiles(entries) {
+  if (!connected) return;
+  var all = entries || [];
+  var started = 0;
+  for (var i = 0; i < all.length && started < MATCH_FILES_PER_CYCLE; i++) {
+    var t = all[i].torrent;
+    if (!t || !(all[i].fileMatches || []).length) continue;
+    if (knownFiles(t.hash) || matchFilesInFlight[t.hash]) continue;
+    if (!hasMetadata(t)) continue;
+    matchFilesInFlight[t.hash] = true;
+    started++;
+    fetchMatchFiles(t.hash);
+  }
+}
+
+function fetchMatchFiles(hash) {
+  return fetchFilesQuiet(hash)
+    .then(function (files) {
+      matchFilesByHash[hash] = files;
+      render();
+    })
+    .catch(function (e) {
+      // Quiet: the rows fall back to what the name cache knows, which is what
+      // they showed before this existed.
+      console.error("qBittorrent: could not read a matched torrent's files:", e);
+    })
+    .then(function () {
+      delete matchFilesInFlight[hash];
+    });
+}
+
 // One torrent's parsed file list, quietly: no spinner, no notification, no
 // filesByHash write (a background caller must not race the contents panel's
 // own cache), failures propagated. Feeds the name cache as a side effect —
@@ -3368,8 +3433,12 @@ function rowIndices(data) {
 // partway and reads as corrupt.
 // The files these row indices name, whatever they are — the raw selection, so a
 // refusal can say which of the two reasons applies.
+// knownFiles, not filesByHash: the matching-files list acts on torrents the
+// user searched up rather than opened, whose lists live in the search's own
+// cache. Reading the best available list keeps one set of builders behind both
+// surfaces — the alternative was a second, parallel track builder.
 function selectedFiles(hash, indices) {
-  var files = filesByHash[hash] || [];
+  var files = knownFiles(hash) || [];
   var byIndex = {};
   for (var i = 0; i < files.length; i++) byIndex[files[i].index] = files[i];
   var out = [];
@@ -3699,13 +3768,104 @@ function torrentRow(t, fileMatches) {
 var MATCH_ROWS_PER_TORRENT = 5;
 var MATCH_ROWS_TOTAL = 100;
 
-function fileMatchItems(entries) {
+// A matched file's real entry, when its torrent's list has been fetched. The
+// map is built once per torrent rather than per row: a 2000-file release
+// scanned five times over is the same work five times.
+function fileIndexByName(files) {
+  var byName = {};
+  var list = files || [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && typeof list[i].index === "number") byName[String(list[i].name)] = list[i];
+  }
+  return byName;
+}
+
+// The torrent a "qbtm:<hash>:<…>" row belongs to.
+function matchRowHash(id) {
+  var m = /^qbtm:([^:]+):/.exec(String(id || ""));
+  return m ? m[1] : null;
+}
+
+// The selected match rows, grouped by torrent and in the order the list showed
+// them — a selection that spans three releases must queue as three releases,
+// not interleaved by whatever order the ids arrived in.
+//
+// Only rows naming a real file index are kept. A "+N more" row and a row whose
+// torrent has not been read yet ("…:n3") both name no file, so both drop out
+// here rather than at four later call sites.
+function matchRowGroups(data) {
+  var ids = [].concat((data && data.selectedIds) || (data && data.itemId) || []);
+  var order = [];
+  var byHash = {};
+  for (var i = 0; i < ids.length; i++) {
+    var m = /^qbtm:([^:]+):(\d+)$/.exec(String(ids[i]));
+    if (!m) continue;
+    if (!byHash[m[1]]) {
+      byHash[m[1]] = [];
+      order.push(m[1]);
+    }
+    byHash[m[1]].push(parseInt(m[2], 10));
+  }
+  var out = [];
+  for (var j = 0; j < order.length; j++) out.push({ hash: order[j], indices: byHash[order[j]] });
+  return out;
+}
+
+// Tracks for a selection of match rows, tags read and all — the same builder a
+// torrent's own file list uses, run once per torrent and concatenated.
+//
+// Resolves with a reason as well as the tracks, because "nothing playable" has
+// several causes and the row that produced it is long gone by then: the file
+// list may not have arrived, or the selection may be all cover art.
+function matchTracks(data) {
+  var groups = matchRowGroups(data);
+  if (!groups.length) {
+    return Promise.resolve({
+      tracks: [],
+      // The only way to select nothing usable is to have selected rows that
+      // name no file — a "+N more", or files still being read.
+      reason: "Still reading those torrents' files — try again in a moment"
+    });
+  }
+  var tracks = [];
+  var selected = [];
+  var chain = Promise.resolve();
+  groups.forEach(function (g) {
+    chain = chain
+      .then(function () {
+        // No fetch here: a row only carries a file index once its torrent's
+        // list has arrived, so by the time one can be selected the files are
+        // already known. Nothing writes filesByHash on this path either — see
+        // matchFilesByHash for why a search must not disturb the panel's cache.
+        selected = selected.concat(selectedFiles(g.hash, g.indices));
+        return tracksForIndicesTagged(g.hash, g.indices);
+      })
+      .then(function (some) {
+        tracks = tracks.concat(some);
+      })
+      .catch(function (e) {
+        // One unreadable torrent must not lose the rest of the selection.
+        console.error("qBittorrent: could not build tracks for a matched torrent:", e);
+      });
+  });
+  return chain.then(function () {
+    return { tracks: tracks, reason: unplayableReason(selected) };
+  });
+}
+
+// `expanded` is the set of torrent hashes whose "+N more" the user has opened.
+function fileMatchItems(entries, expanded) {
   var rows = [];
   var shown = 0; // matches with a row of their own (the "+N more" rows aren't)
   var total = 0; // every match found, shown or not
   // True only when the TOTAL cap cut something. The per-torrent cap leaves a
   // "+N more" row behind, so it needs no extra apology.
   var overflow = false;
+  // Row ids for the "Downloaded" preset. Built here because this is the only
+  // place that knows which rows exist AND what each one's file is doing; the
+  // host intersects them with what is on screen anyway.
+  var downloaded = [];
+  var open = expanded || {};
   var all = entries || [];
   for (var i = 0; i < all.length; i++) {
     var t = all[i].torrent;
@@ -3718,21 +3878,51 @@ function fileMatchItems(entries) {
     }
     var torrentName = t.name || magnetDisplayName(t.magnet_uri) || t.hash;
     var pending = needsChoice(t);
-    var cap = Math.min(m.length, MATCH_ROWS_PER_TORRENT);
+    var byName = fileIndexByName(knownFiles(t.hash));
+    var cap = open[t.hash] ? m.length : Math.min(m.length, MATCH_ROWS_PER_TORRENT);
     for (var j = 0; j < cap; j++) {
       if (rows.length >= MATCH_ROWS_TOTAL) {
         overflow = true;
         break;
       }
       var folder = folderSegments(m[j]).join(" / ");
+      var where = (folder ? folder + "  ·  " : "") + "in “" + torrentName + "”";
+      // The real file, once its torrent's list has landed. Without it a row can
+      // still be read and opened — it just can't say whether the file is here,
+      // and must not offer to play something it knows nothing about.
+      var f = byName[String(m[j])];
+      var kind = mediaKindOf(m[j]);
+      var done = !!f && numOr(f.progress, 0) >= 1;
+      var playable = done && !!kind && filesAreReachable();
+      // A file index is the id when there is one, so an action lands on the
+      // file the row is about. A name-only row carries its POSITION instead,
+      // behind an "n" — the two are different numbers and confusing them would
+      // play the wrong file.
+      var id = "qbtm:" + t.hash + ":" + (f ? f.index : "n" + j);
+      if (done) downloaded.push(id);
       rows.push({
-        id: "qbtm:" + t.hash + ":" + j,
+        id: id,
         title: baseName(m[j]),
-        subtitle: (folder ? folder + "  ·  " : "") + "in “" + torrentName + "”",
-        // The torrent's badge under the file's own glyph, and the same figure
-        // its row upstairs carries — one torrent must not report two
-        // percentages on one screen.
-        imageUrl: tileIcon(mediaKindOf(m[j]) || "unknown", torrentPercent(t, filesByHash[t.hash]), progressBand(t, pending)),
+        // The file's own state leads, exactly as it does inside a torrent: this
+        // list exists to find files you can play, so "is it here?" is the
+        // question being read. Unknown files simply don't claim either way.
+        subtitle: f ? fileStatusText(f, t) + "  ·  " + where : where,
+        // The file's own badge once it is known — per-file progress, not the
+        // torrent's average, which was only ever a stand-in for it.
+        imageUrl: f
+          ? fileIconFor(f, t)
+          : tileIcon(kind || "unknown", torrentPercent(t, knownFiles(t.hash)), progressBand(t, pending)),
+        // Play and Add to queue only on a file that is actually here. Opening
+        // the torrent works on any row, including one still being read.
+        actions: playable
+          ? ["qbt:play-match", "qbt:enqueue-match", "qbt:open-match"]
+          : ["qbt:open-match"],
+        // What makes the host's own right-click menu and drag-to-queue work on
+        // these rows, same as in a torrent's contents.
+        path: playable ? qbtUri(t.hash, f.index) : null,
+        album: torrentName,
+        // Double-click still opens the torrent narrowed to this file. A single
+        // click now SELECTS, because the list has a selection of its own.
         action: "qbt:open-match"
       });
       shown++;
@@ -3742,9 +3932,14 @@ function fileMatchItems(entries) {
         rows.push({
           id: "qbtm:" + t.hash + ":more",
           title: "+" + (m.length - cap) + " more " + (m.length - cap === 1 ? "match" : "matches"),
-          subtitle: "in “" + torrentName + "” — open it to see them all",
+          // It expands in place now. It used to open the torrent, which is a
+          // different list with a different filter — and with a selection to
+          // build here, matches the cap hid were matches you could not pick.
+          subtitle: "in “" + torrentName + "” — show them here",
           imageUrl: torrentIconFor(t, pending),
-          action: "qbt:open-match"
+          // Not a file: nothing to play, nothing to enqueue.
+          actions: [],
+          action: "qbt:expand-matches"
         });
       } else {
         // Matches left with no row at all — not even a "+N more" to stand in.
@@ -3752,7 +3947,7 @@ function fileMatchItems(entries) {
       }
     }
   }
-  return { rows: rows, shown: shown, total: total, overflow: overflow };
+  return { rows: rows, shown: shown, total: total, overflow: overflow, downloaded: downloaded };
 }
 
 // The facts the Info tab prints, as label/value pairs. Pure and exported, so
@@ -4392,23 +4587,48 @@ function render() {
 
   // The files the filter FOUND, as rows of their own under the torrents. The
   // torrent rows above only count their matches; this is where a match is
-  // readable, and clicking one opens its torrent narrowed to the matching
-  // files. Not selectable: the toolbar above acts on torrents, and a second
-  // selection scope under the same toolbar would make "Stop all" ambiguous.
-  var matches = fileMatchItems(filtered.shown);
+  // readable.
+  //
+  // It is a SELECTION of its own now, and can be because the torrent list above
+  // stopped being one: a second multi-selection under a toolbar of Start all /
+  // Stop all was ambiguous about what those acted on, and that toolbar's
+  // per-selection buttons are gone. So the answer to "select files, not
+  // torrents" is simply that this list is where a selection lives.
+  //
+  // Its rows need real files, not just names — the name cache cannot say
+  // whether a match is on disk — so the lists behind the matches on screen are
+  // fetched in the background as the user reads.
+  pumpMatchFiles(filtered.shown);
+  var matches = fileMatchItems(filtered.shown, expandedMatches);
   if (matches.rows.length) {
     children.push({
       type: "text",
       content: "Matching files (" + matches.total + ")",
       className: "muted"
     });
-    children.push({ type: "track-row-list", items: matches.rows });
+    children.push({
+      type: "track-row-list",
+      items: matches.rows,
+      selectable: true,
+      // "Downloaded" is the one preset this list needs, and the one the torrent
+      // contents list has no use for: there, you are choosing what to fetch,
+      // and here you are looking for what is already here. Audio / Video are
+      // not repeated — the query is what narrowed these rows in the first
+      // place, so a "flac" search does not also need an Audio button.
+      selectionPresets: [{ id: "downloaded", label: "Downloaded", ids: matches.downloaded }],
+      actions: [
+        { id: "qbt:play-match", label: "Play", icon: "▶" },
+        { id: "qbt:enqueue-match", label: "Add to queue", icon: "+" },
+        { id: "qbt:open-match", label: "Open torrent", icon: "📂" }
+      ]
+    });
     if (matches.overflow) {
       children.push({
         type: "text",
         className: "muted",
         content:
-          "Only the first " + matches.shown + " are listed here — narrow the search, or open a torrent to see its matches."
+          "Only the first " + matches.shown + " are listed here — narrow the search to see the rest. " +
+          "A selection can only act on rows that are shown."
       });
     }
   }
@@ -7659,6 +7879,7 @@ function registerActions() {
 
   api.ui.onAction("qbt:list-filter", function (data) {
     listFilter = String((data && data.query) || "");
+    expandedMatches = {};
     // Typing is the demand signal: start (or keep) filling the name cache for
     // whatever the filter can't answer yet.
     pumpNameBurst();
@@ -7667,7 +7888,46 @@ function registerActions() {
 
   api.ui.onAction("qbt:list-filter-clear", function () {
     listFilter = "";
+    expandedMatches = {};
     render();
+  });
+
+  api.ui.onAction("qbt:expand-matches", function (data) {
+    var hash = matchRowHash((data && data.itemId) || "");
+    if (!hash) return;
+    expandedMatches[hash] = true;
+    render();
+  });
+
+  api.ui.onAction("qbt:play-match", function (data) {
+    matchTracks(data).then(function (result) {
+      if (!result.tracks.length) {
+        api.ui.showNotification(result.reason);
+        return;
+      }
+      api.playback.playTracks(result.tracks, 0, {
+        name: "Matching “" + String(listFilter).trim() + "”",
+        source: "playlist"
+      });
+    });
+  });
+
+  api.ui.onAction("qbt:enqueue-match", function (data) {
+    matchTracks(data).then(function (result) {
+      if (!result.tracks.length) {
+        api.ui.showNotification(result.reason);
+        return;
+      }
+      var position = 0;
+      if (typeof api.playback.getQueue === "function") {
+        var q = api.playback.getQueue();
+        position = (q && q.tracks && q.tracks.length) || 0;
+      }
+      api.playback.insertTracks(result.tracks, position);
+      api.ui.showNotification(
+        result.tracks.length === 1 ? "Added to the queue" : "Added " + result.tracks.length + " to the queue"
+      );
+    });
   });
 
   api.ui.onAction("qbt:file-filter", function (data) {
@@ -8035,6 +8295,8 @@ return {
   _progressBand: progressBand,
   _torrentPercent: torrentPercent,
   _torrentFraction: torrentFraction,
+  _matchRowGroups: matchRowGroups,
+  _matchRowHash: matchRowHash,
   _torrentPlayable: torrentPlayable,
   _torrentRowActions: torrentRowActions,
   _torrentIconFor: torrentIconFor,
