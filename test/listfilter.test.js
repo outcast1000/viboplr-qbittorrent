@@ -133,43 +133,28 @@ test("name-matched torrents contribute no file rows", () => {
   assert.equal(r.rows[0].id, "qbtm:h2:n0");
 });
 
-test("a torrent with many matches is capped with a '+N more' row", () => {
+test("every match a torrent has gets a row — no per-torrent cap", () => {
+  // There used to be one (five rows and a "+N more" stand-in). A row that is
+  // not there is a row the selection cannot act on, so "Downloaded → Play"
+  // would silently skip most of what matched.
   const files = [];
   for (let i = 0; i < 9; i++) files.push("Disc/" + (i + 1) + ".flac");
   const r = matchItems([entry(T.comp, files)]);
-  // 5 real rows plus the stand-in.
-  assert.equal(r.rows.length, 6);
-  assert.equal(r.shown, 5);
+  assert.equal(r.rows.length, 9);
+  assert.equal(r.shown, 9);
   assert.equal(r.total, 9);
-  const more = r.rows[5];
-  assert.equal(more.id, "qbtm:h2:more");
-  assert.ok(more.title.startsWith("+4 more"));
-  // It is not a file: nothing to play, nothing to enqueue, and it expands the
-  // list rather than navigating away from it.
-  assert.deepEqual(more.actions, []);
-  assert.equal(more.action, "qbt:expand-matches");
-  // Per-torrent capping is represented, so it is not an overflow.
+  assert.ok(!r.rows.some((x) => /:more$/.test(x.id)), "no stand-in rows any more");
   assert.equal(r.overflow, false);
 });
 
-test("expanding a torrent lists every one of its matches", () => {
-  // The cap is why "+N more" exists at all, and with a selection to build here
-  // the hidden matches were matches you could not pick.
-  const files = [];
-  for (let i = 0; i < 9; i++) files.push("Disc/" + (i + 1) + ".flac");
-  const r = matchItems([entry(T.comp, files)], { h2: true });
-  assert.equal(r.rows.length, 9, "expanded, every match should have a row");
-  assert.equal(r.shown, 9);
-  assert.ok(!r.rows.some((x) => /:more$/.test(x.id)), "the stand-in should be gone");
-});
-
-test("the total cap still holds over an expanded torrent", () => {
-  // Expansion defeats the PER-TORRENT cap; the renderer's own limit is what
-  // stops 5000 rows nobody will read, so it must survive.
+test("one torrent's matches are cut by the total cap like anyone else's", () => {
+  // The whole-list limit is the only cap left, and it is what stops 5000 rows
+  // nobody will read.
   const files = [];
   for (let i = 0; i < 400; i++) files.push("Disc/" + i + ".flac");
-  const r = matchItems([entry(T.comp, files)], { h2: true });
+  const r = matchItems([entry(T.comp, files)]);
   assert.equal(r.rows.length, 100);
+  assert.equal(r.shown, 100);
   assert.equal(r.total, 400);
   assert.equal(r.overflow, true);
 });

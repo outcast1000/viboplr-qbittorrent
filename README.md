@@ -60,11 +60,24 @@ seeds and leechers give **connected out of what the tracker says exists**: 2
 connected is a routing problem if 300 are out there and a dead release if 2 are.
 A total qBittorrent hasn't been told is left off rather than shown as 0.
 
-The tile carries the **percentage downloaded**, coloured by
-state — blue transferring, green complete, yellow stalled or waiting on you,
-grey stopped, red errored. Colour is the state and not the number on purpose:
-90% stopped and 90% downloading are the same figure and completely different
-situations.
+The tile carries the **percentage downloaded**, and its colour is that same
+number: **red at 0%, green at 100%, yellow anywhere between**. One traffic
+light, answering the question a four-character badge can actually answer — *have
+I got this?* File tiles inside a torrent are banded by the same rule, so the two
+lists read alike. (A file nobody asked for shows *skip* in grey instead: it has
+no progress to report, and 0% red would read as "this failed" rather than "this
+was never wanted".)
+
+The colour follows the number *as displayed*, so they can never disagree: 0.4%
+floors to `0%` and is red, and 99.7% floors to `99%` and stays yellow. Only an
+actual 100% is green.
+
+The tile used to be coloured by the torrent's **state** instead — blue moving,
+grey stopped, red errored — so the badge said two different things at once and
+the colour was the half nobody could read without a key. The state has better
+places to live and is in all of them: the row's status text names it, the list
+sorts by it (waiting-on-you first, then errors, then transfers), and the row
+offers *Start* or *Stop* depending on which one it's in.
 
 That percentage is **of the whole torrent**, not of the files you selected from
 it. qBittorrent's own `progress` measures the selection, so picking one 3 MB
@@ -163,12 +176,20 @@ play. That fetch is deliberately kept out of the cache the contents panel uses,
 so searching can never change what the plugin *does* about a torrent (what it
 announces as finished, what it imports) — only what it shows you.
 
-A torrent matching dozens of files shows its first five plus a **"+N more"**
-row, which **expands in place** — the cap keeps one discography from burying
-every other result, and expanding is how you get past it. (It used to open the
-torrent instead. With a selection to build here, matches the cap hid were
-matches you couldn't pick.) The whole list still caps at 100 rows and says so
-when it cut anything.
+Every match gets a row. There is **no per-torrent cap** — there was one, five
+rows and a *"+N more"* stand-in, but a row that isn't there is a row the
+selection can't act on, so *Downloaded → Play* would quietly skip most of what
+matched. The list caps at **100 rows in total** and says how many it cut;
+narrowing the search is the way past that, and it's a control you're already
+holding.
+
+**Searching inside torrents starts at two characters.** One letter matches
+almost every file in every release — a hundred rows that say nothing, fetched
+the expensive way, since a single `a` would send the plugin off for file lists
+across the whole library. Torrent *names* are still filtered from the first
+character (that list is already in memory), and the view says which of the two
+is happening rather than leaving you to guess why a search found less than you
+expected.
 
 The file lists come from a cache that fills itself. The list already fetches
 each torrent's files once to print its file count; the names are kept, stored

@@ -173,40 +173,43 @@ test("Play is hidden when nothing in the torrent can be playing yet", () => {
   assert.ok(plugin._torrentRowActions(partial).indexOf("qbt:play-torrent") >= 0);
 });
 
-test("the badge colour is the state, not the percentage", () => {
-  // 90% stopped and 90% downloading are the same number and completely
-  // different situations, and which rows are moving is what you scan for.
-  const moving = plugin._progressBand({ state: "downloading", progress: 0.9 }, false);
-  const stopped = plugin._progressBand({ state: "stoppedDL", progress: 0.9 }, false);
-  assert.notEqual(moving.fill, stopped.fill);
-});
-
-test("every torrent state maps to a distinguishable band", () => {
+test("the badge colour is the number on it: red, yellow, green", () => {
+  // A traffic light for "have I got this?" — the one question four characters
+  // of badge can answer. The state has better places to live and is in all of
+  // them: the row's status text, the sort order, and which of Start / Stop it
+  // offers.
   const band = plugin._progressBand;
-  const done = band({ state: "stalledUP", progress: 1 }, false);
-  const error = band({ state: "missingFiles", progress: 0.5 }, false);
-  const moving = band({ state: "downloading", progress: 0.5 }, false);
-  const stopped = band({ state: "stoppedDL", progress: 0.5 }, false);
-  const stalled = band({ state: "stalledDL", progress: 0.5 }, false);
-  const fills = new Set([done.fill, error.fill, moving.fill, stopped.fill].map(String));
-  assert.equal(fills.size, 4);
-  // Stalled is not moving, so it must not wear the "in progress" colour.
-  assert.notEqual(stalled.fill, moving.fill);
-  // A magnet fetching metadata IS working, so it does.
-  assert.equal(band({ state: "metaDL", progress: 0 }, false).fill, moving.fill);
+  assert.equal(band(0).fill, "#bf2c37");
+  assert.equal(band(0.5).fill, "#e3b341");
+  assert.equal(band(1).fill, "#1a7f37");
 });
 
-test("a torrent waiting on the user is not filed with the ones they stopped", () => {
-  // Both are stopped in qBittorrent's eyes; only one of them needs a decision.
-  const awaiting = plugin._progressBand({ state: "stoppedDL", progress: 0 }, true);
-  const stopped = plugin._progressBand({ state: "stoppedDL", progress: 0 }, false);
-  assert.notEqual(awaiting.fill, stopped.fill);
+test("the colour follows the DISPLAYED percentage, never the raw fraction", () => {
+  const band = plugin._progressBand;
+  // 0.4% floors to "0%", so a badge reading 0% is red — not yellow over a
+  // number that says nothing has arrived.
+  assert.equal(band(0.004).fill, band(0).fill);
+  // 99.7% floors to "99%" and must not wear the finished colour.
+  assert.equal(band(0.997).fill, band(0.5).fill);
+  // Exactly 100% is the only green.
+  assert.notEqual(band(0.999).fill, band(1).fill);
 });
 
-test("a complete torrent is green whatever its state string says", () => {
-  const done = plugin._progressBand({ state: "stalledUP", progress: 1 }, false);
-  assert.equal(plugin._progressBand({ state: "pausedUP", progress: 1 }, false).fill, done.fill);
-  assert.equal(plugin._progressBand({ state: "queuedUP", progress: 1 }, false).fill, done.fill);
+test("a nonsense fraction still lands in a band", () => {
+  const band = plugin._progressBand;
+  assert.equal(band(-1).fill, band(0).fill);
+  assert.equal(band(4).fill, band(1).fill);
+  assert.equal(band(undefined).fill, band(0).fill);
+  assert.equal(band(NaN).fill, band(0).fill);
+});
+
+test("each band brings text that can be read on it", () => {
+  // The yellow that reads as yellow needs dark text where the other two need
+  // light; one shared choice makes at least one badge unreadable.
+  const band = plugin._progressBand;
+  assert.equal(band(0.5).text, "#1a1a1a");
+  assert.equal(band(0).text, "#ffffff");
+  assert.equal(band(1).text, "#ffffff");
 });
 
 // --- file tiles --------------------------------------------------------------
@@ -241,19 +244,16 @@ test("the contents panel survives its torrent being removed underneath it", () =
 test("a torrent parked with nothing selected is not coloured as complete", () => {
   // The shape qBittorrent really reports for it: 100% and seeding, because
   // nothing is wanted so nothing is missing. Green here would tell the user
-  // their download had finished when not a byte of it exists — which is why the
-  // awaiting check has to sit ABOVE the completion check in progressBand.
-  const parked = { hash: "p", state: "stalledUP", progress: 1 };
-  const reallyDone = { hash: "d", state: "stalledUP", progress: 1 };
-  assert.notEqual(
-    plugin._progressBand(parked, true).fill,
-    plugin._progressBand(reallyDone, false).fill,
-  );
-  // And it wears the same colour as anything else waiting on the user.
-  assert.equal(
-    plugin._progressBand(parked, true).fill,
-    plugin._progressBand({ hash: "h", state: "stoppedDL", progress: 0 }, true).fill,
-  );
+  // their download had finished when not a byte of it exists.
+  //
+  // This used to need a special case in the band. It doesn't now: the badge is
+  // fed torrentFraction, which measures the whole torrent, so a parked one is
+  // 0% and red for the same reason it reads "0%" — one number decides both.
+  const parked = { hash: "p", state: "stalledUP", progress: 1, completed: 0, total_size: 700 };
+  const reallyDone = { hash: "d", state: "stalledUP", progress: 1, completed: 700, total_size: 700 };
+  const bandOf = (t) => plugin._progressBand(plugin._torrentFraction(t));
+  assert.notEqual(bandOf(parked).fill, bandOf(reallyDone).fill);
+  assert.equal(bandOf(parked).fill, bandOf({ hash: "h", progress: 0 }).fill);
 });
 
 // --- per-file state ----------------------------------------------------------
@@ -316,15 +316,26 @@ test("a finished file reads Downloaded whatever the torrent is doing", () => {
   }
 });
 
-test("the four file states are four different colours", () => {
+test("a file's badge is banded by its own percentage, like a torrent's", () => {
   const f = (priority, progress) => ({ name: "a.flac", priority, progress });
-  const fills = [
-    plugin._fileIconFor(f(0, 0), { state: "downloading" }),
-    plugin._fileIconFor(f(1, 1), { state: "downloading" }),
-    plugin._fileIconFor(f(1, 0.4), { state: "stoppedDL" }),
-    plugin._fileIconFor(f(1, 0.4), { state: "downloading" }),
-  ];
-  assert.equal(new Set(fills).size, 4, "two file states look identical");
+  const running = { state: "downloading" };
+  const tile = (file, torrent) => decodeURIComponent(plugin._fileIconFor(file, torrent || running));
+  // Red at nothing, yellow part-way, green when it is all here.
+  assert.match(tile(f(1, 0)), /#bf2c37/);
+  assert.match(tile(f(1, 0.4)), /#e3b341/);
+  assert.match(tile(f(1, 1)), /#1a7f37/);
+  // Whether a part-downloaded file is moving or stopped is in its subtitle, in
+  // words. Two files with the same bytes on disk now look the same, which is
+  // the point of banding by the number.
+  assert.equal(plugin._fileIconFor(f(1, 0.4), { state: "stoppedDL" }), plugin._fileIconFor(f(1, 0.4), running));
+});
+
+test("a file nobody asked for reads 'skip', in its own colour", () => {
+  // Not a percentage, so it is not in the traffic light: 0% red would read as
+  // "this failed" rather than "this was never wanted".
+  const skip = decodeURIComponent(plugin._fileIconFor({ name: "extra.mkv", priority: 0, progress: 0 }, { state: "downloading" }));
+  assert.match(skip, />skip</);
+  assert.match(skip, /#6b7075/);
 });
 
 // --- swarm / torrent info formatters -----------------------------------------

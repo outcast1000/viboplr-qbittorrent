@@ -2,6 +2,19 @@
 
 ## 0.30.0
 
+**The percentage badge is a traffic light.** Its colour is now the number on it
+— **red at 0%, green at 100%, yellow in between** — on torrent tiles and on the
+file tiles inside them alike, so both lists read the same way. It follows the
+number *as displayed*, so the two can never disagree: 0.4% floors to `0%` and is
+red, 99.7% floors to `99%` and stays yellow, and only a real 100% is green. A
+deselected file still shows *skip* in grey, having no progress to report.
+
+The colour used to encode the torrent's **state** (blue moving, grey stopped,
+red errored), so the badge said two things at once and the colour was the half
+nobody could read without a key. The state is still in the places that can carry
+it properly: the row's status text, the sort order, and which of Start / Stop
+the row offers.
+
 **The "Matching files" list is a selection of its own.** Search across your
 torrents and the files it found now have **All / None**, a **Downloaded** preset
 that picks out exactly the matches whose bytes are on disk, and **▶ Play** /
@@ -24,12 +37,19 @@ out of the cache the contents panel uses, so a search can never change what the
 plugin *does* about a torrent (what it calls finished, what it imports), only
 what it shows.
 
-**"+N more matches" expands in place.** That row is the per-torrent cap of five,
-which stops one discography burying every other result; it used to open the
-torrent, which is a different list with a different filter. Now it just shows
-the rest — with a selection to build here, matches the cap hid were matches you
-could not pick. The overall 100-row cap still applies and now says that a
-selection can only act on rows that are shown.
+**"+N more matches" is gone, and so is the per-torrent cap behind it.** Every
+match a torrent has now gets a row of its own. A row that isn't there is a row
+the selection can't act on, so *Downloaded → Play* would quietly skip most of
+what matched — worse than a long list. The **100-row total cap** is the only one
+left; it now reports how many it cut, and that a selection can only act on rows
+that are shown.
+
+**Searching inside torrents starts at two characters.** One letter matches
+almost every file in every release: a hundred rows that say nothing, fetched the
+expensive way, since a single `a` would send the plugin off for file lists
+across the whole library. Torrent *names* are still filtered from the first
+character, and the view now says which of the two is happening instead of
+leaving you to wonder why a search found less than expected.
 
 ## 0.29.0
 

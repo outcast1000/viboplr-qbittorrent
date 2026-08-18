@@ -337,7 +337,7 @@ test("playing a selection of matches queues them across torrents", async () => {
   });
 });
 
-test("the '+N more' row expands in place instead of leaving the search", async () => {
+test("every match is listed and selectable, up to the whole-list limit", async () => {
   const many = [];
   for (let i = 0; i < 9; i++) many.push({ index: i, name: "Disc/" + i + ".flac", size: 10, progress: 1, priority: 1 });
   const torrents = {
@@ -346,45 +346,37 @@ test("the '+N more' row expands in place instead of leaving the search", async (
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:list-filter"]({ query: "disc" });
     await settle();
-    const listOf = () => walk(last(views)).filter((n) => n.type === "track-row-list")[1];
-    const before = listOf();
-    const more = before.items.find((i) => /:more$/.test(i.id));
-    assert.ok(more, "expected a capped torrent to show a stand-in row");
-    assert.equal(more.action, "qbt:expand-matches");
-    assert.equal(before.items.length, 6, "5 matches plus the stand-in");
-
-    handlers["qbt:expand-matches"]({ itemId: more.id });
-    await settle();
-    const after = listOf();
-    // Still the search, with that torrent's matches all present — and they can
-    // now be selected, which is the point: a hidden match is one the Downloaded
-    // preset could never pick.
-    assert.ok(!after.items.some((i) => /:more$/.test(i.id)), "the stand-in should be gone");
-    assert.equal(after.items.length, 9);
-    assert.equal(after.selectionPresets.find((p) => p.id === "downloaded").ids.length, 9);
+    const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
+    // No stand-in row: a match with no row is one the Downloaded preset could
+    // never pick, which made "select the completed ones and play them" a lie.
+    assert.equal(matches.items.length, 9);
+    assert.ok(!matches.items.some((i) => /:more$/.test(i.id)));
+    assert.equal(matches.selectionPresets.find((p) => p.id === "downloaded").ids.length, 9);
   }, undefined, { files: () => many, torrents });
 });
 
-test("changing the filter forgets what was expanded", async () => {
-  // The rows are a different set for a different query, so a hash kept from
-  // the last one would expand something the user is no longer looking at.
-  const many = [];
-  for (let i = 0; i < 9; i++) many.push({ index: i, name: "Disc/" + i + ".flac", size: 10, progress: 1, priority: 1 });
-  const torrents = {
-    aaa: { hash: "aaa", name: "A Release", state: "stalledUP", progress: 1, size: 90, added_on: 1, category: "viboplr" },
-  };
-  await withPlugin(async ({ views, handlers }) => {
-    handlers["qbt:list-filter"]({ query: "disc" });
+test("a single character filters names only, and says so", async () => {
+  await withPlugin(async ({ views, handlers, posts }) => {
+    const before = posts.length;
+    handlers["qbt:list-filter"]({ query: "f" });
     await settle();
-    const listOf = () => walk(last(views)).filter((n) => n.type === "track-row-list")[1];
-    handlers["qbt:expand-matches"]({ itemId: listOf().items.find((i) => /:more$/.test(i.id)).id });
-    await settle();
-    assert.equal(listOf().items.length, 9);
+    const nodes = walk(last(views));
+    // One letter matches nearly every file in every release, so searching
+    // inside them would cost a library-wide fetch to answer nothing.
+    assert.equal(nodes.filter((n) => n.type === "track-row-list").length, 1, "no matching-files list for one character");
+    assert.ok(
+      nodes.some((n) => /type one more character/i.test(n.content || "")),
+      "the boundary has to be stated — the box promises to search inside torrents",
+    );
+    assert.equal(posts.length, before, "one character must not kick off any fetching");
 
-    handlers["qbt:list-filter"]({ query: "disc/" });
+    // Two is enough.
+    handlers["qbt:list-filter"]({ query: "fi" });
     await settle();
-    assert.ok(listOf().items.some((i) => /:more$/.test(i.id)), "the cap should be back");
-  }, undefined, { files: () => many, torrents });
+    const after = walk(last(views));
+    assert.equal(after.filter((n) => n.type === "track-row-list").length, 2);
+    assert.ok(!after.some((n) => /type one more character/i.test(n.content || "")));
+  });
 });
 
 test("the torrent list is single-selection; the files inside one are not", async () => {

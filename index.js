@@ -199,11 +199,6 @@ var listFilter = "";
 // addPanelVisible). `true`/`false` is the user having opened or closed it, and
 // outranks the list from then on.
 var addOpen = null;
-// Torrents whose "+N more matches" row the user has opened, so their matching
-// files are all listed. Cleared whenever the filter changes: the rows are a
-// different set then, and a hash kept from the last query would expand
-// something the user is no longer looking at.
-var expandedMatches = {};
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -677,29 +672,35 @@ function formatSeedCount(seeds) {
   return Math.round(seeds / 1000) + "k";
 }
 
-// Progress bands for the Torrents list. The colour is the torrent's STATE, not
-// its percentage: 90% stopped and 90% downloading are the same number and
-// completely different situations, and the one thing you scan a list of
-// transfers for is which rows are actually moving.
+// Progress bands. The colour is the NUMBER on the badge: red at 0%, green at
+// 100%, yellow anywhere between — one traffic light meaning "have I got this?",
+// which is the question a badge four characters wide can actually answer.
+//
+// It used to encode the torrent's STATE (blue moving, grey stopped, red
+// errored, yellow waiting), so the number and the colour said two different
+// things and the colour was the one nobody could read without a key. The state
+// has better places to live and is in all of them: the row's status text names
+// it, the list sorts by it (torrents waiting on you first, then errors, then
+// transfers), and Start / Stop shows which one the row is in.
+//
+// Each band carries its own text colour: yellow needs dark text where the other
+// two need light, and one shared choice makes at least one badge unreadable.
 var PROGRESS_BANDS = {
-  error: { fill: "#bf2c37", text: "#ffffff" },
+  none: { fill: "#bf2c37", text: "#ffffff" },
+  partial: { fill: "#e3b341", text: "#1a1a1a" },
   done: { fill: "#1a7f37", text: "#ffffff" },
-  moving: { fill: "#1f6feb", text: "#ffffff" },
-  waiting: { fill: "#e3b341", text: "#1a1a1a" },
+  // Not a percentage at all — the "skip" badge on a file nobody asked for.
   stopped: { fill: "#6b7075", text: "#ffffff" }
 };
 
-function progressBand(t, awaiting) {
-  if (isErrored(t)) return PROGRESS_BANDS.error;
-  // Above the completion check, not below it: a torrent with nothing selected
-  // reports 100% complete, and green would tell the user their download had
-  // finished when not a byte of it exists. Grey would file it with the ones
-  // they stopped on purpose; this one is waiting on them.
-  if (awaiting) return PROGRESS_BANDS.waiting;
-  if (isComplete(t)) return PROGRESS_BANDS.done;
-  if (isPaused(t)) return PROGRESS_BANDS.stopped;
-  if (/^(downloading|forcedDL|metaDL|forcedMetaDL)$/.test(String((t && t.state) || ""))) return PROGRESS_BANDS.moving;
-  return PROGRESS_BANDS.waiting; // queued, stalled, checking, moving, allocating
+// Banded on the DISPLAYED integer, not the raw fraction, so the colour can
+// never disagree with the number beside it: 0.4% floors to "0%" and is red,
+// 99.7% floors to "99%" and stays yellow.
+function progressBand(fraction) {
+  var pct = Math.floor(clamp01(fraction) * 100);
+  if (pct <= 0) return PROGRESS_BANDS.none;
+  if (pct >= 100) return PROGRESS_BANDS.done;
+  return PROGRESS_BANDS.partial;
 }
 
 function clamp01(v) {
@@ -748,9 +749,15 @@ function torrentFraction(t, files) {
   return clamp01(t && t.progress);
 }
 
+// Floor, not round: 99.7% must not read as a finished download. progressBand
+// floors the same value, which is what keeps the colour and the number telling
+// one story.
+function percentLabel(fraction) {
+  return Math.floor(clamp01(fraction) * 100) + "%";
+}
+
 function torrentPercent(t, files) {
-  // Floor, not round: 99.7% must not read as a finished download.
-  return Math.floor(torrentFraction(t, files) * 100) + "%";
+  return percentLabel(torrentFraction(t, files));
 }
 
 // The tile: the media glyph over a colour-coded badge. A data-URI SVG is the
@@ -795,20 +802,17 @@ function mediaIconFor(kind, seeds) {
   return tileIcon(kind, formatSeedCount(seeds), seedBand(seeds));
 }
 
-// Torrents: percentage of the whole torrent downloaded, banded by state.
+// Torrents: how much of the whole torrent is downloaded, as a number and as the
+// colour behind it — both from the one fraction, so they cannot disagree.
 //
 // There is no "awaiting reads 0%" special case any more, and it is no longer
 // needed: it existed because `progress` reports 100% for a torrent with nothing
 // selected, and torrentFraction measures the whole torrent instead — so a
 // parked one reads the truth (usually 0%, or whatever really did land before
-// its files were deselected). The BAND still knows about it; the colour is what
-// says "this one is waiting on you".
-function torrentIconFor(t, awaiting) {
-  return tileIcon(
-    classifyTorrentMedia(t && t.name),
-    torrentPercent(t, t && filesByHash[t.hash]),
-    progressBand(t, awaiting)
-  );
+// its files were deselected).
+function torrentIconFor(t) {
+  var fraction = torrentFraction(t, t && knownFiles(t.hash));
+  return tileIcon(classifyTorrentMedia(t && t.name), percentLabel(fraction), progressBand(fraction));
 }
 
 // What one file inside a torrent is doing. Four states, and the distinction
@@ -942,6 +946,19 @@ function filterFiles(files, query) {
 
 // Same matcher, over plain name strings — the shape the cross-torrent name
 // cache holds, where there is no file object to carry.
+// Searching INSIDE torrents needs at least two characters. One character
+// matches almost every file in every release, so it produces a hundred rows
+// that say nothing, and it does it the expensive way — a single "a" would send
+// the plugin off to fetch file lists for the whole library to answer a question
+// nobody asked. Torrent NAMES are still filtered from the first character:
+// that list is already in memory, and narrowing it is what one letter can
+// usefully do.
+var MIN_FILE_SEARCH_CHARS = 2;
+
+function fileSearchActive(query) {
+  return String(query == null ? "" : query).trim().length >= MIN_FILE_SEARCH_CHARS;
+}
+
 function matchingNames(names, query) {
   var list = names || [];
   var out = [];
@@ -977,6 +994,10 @@ function filterTorrentList(list, query, namesByHash) {
       shown.push({ torrent: t, fileMatches: [] });
       continue;
     }
+    // One character filters names only — see MIN_FILE_SEARCH_CHARS. Nothing is
+    // "unchecked" then either: the plugin isn't looking inside, so there is no
+    // pending answer to promise.
+    if (!fileSearchActive(q)) continue;
     var names = byHash[t.hash];
     if (names) {
       var m = matchingNames(names, q);
@@ -1174,18 +1195,18 @@ function selectionSummary(files) {
 // exists for — is this file coming, and how much of it is here — so a file the
 // user deselected reads "skip" in grey rather than sitting at a percentage that
 // will never move.
+// A file's badge answers the same question as a torrent's, so it is banded by
+// the same rule: red at 0%, green at 100%, yellow between. Whether the file is
+// selected, waiting or actively downloading is in its subtitle, in words.
+//
+// "skip" is the exception because it is not a percentage — a file nobody asked
+// for has no progress to report, and 0% red would read as "this failed" rather
+// than "this was never wanted".
 function fileIconFor(f, torrent) {
   var kind = mediaKindOf(f && f.name) || "unknown";
-  switch (fileState(f, torrent)) {
-    case "skipped":
-      return tileIcon(kind, "skip", PROGRESS_BANDS.stopped);
-    case "done":
-      return tileIcon(kind, "100%", PROGRESS_BANDS.done);
-    case "waiting":
-      return tileIcon(kind, filePercent(f), PROGRESS_BANDS.waiting);
-    default:
-      return tileIcon(kind, filePercent(f), PROGRESS_BANDS.moving);
-  }
+  if (fileState(f, torrent) === "skipped") return tileIcon(kind, "skip", PROGRESS_BANDS.stopped);
+  var fraction = clamp01(numOr(f && f.progress, 0));
+  return tileIcon(kind, percentLabel(fraction), progressBand(fraction));
 }
 
 // qBittorrent reports paths in ITS OWN filesystem's style, which is not
@@ -3194,7 +3215,7 @@ var BURST_LIMIT = 6;
 var burstInFlight = 0;
 
 function pumpNameBurst() {
-  if (!connected || !String(listFilter).trim()) return;
+  if (!connected || !fileSearchActive(listFilter)) return;
   var list = visibleTorrents();
   for (var i = 0; i < list.length && burstInFlight < BURST_LIMIT; i++) {
     var t = list[i];
@@ -3742,7 +3763,7 @@ function torrentRow(t, fileMatches) {
     // candidate releases, so a column earns its place. Here you are reading one
     // torrent at a time, and the column only pulled the figure away from the
     // file count it belongs with.
-    imageUrl: torrentIconFor(t, pending),
+    imageUrl: torrentIconFor(t),
     // Only the actions that would do something to THIS torrent — see
     // torrentRowActions.
     actions: torrentRowActions(t),
@@ -3760,12 +3781,15 @@ function torrentRow(t, fileMatches) {
 // (per-file progress isn't in the name cache, and the torrent's is the honest
 // approximation the badge colour already encodes).
 //
-// Capped twice. Per torrent, because "flac" matches an entire discography and
-// forty rows of one release bury every other result — the "+N more" row stands
-// in and opens the torrent like any other. And in total, because the renderer
-// will happily draw 5000 rows and nobody will read them; the caller prints the
-// remainder so truncation never masquerades as completeness.
-var MATCH_ROWS_PER_TORRENT = 5;
+// Capped once, at the whole list: the renderer will happily draw 5000 rows and
+// nobody will read them, and the caller prints the remainder so truncation
+// never masquerades as completeness.
+//
+// There is no per-torrent cap. There was — five rows and a "+N more" stand-in,
+// so one discography could not bury every other result — but a row that is not
+// there is a row the selection cannot act on, and "Downloaded → Play" silently
+// skipping most of what matched is worse than a long list. Narrowing the search
+// is the answer to a long list, and it is one the user is already holding.
 var MATCH_ROWS_TOTAL = 100;
 
 // A matched file's real entry, when its torrent's list has been fetched. The
@@ -3853,8 +3877,7 @@ function matchTracks(data) {
   });
 }
 
-// `expanded` is the set of torrent hashes whose "+N more" the user has opened.
-function fileMatchItems(entries, expanded) {
+function fileMatchItems(entries) {
   var rows = [];
   var shown = 0; // matches with a row of their own (the "+N more" rows aren't)
   var total = 0; // every match found, shown or not
@@ -3865,7 +3888,6 @@ function fileMatchItems(entries, expanded) {
   // place that knows which rows exist AND what each one's file is doing; the
   // host intersects them with what is on screen anyway.
   var downloaded = [];
-  var open = expanded || {};
   var all = entries || [];
   for (var i = 0; i < all.length; i++) {
     var t = all[i].torrent;
@@ -3877,10 +3899,11 @@ function fileMatchItems(entries, expanded) {
       continue;
     }
     var torrentName = t.name || magnetDisplayName(t.magnet_uri) || t.hash;
-    var pending = needsChoice(t);
     var byName = fileIndexByName(knownFiles(t.hash));
-    var cap = open[t.hash] ? m.length : Math.min(m.length, MATCH_ROWS_PER_TORRENT);
-    for (var j = 0; j < cap; j++) {
+    // The torrent's own figure, for rows whose file is not known yet — once per
+    // torrent rather than once per row.
+    var torrentDone = torrentFraction(t, knownFiles(t.hash));
+    for (var j = 0; j < m.length; j++) {
       if (rows.length >= MATCH_ROWS_TOTAL) {
         overflow = true;
         break;
@@ -3911,7 +3934,7 @@ function fileMatchItems(entries, expanded) {
         // torrent's average, which was only ever a stand-in for it.
         imageUrl: f
           ? fileIconFor(f, t)
-          : tileIcon(kind || "unknown", torrentPercent(t, knownFiles(t.hash)), progressBand(t, pending)),
+          : tileIcon(kind || "unknown", percentLabel(torrentDone), progressBand(torrentDone)),
         // Play and Add to queue only on a file that is actually here. Opening
         // the torrent works on any row, including one still being read.
         actions: playable
@@ -3926,25 +3949,6 @@ function fileMatchItems(entries, expanded) {
         action: "qbt:open-match"
       });
       shown++;
-    }
-    if (m.length > cap) {
-      if (rows.length < MATCH_ROWS_TOTAL) {
-        rows.push({
-          id: "qbtm:" + t.hash + ":more",
-          title: "+" + (m.length - cap) + " more " + (m.length - cap === 1 ? "match" : "matches"),
-          // It expands in place now. It used to open the torrent, which is a
-          // different list with a different filter — and with a selection to
-          // build here, matches the cap hid were matches you could not pick.
-          subtitle: "in “" + torrentName + "” — show them here",
-          imageUrl: torrentIconFor(t, pending),
-          // Not a file: nothing to play, nothing to enqueue.
-          actions: [],
-          action: "qbt:expand-matches"
-        });
-      } else {
-        // Matches left with no row at all — not even a "+N more" to stand in.
-        overflow = true;
-      }
     }
   }
   return { rows: rows, shown: shown, total: total, overflow: overflow, downloaded: downloaded };
@@ -4488,6 +4492,18 @@ function render() {
 
   var filtered = filterTorrentList(list, listFilter, fileNamesByHash);
 
+  // One character filters torrent names only. Said out loud, because the box
+  // promises to search "the files inside them" and a user who typed a letter
+  // and saw fewer results than they expected has no way to know the search
+  // hasn't started yet.
+  if (String(listFilter).trim() && !fileSearchActive(listFilter)) {
+    children.push({
+      type: "text",
+      className: "muted",
+      content: "Filtering torrent names — type one more character to search inside them too."
+    });
+  }
+
   // A search over a cold cache: some torrents genuinely cannot answer yet.
   // Said out loud, or "no matches" below would be a verdict the plugin doesn't
   // have — the burst is filling these in and each landing re-renders.
@@ -4599,7 +4615,7 @@ function render() {
   // whether a match is on disk — so the lists behind the matches on screen are
   // fetched in the background as the user reads.
   pumpMatchFiles(filtered.shown);
-  var matches = fileMatchItems(filtered.shown, expandedMatches);
+  var matches = fileMatchItems(filtered.shown);
   if (matches.rows.length) {
     children.push({
       type: "text",
@@ -4627,8 +4643,8 @@ function render() {
         type: "text",
         className: "muted",
         content:
-          "Only the first " + matches.shown + " are listed here — narrow the search to see the rest. " +
-          "A selection can only act on rows that are shown."
+          "Showing the first " + matches.shown + " of " + matches.total +
+          " — narrow the search to see the rest. A selection can only act on rows that are shown."
       });
     }
   }
@@ -7879,7 +7895,6 @@ function registerActions() {
 
   api.ui.onAction("qbt:list-filter", function (data) {
     listFilter = String((data && data.query) || "");
-    expandedMatches = {};
     // Typing is the demand signal: start (or keep) filling the name cache for
     // whatever the filter can't answer yet.
     pumpNameBurst();
@@ -7888,14 +7903,6 @@ function registerActions() {
 
   api.ui.onAction("qbt:list-filter-clear", function () {
     listFilter = "";
-    expandedMatches = {};
-    render();
-  });
-
-  api.ui.onAction("qbt:expand-matches", function (data) {
-    var hash = matchRowHash((data && data.itemId) || "");
-    if (!hash) return;
-    expandedMatches[hash] = true;
     render();
   });
 
