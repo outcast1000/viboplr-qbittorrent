@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.27.0
+
+**The paste box is now a button.** *Paste a magnet link or .torrent URL* no
+longer sits above the list all day for a thing you do once and then watch for an
+hour. The toolbar leads with **Add torrent…**, which opens the box in an *Add a
+torrent* panel — with the same one-click **Paste**, and a line saying what
+happens next (it starts straight away, or arrives paused when *Choose files
+before downloading* is on). A successful add closes it again.
+
+It is a panel rather than a floating dialog because the plugin view API has no
+dialog with an input in it — its one modal node carries a message and two
+buttons — and a modal faked out of divs is not what the rest of the app does.
+
+**An empty list still opens it for you.** With nothing to watch, adding
+something is the whole job of that screen, so the box is open to begin with.
+Close it and it stays closed — the button never reopens what you just dismissed.
+The toolbar also moved above the box, so *Start all* / *Stop all* / *Refresh*
+and the connection status are the first row on the screen.
+
 ## 0.26.0
 
 **Open a non-media file, or reveal its folder.** A downloaded file that isn't

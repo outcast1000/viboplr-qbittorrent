@@ -195,6 +195,10 @@ var stopped = false;
 // fileNamesByHash), so "jóga flac" finds the compilation that never says Björk
 // in its release name.
 var listFilter = "";
+// The add box: `null` means nobody has said, so the list decides (see
+// addPanelVisible). `true`/`false` is the user having opened or closed it, and
+// outranks the list from then on.
+var addOpen = null;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -2171,6 +2175,9 @@ function addTorrent(source, opts) {
       // Show where it went. Adding from the Search tab otherwise leaves the user
       // looking at search results with no sign anything happened.
       activeTab = "torrents";
+      // The link has been taken; the box has done its job and the row it
+      // produced is what to look at now.
+      addOpen = false;
       render();
       return refresh().then(function () {
         if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint);
@@ -4054,12 +4061,48 @@ function render() {
   }
 
   children.push({
-    type: "search-input",
-    placeholder: "Paste a magnet link or .torrent URL",
-    action: "qbt:add",
-    buttonLabel: "Add",
-    pasteButton: true
+    type: "toolbar",
+    buttons: [
+      { label: "Add torrent…", action: "qbt:add-toggle", variant: "accent", disabled: !connected },
+      { label: "Start all", action: "qbt:start-all", variant: "secondary", disabled: !connected },
+      { label: "Stop all", action: "qbt:stop-all", variant: "secondary", disabled: !connected },
+      { label: "Refresh", action: "qbt:refresh", variant: "secondary" }
+    ],
+    status: statusLine(),
+    statusVariant: lastError ? "error" : connected ? "success" : "default"
   });
+
+  // Adding is a thing you do once and then watch for an hour, so the box no
+  // longer holds a permanent row above the list — it opens from the toolbar.
+  //
+  // It is a panel and not a real dialog because there is no host dialog to put
+  // it in: the plugin view API's one modal node is `confirm`, which carries a
+  // message and two buttons and has no input. A panel in place is the honest
+  // version of the idea rather than a modal drawn out of divs.
+  if (addPanelVisible()) {
+    children.push({
+      type: "section",
+      title: "Add a torrent",
+      children: [
+        {
+          type: "search-input",
+          placeholder: "Paste a magnet link or .torrent URL",
+          action: "qbt:add",
+          buttonLabel: "Add",
+          // The only route to the clipboard a plugin has — the host reads it and
+          // submits in one click, which is the whole gesture for a copied magnet.
+          pasteButton: true
+        },
+        {
+          type: "text",
+          className: "muted",
+          content: chooseFilesFirst
+            ? "It arrives paused so you can choose which files download."
+            : "A magnet or the address of a .torrent file. It starts downloading straight away."
+        }
+      ]
+    });
+  }
 
   // The window between "add accepted" and "torrent found in the list". It can
   // run several seconds, and until now it showed nothing at all — the toast that
@@ -4105,17 +4148,6 @@ function render() {
     });
   }
 
-  children.push({
-    type: "toolbar",
-    buttons: [
-      { label: "Start all", action: "qbt:start-all", variant: "secondary", disabled: !connected },
-      { label: "Stop all", action: "qbt:stop-all", variant: "secondary", disabled: !connected },
-      { label: "Refresh", action: "qbt:refresh", variant: "secondary" }
-    ],
-    status: statusLine(),
-    statusVariant: lastError ? "error" : connected ? "success" : "default"
-  });
-
   // Also shown while the box holds text over an emptied list — hiding the
   // input WITH the last row would strand a filter nobody can clear.
   if (list.length || String(listFilter).trim()) {
@@ -4150,10 +4182,17 @@ function render() {
   if (!list.length) {
     children.push({
       type: "text",
+      // Where it points depends on whether the box is on screen — telling
+      // someone to paste "above" over a panel they just closed is a direction
+      // to nowhere.
       content: connected
         ? categoryFilterActive(restrictToCategory, category)
-          ? "No torrents in the “" + category + "” category yet. Paste a magnet link above, or turn off “Only manage my own category” in settings to see everything."
-          : "No torrents yet. Paste a magnet link or .torrent URL above."
+          ? "No torrents in the “" + category + "” category yet. " +
+            (addPanelVisible() ? "Paste a magnet link above" : "Use “Add torrent” above") +
+            ", or turn off “Only manage my own category” in settings to see everything."
+          : addPanelVisible()
+            ? "No torrents yet. Paste a magnet link or .torrent URL above."
+            : "No torrents yet. Press “Add torrent” above to paste a magnet link or .torrent URL."
         : "Not connected to qBittorrent."
     });
   } else if (!filtered.shown.length) {
@@ -4224,6 +4263,17 @@ function render() {
   }
 
   api.ui.setViewData(VIEW_ID, { type: "layout", direction: "vertical", children: children }, { scrollKey: activeTab });
+}
+
+// Is the add box on screen? Open by default on an empty list, because getting
+// a first torrent in IS the job of that screen and putting it behind a click
+// would make the emptiest view the one that explains itself least. Once the
+// user has opened or closed it themselves, that wins — otherwise the toolbar
+// button would look dead on an empty list, closing something that immediately
+// reopened itself.
+function addPanelVisible() {
+  if (addOpen !== null) return addOpen;
+  return connected && !visibleTorrents().length && !String(listFilter).trim();
 }
 
 function updateBadge() {
@@ -7194,6 +7244,11 @@ function registerActions() {
 
   api.ui.onAction("qbt:add", function (data) {
     addTorrent((data && data.query) || "");
+  });
+
+  api.ui.onAction("qbt:add-toggle", function () {
+    addOpen = !addPanelVisible();
+    render();
   });
 
   api.ui.onAction("qbt:open-download", function () {

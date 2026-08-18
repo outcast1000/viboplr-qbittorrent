@@ -84,6 +84,22 @@ be a lie about what the client can do. *Stop* is the pause.
 the category filter on, is only the ones this plugin added, and with the filter
 box typed into, only the rows it shows.
 
+### Adding a torrent
+
+**Add torrent…** leads the toolbar and opens an *Add a torrent* panel: paste a
+magnet link or the address of a `.torrent` file, or press **Paste** to take
+what's on the clipboard and add it in one click. The panel says what will happen
+— it starts downloading straight away, or arrives paused when *Choose files
+before downloading* is on — and closes itself once the torrent is added.
+
+Adding is something you do once and then watch for an hour, so the box does not
+hold a row above the list for the rest of the session. It is a panel rather than
+a floating dialog because the plugin view API has no dialog with an input in it;
+faking a modal out of divs is not what the rest of the app does.
+
+**An empty list opens it for you.** With nothing to watch, getting a first
+torrent in is the whole job of that screen. Close it and it stays closed.
+
 ### Filtering the list — including *inside* torrents
 
 The filter box above the list matches as you type, space-separated terms all of

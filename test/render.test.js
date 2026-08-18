@@ -242,10 +242,74 @@ test("Back returns to the list", async () => {
     handlers["qbt:close-files"]();
     await settle();
     const nodes = walk(last(views));
-    assert.ok(nodes.some((n) => n.action === "qbt:add"), "the add box didn't come back");
+    // The list's own furniture is back. The add box itself lives behind the
+    // toolbar button now, so that button — not the input — is what returns.
+    assert.ok(nodes.some((n) => n.action === "qbt:add-toggle"), "the add button didn't come back");
     const list = nodes.find((n) => n.type === "track-row-list");
     assert.equal(list.items.length, 2, "expected the torrent list back");
   });
+});
+
+test("the add box hides behind the toolbar button, and toggles", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    // A list with torrents in it: the box is closed, so the row above the list
+    // is the toolbar rather than a paste field nobody is using.
+    assert.ok(!walk(last(views)).some((n) => n.action === "qbt:add"), "the add box is open over a populated list");
+
+    handlers["qbt:add-toggle"]();
+    await settle();
+    const opened = walk(last(views));
+    const box = opened.find((n) => n.action === "qbt:add");
+    assert.ok(box, "the button didn't open the add box");
+    assert.equal(box.type, "search-input");
+    // Paste is the only route a plugin has to the clipboard, and a copied
+    // magnet is the whole point of this box.
+    assert.equal(box.pasteButton, true);
+    assert.ok(opened.some((n) => n.type === "section" && n.title === "Add a torrent"), "the box has no panel around it");
+
+    handlers["qbt:add-toggle"]();
+    await settle();
+    assert.ok(!walk(last(views)).some((n) => n.action === "qbt:add"), "the box didn't close again");
+  });
+});
+
+test("an empty list opens the add box for you, and can still close it", async () => {
+  // Nothing to watch, so the one thing to do is the thing on screen.
+  await withPlugin(async ({ views, handlers }) => {
+    assert.ok(walk(last(views)).some((n) => n.action === "qbt:add"), "an empty list didn't offer the add box");
+
+    // And the button is not dead on that screen: closing must stay closed,
+    // rather than reopening itself from the empty list on the next render.
+    handlers["qbt:add-toggle"]();
+    await settle();
+    const nodes = walk(last(views));
+    assert.ok(!nodes.some((n) => n.action === "qbt:add"), "the add box reopened itself");
+    // With no box above it, the empty state points at the button instead.
+    const empty = nodes.find((n) => n.type === "text" && /No torrents/.test(n.content || ""));
+    assert.match(empty.content, /Add torrent/);
+  }, undefined, { torrents: {} });
+});
+
+test("a successful add puts the box away", async () => {
+  const HASH = "a".repeat(40);
+  const ADDED = { hash: HASH, name: "Added Thing", state: "downloading", progress: 0, size: 1024, added_on: 300, category: "viboplr" };
+  // The server reports the new torrent from the moment the add is posted, so
+  // the add verifies itself on its first look instead of polling for it —
+  // otherwise the retry loop outlives the test and its next refresh lands on a
+  // deactivated plugin.
+  let landed = false;
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:add-toggle"]();
+    await settle();
+    assert.ok(walk(last(views)).some((n) => n.action === "qbt:add"), "precondition: the box should be open");
+
+    landed = true;
+    handlers["qbt:add"]({ query: "magnet:?xt=urn:btih:" + HASH });
+    await settle();
+    assert.ok(!walk(last(views)).some((n) => n.action === "qbt:add"), "the box stayed open after the add");
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    assert.ok(list.items.some((i) => i.id === HASH), "the added torrent never reached the list");
+  }, undefined, { torrents: () => (landed ? Object.assign({}, TORRENTS, { [HASH]: ADDED }) : TORRENTS) });
 });
 
 test("removing a multi-row selection confirms once, by count", async () => {
