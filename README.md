@@ -173,22 +173,29 @@ on can't blank a screen it isn't describing. *Downloaded only* can still be
 filling in while the file lists arrive; it says so rather than showing an empty
 list as a verdict.
 
-**That list is also a selection of its own.** It has the usual **All / None**, a
-**Downloaded** preset that picks out exactly the matches whose bytes are on
-disk, and **▶ Play** / **+ Add to queue** — so "find every FLAC of this across
-my torrents and play the ones I actually have" is three clicks. Selecting
-*files* rather than torrents is possible because the torrent list above stopped
-being a selection (see above); a second multi-selection under a *Start all* /
-*Stop all* toolbar was ambiguous about what those acted on. A single click
-selects, double-click (or **📂 Open torrent**) opens the torrent narrowed to
-that file, and a downloaded match can be dragged into the queue like any other
-track.
+**That list is also a selection of its own.** It has the usual **All / None** and
+a **Downloaded** preset that picks out exactly the matches whose bytes are on
+disk — so "find every FLAC of this across my torrents and play the ones I
+actually have" is three clicks. Selecting *files* rather than torrents is
+possible because the torrent list above stopped being a selection (see above); a
+second multi-selection under a *Start all* / *Stop all* toolbar was ambiguous
+about what those acted on. A single click selects, and a downloaded match can be
+dragged into the queue like any other track.
 
-Play appears only on matches that are really here, which needs each matched
-torrent's real file list — the name cache knows what a torrent *contains*, not
-what has *arrived*. Those lists are fetched in the background, six at a time, as
-you read; until one lands its rows still show and open, they just don't offer to
-play. That fetch is deliberately kept out of the cache the contents panel uses,
+**A match row carries the same buttons as the same file inside its torrent**,
+from the same code: **▶ Play** / **+ Add to queue** on a finished media file,
+**📄 Open** / **📂 Show folder** on a finished one that isn't media, and
+**↓ Download** or **⊘ Skip** on one that hasn't arrived — the choice it is not
+already in. Double-click does what the row's first button does. A file is a
+file; which list you found it in is not a property of it, so there is no
+separate "Open torrent" button either (each row already names the torrent it
+came from).
+
+Those buttons need each matched torrent's real file list — the name cache knows
+what a torrent *contains*, not what has *arrived*. The lists are fetched in the
+background, six at a time, as you read; a row whose torrent hasn't been read yet
+still shows, it just offers nothing, because with no file behind it there is
+nothing to be right about. That fetch is deliberately kept out of the cache the contents panel uses,
 so searching can never change what the plugin *does* about a torrent (what it
 announces as finished, what it imports) — only what it shows you.
 
@@ -364,11 +371,14 @@ in — Play is absent there because it would act on a file that does not exist y
 "Downloaded" is decided by the bytes on disk, not the selection, so a file you
 downloaded and later *deselected* still reads Downloaded and still plays.
 
-The list still declares all four, so a mixed multi-row selection can reach any
-of them from the toolbar above it. The list still declares all four,
-so a multi-row selection can reach either from the toolbar. Priorities you set in
-qBittorrent itself (high, maximum) are left alone — this only ever switches a
-file between *download* and *don't*.
+The list declares **all six** — the four above plus Open and Show folder — so a
+mixed multi-row selection can reach any of them from the toolbar, and the shared
+buttons stay in the same slot from row to row. (Declaring them is load-bearing:
+the host only renders an action a row asks for *if the list declared it*. Open
+and Show folder were missing from that declaration for several releases and
+therefore never appeared at all.) Priorities you set in qBittorrent itself
+(high, maximum) are left alone — this only ever switches a file between
+*download* and *don't*.
 
 ## Playing from a torrent
 

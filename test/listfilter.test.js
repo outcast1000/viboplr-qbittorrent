@@ -121,8 +121,10 @@ test("every found file becomes a readable row of its own", () => {
   // not a file index, and an action that confused the two would play the wrong
   // file. Nothing offers to play it, either.
   assert.equal(r.rows[0].id, "qbtm:h2:n0");
-  assert.equal(r.rows[0].action, "qbt:open-match");
-  assert.deepEqual(r.rows[0].actions, ["qbt:open-match"]);
+  // With no file behind the row there is nothing to be right about, so it
+  // offers nothing rather than guessing.
+  assert.deepEqual(r.rows[0].actions, []);
+  assert.equal(r.rows[0].action, null);
   assert.equal(r.rows[0].path, null);
   assert.deepEqual(r.downloaded, []);
 });

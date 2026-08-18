@@ -15,6 +15,19 @@ nobody could read without a key. The state is still in the places that can carry
 it properly: the row's status text, the sort order, and which of Start / Stop
 the row offers.
 
+**A match row has the same buttons as the same file inside its torrent**, from
+the same code: **Play** / **Add to queue** on a finished media file, **Open** /
+**Show folder** on a finished one that isn't media, **Download** or **Skip** on
+one that hasn't arrived. Double-click does what the row's first button does. The
+**"Open torrent" button is gone** — a file is a file, which list you found it in
+isn't a property of it, and every row already names the torrent it came from.
+
+Both lists now run one set of handlers, which resolve the torrent from the row
+itself rather than from whatever panel is open. That also **fixes Open / Show
+folder inside a torrent**: the contents list has offered them on downloaded
+non-media files since 0.26.0 but never *declared* them, so the host dropped them
+from every row and a downloaded `.nfo` had no buttons at all.
+
 **Two toggles for what a search shows you.** Above the results, whenever a
 search found files: **Files only** hides the torrent rows and leaves the matches
 (when you're looking for a file, the torrents are the haystack), and

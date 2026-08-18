@@ -1399,6 +1399,24 @@ function parseFileTrack(name) {
 // fallback (which fires the first visible action), so it can never mean
 // something the row did not put first on purpose — and it is null when the row
 // offers nothing, rather than falling through to an action that isn't there.
+// Every action a file row can offer, declared once for BOTH file lists — a
+// torrent's contents and the files a search found. Declared, not per row: the
+// host filters this list down to each row's own subset (fileRowActions), and
+// declaring it once is what makes the buttons line up down the column.
+//
+// It must name everything fileRowActions can return. Open and Show folder were
+// missing from the contents list for exactly that reason and simply never
+// rendered — the row asked for them, the host had never heard of them, and a
+// downloaded .nfo therefore had no buttons at all.
+var FILE_ROW_ACTIONS = [
+  { id: "qbt:play-file", label: "Play", icon: "▶" },
+  { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" },
+  { id: "qbt:file-open", label: "Open", icon: "📄" },
+  { id: "qbt:file-folder", label: "Show folder", icon: "📂" },
+  { id: "qbt:file-download", label: "Download", icon: "↓" },
+  { id: "qbt:file-skip", label: "Skip", icon: "⊘" }
+];
+
 function fileRowActions(kind, done, skipped, reachable) {
   // Downloaded wins, matching fileState(): a file with bytes on disk reads
   // "Downloaded", so its actions describe a file you HAVE. Priority no longer
@@ -3298,13 +3316,16 @@ function openLocalFile(data, folder) {
     api.ui.showNotification("This build can't open files");
     return;
   }
-  var indices = rowIndices(data);
-  if (!indices.length || !expandedHash) return;
-  var torrent = torrents[expandedHash];
-  var files = filesByHash[expandedHash] || [];
+  // The first selected file, from whichever list the row came from — opening a
+  // multi-selection would spawn a window per file, which is nobody's intent.
+  var targets = fileRowTargets(data);
+  if (!targets.length) return;
+  var hash = targets[0].hash;
+  var torrent = torrents[hash];
+  var files = knownFiles(hash) || [];
   var file = null;
   for (var i = 0; i < files.length; i++) {
-    if (files[i].index === indices[0]) {
+    if (files[i].index === targets[0].indices[0]) {
       file = files[i];
       break;
     }
@@ -3539,26 +3560,6 @@ function tracksForIndices(hash, indices) {
 function tracksForIndicesTagged(hash, indices) {
   return readTagsForFiles(torrents[hash], filesForIndices(hash, indices))
     .then(function () { return tracksForIndices(hash, indices); });
-}
-
-function enqueueFiles(hash, indices) {
-  return ensureFiles(hash).then(function () {
-    return tracksForIndicesTagged(hash, indices);
-  }).then(function (tracks) {
-    if (!tracks.length) {
-      api.ui.showNotification(unplayableReason(selectedFiles(hash, indices)));
-      return;
-    }
-    // Append: the end of the queue is where "add to queue" means, and the host
-    // has no dedicated enqueue call.
-    var position = 0;
-    if (typeof api.playback.getQueue === "function") {
-      var q = api.playback.getQueue();
-      position = (q && q.tracks && q.tracks.length) || 0;
-    }
-    api.playback.insertTracks(tracks, position);
-    api.ui.showNotification(tracks.length === 1 ? "Added to the queue" : "Added " + tracks.length + " to the queue");
-  });
 }
 
 function playFiles(hash, startIndex) {
@@ -3856,19 +3857,54 @@ function matchRowGroups(data) {
   return out;
 }
 
-// Tracks for a selection of match rows, tags read and all — the same builder a
-// torrent's own file list uses, run once per torrent and concatenated.
+// Which files a file-row action is about, as {hash, indices} groups.
+//
+// The two file lists address their rows differently — a contents-panel row is a
+// bare file index belonging to the open torrent, a matching-files row carries
+// its own hash because that list spans torrents — and this is the only place
+// that difference exists. Everything downstream (play, enqueue, download, skip,
+// open, reveal) is one implementation shared by both lists, which is the point:
+// a file is a file, and the buttons on it should not depend on which list you
+// found it in.
+// What to call a play that spans one torrent or several. One torrent names
+// itself; a selection out of a search is named by the search, because "Some
+// Release" over a queue holding three releases would be wrong about two of them.
+function targetsLabel(groups) {
+  if (groups.length === 1) {
+    var t = torrents[groups[0].hash];
+    return (t && t.name) || "Torrent";
+  }
+  var q = String(listFilter).trim();
+  return q ? "Matching “" + q + "”" : "Torrent files";
+}
+
+function eachTarget(data, fn) {
+  var groups = fileRowTargets(data);
+  for (var i = 0; i < groups.length; i++) fn(groups[i]);
+}
+
+function fileRowTargets(data) {
+  // Match rows first: their ids are not numbers, so rowIndices would read them
+  // as nothing rather than as the wrong file.
+  var groups = matchRowGroups(data);
+  if (groups.length) return groups;
+  var indices = rowIndices(data);
+  if (indices.length && expandedHash) return [{ hash: expandedHash, indices: indices }];
+  return [];
+}
+
+// Tracks for a set of targets, tags read and all — one torrent at a time,
+// concatenated in the order the list showed them.
 //
 // Resolves with a reason as well as the tracks, because "nothing playable" has
 // several causes and the row that produced it is long gone by then: the file
 // list may not have arrived, or the selection may be all cover art.
-function matchTracks(data) {
-  var groups = matchRowGroups(data);
+function tracksForTargets(groups) {
   if (!groups.length) {
     return Promise.resolve({
       tracks: [],
-      // The only way to select nothing usable is to have selected rows that
-      // name no file — a "+N more", or files still being read.
+      // The only way to act on nothing usable is a row that names no file —
+      // one whose torrent is still being read.
       reason: "Still reading those torrents' files — try again in a moment"
     });
   }
@@ -3946,6 +3982,17 @@ function fileMatchItems(entries, opts) {
       var kind = mediaKindOf(m[j]);
       var done = !!f && numOr(f.progress, 0) >= 1;
       var playable = done && !!kind && filesAreReachable();
+      // The SAME buttons a file gets inside its torrent, from the same helper:
+      // Play / Add to queue on a finished media file, Open / Show folder on a
+      // finished other file, Download or Skip on one that hasn't arrived. A
+      // file is a file — which of the two lists you found it in is not a
+      // property of the file.
+      //
+      // A row whose torrent has not been read yet offers nothing: with no file
+      // behind it there is nothing to be right about.
+      var offered = f
+        ? fileRowActions(kind, done, numOr(f.priority, 1) === 0, filesAreReachable())
+        : { actions: [], action: null };
       // A file index is the id when there is one, so an action lands on the
       // file the row is about. A name-only row carries its POSITION instead,
       // behind an "n" — the two are different numbers and confusing them would
@@ -3967,18 +4014,15 @@ function fileMatchItems(entries, opts) {
         imageUrl: f
           ? fileIconFor(f, t)
           : tileIcon(kind || "unknown", percentLabel(torrentDone), progressBand(torrentDone)),
-        // Play and Add to queue only on a file that is actually here. Opening
-        // the torrent works on any row, including one still being read.
-        actions: playable
-          ? ["qbt:play-match", "qbt:enqueue-match", "qbt:open-match"]
-          : ["qbt:open-match"],
+        actions: offered.actions,
         // What makes the host's own right-click menu and drag-to-queue work on
         // these rows, same as in a torrent's contents.
         path: playable ? qbtUri(t.hash, f.index) : null,
         album: torrentName,
-        // Double-click still opens the torrent narrowed to this file. A single
-        // click now SELECTS, because the list has a selection of its own.
-        action: "qbt:open-match"
+        // Double-click does what the row's first button does, exactly as it
+        // does inside a torrent. A single click SELECTS — the list has a
+        // selection of its own.
+        action: offered.action
       });
       shown++;
     }
@@ -4723,11 +4767,11 @@ function render() {
       // not repeated — the query is what narrowed these rows in the first
       // place, so a "flac" search does not also need an Audio button.
       selectionPresets: [{ id: "downloaded", label: "Downloaded", ids: matches.downloaded }],
-      actions: [
-        { id: "qbt:play-match", label: "Play", icon: "▶" },
-        { id: "qbt:enqueue-match", label: "Add to queue", icon: "+" },
-        { id: "qbt:open-match", label: "Open torrent", icon: "📂" }
-      ]
+      // The same six a file gets inside its torrent, declared in the same
+      // order — see FILE_ROW_ACTIONS. There is no "Open torrent" button: this
+      // list is about the files, and the torrent each one came from is named on
+      // its own row.
+      actions: FILE_ROW_ACTIONS
     });
     if (matches.overflow) {
       children.push({
@@ -7683,12 +7727,7 @@ function fileRowsNode(hash) {
     numbered: true,
     selectable: true,
     selectionPresets: presets,
-    actions: [
-      { id: "qbt:play-file", label: "Play", icon: "▶" },
-      { id: "qbt:enqueue-file", label: "Add to queue", icon: "+" },
-      { id: "qbt:file-download", label: "Download", icon: "↓" },
-      { id: "qbt:file-skip", label: "Skip", icon: "⊘" }
-    ]
+    actions: FILE_ROW_ACTIONS
   };
 }
 
@@ -7894,12 +7933,6 @@ function registerActions() {
   // A row in the "Matching files" list. The hash rides in the row id — the
   // plain row list reports only `itemId`, and a torrent hash is hex so the
   // colon framing cannot appear inside it.
-  api.ui.onAction("qbt:open-match", function (data) {
-    var id = String((data && data.itemId) || "");
-    var m = /^qbtm:([^:]+):/.exec(id);
-    if (m && torrents[m[1]]) openTorrentContents(m[1]);
-  });
-
   api.ui.onAction("qbt:detail-tab", function (data) {
     detailTab = (data && (data.tabId || data.id)) || detailTab;
     render();
@@ -7943,38 +7976,59 @@ function registerActions() {
     playFiles(hashes[0], null);
   });
 
+  // One set of handlers for BOTH file lists — a torrent's contents and the
+  // files a search found. Each resolves its targets through fileRowTargets, so
+  // the only thing the two lists disagree about is how a row names its file.
   api.ui.onAction("qbt:play-file", function (data) {
-    // The row ids are file indices; the expanded torrent is the one they belong
-    // to.
-    var indices = rowIndices(data);
-    if (!indices.length || !expandedHash) return;
+    var targets = fileRowTargets(data);
+    if (!targets.length) return;
     // Exactly what was selected, one row or many — Play on a row plays THAT
     // file. It used to start the whole torrent from that point, on the argument
-    // that clicking a track in any other list does that; but this list is a
-    // torrent's contents, most of which is usually not music, and "play this
-    // one" is the only reading of a button on a single file. Whole-torrent
-    // playback is what the file list's All + Play does.
-    var hash = expandedHash;
-    tracksForIndicesTagged(hash, indices).then(function (tracks) {
-      if (!tracks.length) {
-        api.ui.showNotification(unplayableReason(selectedFiles(hash, indices)));
+    // that clicking a track in any other list does that; but a torrent's
+    // contents are mostly not music, and "play this one" is the only reading of
+    // a button on a single file. Whole-torrent playback is the torrent row's
+    // own Play.
+    tracksForTargets(targets).then(function (result) {
+      if (!result.tracks.length) {
+        api.ui.showNotification(result.reason);
         return;
       }
-      var t = torrents[hash];
-      api.playback.playTracks(tracks, 0, { name: (t && t.name) || "Torrent" });
+      api.playback.playTracks(result.tracks, 0, { name: targetsLabel(targets) });
     }).catch(function (e) {
       console.error("qBittorrent: could not play the selected files:", e);
     });
   });
 
+  api.ui.onAction("qbt:enqueue-file", function (data) {
+    var targets = fileRowTargets(data);
+    if (!targets.length) return;
+    tracksForTargets(targets).then(function (result) {
+      if (!result.tracks.length) {
+        api.ui.showNotification(result.reason);
+        return;
+      }
+      // Append: the end of the queue is where "add to queue" means, and the
+      // host has no dedicated enqueue call.
+      var position = 0;
+      if (typeof api.playback.getQueue === "function") {
+        var q = api.playback.getQueue();
+        position = (q && q.tracks && q.tracks.length) || 0;
+      }
+      api.playback.insertTracks(result.tracks, position);
+      api.ui.showNotification(
+        result.tracks.length === 1 ? "Added to the queue" : "Added " + result.tracks.length + " to the queue"
+      );
+    }).catch(function (e) {
+      console.error("qBittorrent: could not queue the selected files:", e);
+    });
+  });
+
   api.ui.onAction("qbt:file-download", function (data) {
-    var indices = rowIndices(data);
-    if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 1);
+    eachTarget(data, function (g) { setFilePriority(g.hash, g.indices, 1); });
   });
 
   api.ui.onAction("qbt:file-skip", function (data) {
-    var indices = rowIndices(data);
-    if (indices.length && expandedHash) setFilePriority(expandedHash, indices, 0);
+    eachTarget(data, function (g) { setFilePriority(g.hash, g.indices, 0); });
   });
 
   api.ui.onAction("qbt:file-open", function (data) {
@@ -8009,37 +8063,6 @@ function registerActions() {
     render();
   });
 
-  api.ui.onAction("qbt:play-match", function (data) {
-    matchTracks(data).then(function (result) {
-      if (!result.tracks.length) {
-        api.ui.showNotification(result.reason);
-        return;
-      }
-      api.playback.playTracks(result.tracks, 0, {
-        name: "Matching “" + String(listFilter).trim() + "”",
-        source: "playlist"
-      });
-    });
-  });
-
-  api.ui.onAction("qbt:enqueue-match", function (data) {
-    matchTracks(data).then(function (result) {
-      if (!result.tracks.length) {
-        api.ui.showNotification(result.reason);
-        return;
-      }
-      var position = 0;
-      if (typeof api.playback.getQueue === "function") {
-        var q = api.playback.getQueue();
-        position = (q && q.tracks && q.tracks.length) || 0;
-      }
-      api.playback.insertTracks(result.tracks, position);
-      api.ui.showNotification(
-        result.tracks.length === 1 ? "Added to the queue" : "Added " + result.tracks.length + " to the queue"
-      );
-    });
-  });
-
   api.ui.onAction("qbt:file-filter", function (data) {
     if (!expandedHash) return;
     fileFilters[expandedHash] = String((data && data.query) || "");
@@ -8057,10 +8080,6 @@ function registerActions() {
     render();
   });
 
-  api.ui.onAction("qbt:enqueue-file", function (data) {
-    var indices = rowIndices(data);
-    if (indices.length && expandedHash) enqueueFiles(expandedHash, indices);
-  });
   api.ui.onAction("qbt:delete-ask", function (data) {
     pendingDelete = hashesOf(data);
     if (!pendingDelete.length) return;

@@ -285,10 +285,17 @@ test("the matching files are a selection of their own, with a Downloaded preset"
     const matches = lists[1];
     assert.equal(matches.selectable, true);
     assert.ok(!matches.selectionMode, "the matches are where a MULTI selection lives");
+    // The SAME buttons a file gets inside its torrent — a file is a file, and
+    // which list you found it in is not a property of it. There is no "Open
+    // torrent": this list is about the files, and each row already names the
+    // torrent it came from.
     assert.deepEqual(matches.actions.map((a) => a.id), [
-      "qbt:play-match",
-      "qbt:enqueue-match",
-      "qbt:open-match",
+      "qbt:play-file",
+      "qbt:enqueue-file",
+      "qbt:file-open",
+      "qbt:file-folder",
+      "qbt:file-download",
+      "qbt:file-skip",
     ]);
     // "01 - First.flac" is downloaded in both torrents, so both rows are in the
     // preset — and the preset names rows, which is what the host intersects.
@@ -301,7 +308,8 @@ test("the matching files are a selection of their own, with a Downloaded preset"
     assert.match(row.id, /^qbtm:[^:]+:0$/);
     assert.match(row.subtitle, /^Downloaded/);
     assert.match(row.path, /^qbt:\/\/[^/]+\/0$/);
-    assert.deepEqual(row.actions, ["qbt:play-match", "qbt:enqueue-match", "qbt:open-match"]);
+    assert.deepEqual(row.actions, ["qbt:play-file", "qbt:enqueue-file"]);
+    assert.equal(row.action, "qbt:play-file", "double-click plays it, as it would inside its torrent");
   });
 });
 
@@ -312,7 +320,9 @@ test("a match that isn't downloaded offers no Play and joins no preset", async (
     await settle();
     const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
     const row = matches.items[0];
-    assert.deepEqual(row.actions, ["qbt:open-match"], "an absent file must not offer Play");
+    // Deselected and not downloaded, so the one thing to offer is the choice it
+    // is not already in — exactly what the same file offers inside its torrent.
+    assert.deepEqual(row.actions, ["qbt:file-download"]);
     assert.equal(row.path, null);
     assert.match(row.subtitle, /Not selected/);
     assert.deepEqual(matches.selectionPresets.find((p) => p.id === "downloaded").ids, []);
@@ -325,7 +335,7 @@ test("playing a selection of matches queues them across torrents", async () => {
     await settle();
     const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
     assert.equal(matches.items.length, 2, "precondition: one match in each torrent");
-    handlers["qbt:play-match"]({ selectedIds: matches.items.map((i) => i.id) });
+    handlers["qbt:play-file"]({ selectedIds: matches.items.map((i) => i.id) });
     await settle();
     assert.equal(played.length, 1);
     // One track per matched torrent, in the order the list showed them —
@@ -353,6 +363,33 @@ test("every match is listed and selectable, up to the whole-list limit", async (
     assert.ok(!matches.items.some((i) => /:more$/.test(i.id)));
     assert.equal(matches.selectionPresets.find((p) => p.id === "downloaded").ids.length, 9);
   }, undefined, { files: () => many, torrents });
+});
+
+test("a match row's Download / Skip act on the right torrent's file", async () => {
+  // The proof that one set of handlers really serves both lists: nothing is
+  // "open" here, so a handler reading expandedHash would act on nothing — or,
+  // worse, on whatever was open last.
+  const files = () => [
+    { index: 0, name: "Disc/have.flac", size: 10, progress: 1, priority: 1 },
+    { index: 1, name: "Disc/want.flac", size: 10, progress: 0, priority: 0 },
+  ];
+  const torrents = {
+    aaa: { hash: "aaa", name: "A Release", state: "downloading", progress: 0.5, size: 20, added_on: 1, category: "viboplr" },
+  };
+  await withPlugin(async ({ views, handlers, posts }) => {
+    handlers["qbt:list-filter"]({ query: "want" });
+    await settle();
+    const row = walk(last(views)).filter((n) => n.type === "track-row-list")[1].items[0];
+    assert.deepEqual(row.actions, ["qbt:file-download"], "a skipped file offers the choice it isn't in");
+
+    handlers["qbt:file-download"]({ selectedIds: [row.id], itemId: row.id });
+    await settle();
+    const post = posts.filter((p) => /filePrio/.test(p.url)).pop();
+    assert.ok(post, "no priority was posted");
+    assert.equal(post.form.hash, "aaa", "the row's own torrent, not whatever was open");
+    assert.equal(post.form.id, "1");
+    assert.equal(post.form.priority, "1");
+  }, undefined, { files, torrents });
 });
 
 test("“Files only” hides the torrent rows, keeping the matches", async () => {
@@ -1402,14 +1439,20 @@ test("a file's size sits after its status, not in a trailing column", async () =
   }, { files: () => MIXED });
 });
 
-test("the list still declares all four, so the toolbar can offer them", async () => {
-  // A multi-row selection can legitimately need both directions, and the
-  // declared order is what keeps the shared buttons in the same slot per row.
+test("the list declares every action a row can offer", async () => {
+  // A multi-row selection can legitimately need any of them, and the declared
+  // order is what keeps the shared buttons in the same slot per row.
+  //
+  // It must cover everything fileRowActions can return: Open and Show folder
+  // were missing here and therefore never rendered — the row asked for them and
+  // the host, never having heard of them, dropped them.
   await openContents(async (_ctx, nodes) => {
     const list = nodes.find((n) => n.type === "track-row-list");
     assert.deepEqual(list.actions.map((a) => a.id), [
       "qbt:play-file",
       "qbt:enqueue-file",
+      "qbt:file-open",
+      "qbt:file-folder",
       "qbt:file-download",
       "qbt:file-skip",
     ]);
@@ -1722,18 +1765,22 @@ test("double-click fires what the row put first, never a fallback", async () => 
   }, { files: () => MIX });
 });
 
-test("the list still declares all four for the selection toolbar", async () => {
-  // A multi-row selection can legitimately need any of them, and the declared
-  // order is what keeps a shared button in the same slot from row to row.
+test("a downloaded non-media file really gets its Open / Show folder buttons", async () => {
+  // fileRowActions has offered these since 0.26.0, but the list never declared
+  // them, so the host filtered them out of every row and a downloaded .nfo had
+  // no buttons at all. Asserting the ROW's subset and the LIST's declaration
+  // separately is what missed it.
+  const withArt = [
+    { index: 0, name: "01 - First.flac", size: 10, progress: 1, priority: 1 },
+    { index: 1, name: "cover.jpg", size: 4, progress: 1, priority: 1 },
+  ];
   await openContents(async (_ctx, nodes) => {
     const list = nodes.find((n) => n.type === "track-row-list");
-    assert.deepEqual(list.actions.map((a) => a.id), [
-      "qbt:play-file",
-      "qbt:enqueue-file",
-      "qbt:file-download",
-      "qbt:file-skip",
-    ]);
-  }, { files: () => MIXED });
+    const declared = list.actions.map((a) => a.id);
+    const art = list.items.find((i) => /cover/.test(i.title));
+    assert.deepEqual(art.actions, ["qbt:file-open", "qbt:file-folder"]);
+    for (const id of art.actions) assert.ok(declared.indexOf(id) >= 0, id + " is not declared, so it cannot render");
+  }, { files: () => withArt });
 });
 
 test("an older host gets the bare URL, not a file:// candidate", async () => {
