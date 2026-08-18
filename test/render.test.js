@@ -273,7 +273,7 @@ test("the badge counts the whole torrent, not the selected files", async () => {
 // "first" is in both torrents' file lists and in neither torrent's NAME, so
 // both rows here are file matches — which is what the list under the torrents
 // is for. ("flac" would match one of them by name and contribute no file row.)
-test("the matching files are a selection of their own, with a Downloaded preset", async () => {
+test("the matching files are a list of their own, with no toolbar over it", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:list-filter"]({ query: "first" });
     await settle();
@@ -284,7 +284,10 @@ test("the matching files are a selection of their own, with a Downloaded preset"
     assert.equal(lists.length, 2);
     const matches = lists[1];
     assert.equal(matches.selectable, true);
-    assert.ok(!matches.selectionMode, "the matches are where a MULTI selection lives");
+    // One row at a time, so the host draws no All / None / actions bar over the
+    // list: it was a second copy of the buttons already on every row.
+    assert.equal(matches.selectionMode, "single");
+    assert.ok(!matches.selectionPresets, "a preset selects rows for a bar that no longer exists");
     // The SAME buttons a file gets inside its torrent — a file is a file, and
     // which list you found it in is not a property of it. There is no "Open
     // torrent": this list is about the files, and each row already names the
@@ -297,11 +300,6 @@ test("the matching files are a selection of their own, with a Downloaded preset"
       "qbt:file-download",
       "qbt:file-skip",
     ]);
-    // "01 - First.flac" is downloaded in both torrents, so both rows are in the
-    // preset — and the preset names rows, which is what the host intersects.
-    const preset = matches.selectionPresets.find((p) => p.id === "downloaded");
-    assert.equal(preset.ids.length, matches.items.length);
-    assert.ok(preset.ids.every((id) => matches.items.some((i) => i.id === id)));
     // The row's id is the FILE INDEX now — the background read landed — so it
     // says what it is, offers to play, and carries a path for drag-to-queue.
     const row = matches.items[0];
@@ -313,7 +311,7 @@ test("the matching files are a selection of their own, with a Downloaded preset"
   });
 });
 
-test("a match that isn't downloaded offers no Play and joins no preset", async () => {
+test("a match that isn't downloaded offers no Play", async () => {
   await withPlugin(async ({ views, handlers }) => {
     // "extras/bonus.mkv" is deselected and at 0%.
     handlers["qbt:list-filter"]({ query: "bonus" });
@@ -325,11 +323,14 @@ test("a match that isn't downloaded offers no Play and joins no preset", async (
     assert.deepEqual(row.actions, ["qbt:file-download"]);
     assert.equal(row.path, null);
     assert.match(row.subtitle, /Not selected/);
-    assert.deepEqual(matches.selectionPresets.find((p) => p.id === "downloaded").ids, []);
   });
 });
 
-test("playing a selection of matches queues them across torrents", async () => {
+// Drives the handler directly: the list is single-selection, so this many-row
+// case is the handler's contract rather than a gesture the UI can make today.
+// It is what keeps the shared play/enqueue path honest about grouping by
+// torrent — the contents list can still send several rows at once.
+test("playing several match rows queues them in the order shown, across torrents", async () => {
   await withPlugin(async ({ views, handlers, played }) => {
     handlers["qbt:list-filter"]({ query: "first" });
     await settle();
@@ -357,11 +358,11 @@ test("every match is listed and selectable, up to the whole-list limit", async (
     handlers["qbt:list-filter"]({ query: "disc" });
     await settle();
     const matches = walk(last(views)).filter((n) => n.type === "track-row-list")[1];
-    // No stand-in row: a match with no row is one the Downloaded preset could
-    // never pick, which made "select the completed ones and play them" a lie.
+    // No stand-in row: a match with no row is a file you cannot play, queue or
+    // skip, and a search that withholds most of what it found is worse than a
+    // long list.
     assert.equal(matches.items.length, 9);
     assert.ok(!matches.items.some((i) => /:more$/.test(i.id)));
-    assert.equal(matches.selectionPresets.find((p) => p.id === "downloaded").ids.length, 9);
   }, undefined, { files: () => many, torrents });
 });
 

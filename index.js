@@ -3948,10 +3948,6 @@ function fileMatchItems(entries, opts) {
   // True only when the TOTAL cap cut something. The per-torrent cap leaves a
   // "+N more" row behind, so it needs no extra apology.
   var overflow = false;
-  // Row ids for the "Downloaded" preset. Built here because this is the only
-  // place that knows which rows exist AND what each one's file is doing; the
-  // host intersects them with what is on screen anyway.
-  var downloaded = [];
   var all = entries || [];
   for (var i = 0; i < all.length; i++) {
     var t = all[i].torrent;
@@ -3998,7 +3994,6 @@ function fileMatchItems(entries, opts) {
       // behind an "n" — the two are different numbers and confusing them would
       // play the wrong file.
       var id = "qbtm:" + t.hash + ":" + (f ? f.index : "n" + j);
-      if (done) downloaded.push(id);
       // Counted in `total` above, just not drawn: the heading reports both
       // numbers, so a filtered list never passes for the whole answer.
       if (downloadedOnly && !done) continue;
@@ -4027,7 +4022,7 @@ function fileMatchItems(entries, opts) {
       shown++;
     }
   }
-  return { rows: rows, shown: shown, total: total, overflow: overflow, downloaded: downloaded, unread: unread };
+  return { rows: rows, shown: shown, total: total, overflow: overflow, unread: unread };
 }
 
 // The facts the Info tab prints, as label/value pairs. Pure and exported, so
@@ -4761,12 +4756,14 @@ function render() {
       type: "track-row-list",
       items: matches.rows,
       selectable: true,
-      // "Downloaded" is the one preset this list needs, and the one the torrent
-      // contents list has no use for: there, you are choosing what to fetch,
-      // and here you are looking for what is already here. Audio / Video are
-      // not repeated — the query is what narrowed these rows in the first
-      // place, so a "flac" search does not also need an Audio button.
-      selectionPresets: [{ id: "downloaded", label: "Downloaded", ids: matches.downloaded }],
+      // One row at a time, so the host draws no selection toolbar over the
+      // list. That bar — All / None / Downloaded / a count / six buttons — was
+      // a second copy of the buttons already on every row, above a list whose
+      // rows each say what they can do. "Show me the downloaded ones" is the
+      // Downloaded only toggle above, which changes what is on screen rather
+      // than what is highlighted; the preset that used to do it here selected
+      // rows for that same bar and went with it.
+      selectionMode: "single",
       // The same six a file gets inside its torrent, declared in the same
       // order — see FILE_ROW_ACTIONS. There is no "Open torrent" button: this
       // list is about the files, and the torrent each one came from is named on
@@ -4779,7 +4776,7 @@ function render() {
         className: "muted",
         content:
           "Showing the first " + matches.shown + " of " + matches.total +
-          " — narrow the search to see the rest. A selection can only act on rows that are shown."
+          " — narrow the search to see the rest. A match with no row is one you can't play, queue or skip."
       });
     }
   }

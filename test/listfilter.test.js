@@ -126,7 +126,6 @@ test("every found file becomes a readable row of its own", () => {
   assert.deepEqual(r.rows[0].actions, []);
   assert.equal(r.rows[0].action, null);
   assert.equal(r.rows[0].path, null);
-  assert.deepEqual(r.downloaded, []);
 });
 
 test("name-matched torrents contribute no file rows", () => {

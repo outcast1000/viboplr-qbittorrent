@@ -173,14 +173,13 @@ on can't blank a screen it isn't describing. *Downloaded only* can still be
 filling in while the file lists arrive; it says so rather than showing an empty
 list as a verdict.
 
-**That list is also a selection of its own.** It has the usual **All / None** and
-a **Downloaded** preset that picks out exactly the matches whose bytes are on
-disk — so "find every FLAC of this across my torrents and play the ones I
-actually have" is three clicks. Selecting *files* rather than torrents is
-possible because the torrent list above stopped being a selection (see above); a
-second multi-selection under a *Start all* / *Stop all* toolbar was ambiguous
-about what those acted on. A single click selects, and a downloaded match can be
-dragged into the queue like any other track.
+**One row at a time, and no toolbar over it.** Like the torrent list, this one is
+single-selection, so the host draws no *All / None / …* bar above it — that bar
+was a second copy of the buttons already on every row, over a list whose rows
+each say what they can do. "Show me only the ones I have" is the **Downloaded
+only** toggle above, which changes what is on screen rather than what is
+highlighted. A click selects, and a downloaded match can be dragged into the
+queue like any other track.
 
 **A match row carries the same buttons as the same file inside its torrent**,
 from the same code: **▶ Play** / **+ Add to queue** on a finished media file,

@@ -41,19 +41,16 @@ mode you're in for a run of them; they only appear, and only take effect, when a
 search has file matches, so one left on can't blank a screen it isn't
 describing.
 
-**The "Matching files" list is a selection of its own.** Search across your
-torrents and the files it found now have **All / None**, a **Downloaded** preset
-that picks out exactly the matches whose bytes are on disk, and **▶ Play** /
-**+ Add to queue** — so "find every FLAC of this and play the ones I have" is
-three clicks. Selecting *files* rather than *torrents* is what the torrent list
-giving up its own multi-selection (0.28.0) made room for.
+**The "Matching files" list is a real file list now.** Search across your
+torrents and every file it found is a row you can act on: each says what it is
+doing (*Downloaded*, *Downloading · 45%*, *Not selected*), carries its own
+per-file badge instead of its torrent's average, and can be dragged into the
+queue like any other track once it is on disk.
 
-Each row now says what its file is doing (*Downloaded*, *Downloading · 45%*,
-*Not selected*) and carries its own per-file badge instead of its torrent's
-average, a downloaded match can be dragged into the queue like any other track,
-and a selection spanning three releases queues as three releases in the order
-shown. A single click now selects; double-click, or **📂 Open torrent**, opens
-the torrent narrowed to that file as clicking used to.
+Like the torrent list, it is **single-selection with no toolbar over it** — no
+*All / None*, no count, no second copy of the row's own buttons. "Show me only
+the ones I have" is the *Downloaded only* toggle above, which changes what is on
+screen rather than what is highlighted.
 
 Knowing which matches are *here* needs each matched torrent's real file list —
 the name cache knows what a torrent contains, not what has arrived — so those
@@ -64,11 +61,10 @@ plugin *does* about a torrent (what it calls finished, what it imports), only
 what it shows.
 
 **"+N more matches" is gone, and so is the per-torrent cap behind it.** Every
-match a torrent has now gets a row of its own. A row that isn't there is a row
-the selection can't act on, so *Downloaded → Play* would quietly skip most of
-what matched — worse than a long list. The **100-row total cap** is the only one
-left; it now reports how many it cut, and that a selection can only act on rows
-that are shown.
+match a torrent has now gets a row of its own. A row that isn't drawn is a file
+you cannot play, queue or skip, and a search that quietly withholds most of what
+it found is worse than a long list. The **100-row total cap** is the only one
+left, and it now says how many it cut.
 
 **Searching inside torrents starts at two characters.** One letter matches
 almost every file in every release: a hundred rows that say nothing, fetched the
