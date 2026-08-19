@@ -49,6 +49,8 @@ function run(stored, opts) {
   const views = [];
   const settingsViews = [];
   const handlers = {};
+  const ctxActions = {};
+  const navigations = [];
   const posts = [];
   const played = [];
   const resolvers = {};
@@ -71,7 +73,7 @@ function run(stored, opts) {
       showNotification: () => {},
       onAction: (id, fn) => { handlers[id] = fn; },
       setBadge: () => {},
-      navigateToView: () => {},
+      navigateToView: (id) => { navigations.push(id); },
     },
     storage: { get: async () => (stored === undefined ? { baseUrl: "http://localhost:8080", apiKey: "k" } : stored), set: async () => {} },
     network: {
@@ -104,13 +106,13 @@ function run(stored, opts) {
       getQueue: () => ({ tracks: [], index: 0 }),
       onResolveStreamByUri: (scheme, handler) => { resolvers[scheme] = handler; },
     },
-    contextMenu: { onAction: () => {} },
+    contextMenu: { onAction: (id, fn) => { ctxActions[id] = fn; } },
     scheduler: { register: async () => {}, onDue: () => {} },
   };
   const g = Object.freeze({});
   const plugin = new Function("api", "window", "globalThis", "self", "document", SOURCE)(undefined, g, g, g, g);
   plugin.activate(api);
-  return { plugin, views, settingsViews, handlers, api, posts, played, resolvers };
+  return { plugin, views, settingsViews, handlers, ctxActions, navigations, api, posts, played, resolvers };
 }
 
 // Let the activate-time promise chain (settings read → version probe → poll)
@@ -714,6 +716,37 @@ test("web indexers: export fills the box, and a pasted array imports", async () 
   });
 });
 
+test("Upgrade with qBittorrent lands on Music Search with the track prefilled", async () => {
+  await withPlugin(async ({ views, ctxActions, navigations, handlers }) => {
+    // Leave a stale narration behind so the action's log reset is observable.
+    handlers["qbt:tab"]({ tabId: "debug" });
+    handlers["qbt:debug-title"]({ value: "Old Song" });
+    handlers["qbt:debug-stream"]({});
+    await settle();
+
+    ctxActions["qbt-upgrade"]({ kind: "track", title: "Jóga", artistName: "Björk", albumTitle: "Homogenic" });
+    assert.deepEqual(navigations, ["qbittorrent"]);
+    const nodes = walk(last(views));
+    const tabs = nodes.find((n) => n.type === "tabs");
+    assert.equal(tabs.activeTab, "debug");
+    assert.ok(tabs.tabs.some((t) => t.id === "debug" && t.label === "Music Search"));
+    const val = (action) => nodes.find((n) => n.type === "text-input" && n.action === action).value;
+    assert.equal(val("qbt:debug-title"), "Jóga");
+    assert.equal(val("qbt:debug-artist"), "Björk");
+    assert.equal(val("qbt:debug-album"), "Homogenic");
+    // The previous run's narration would read as this track's — it is cleared.
+    const texts = nodes.filter((n) => n.type === "text").map((n) => n.content).join("\n");
+    assert.ok(!texts.includes("STREAM resolve"), texts);
+    // Nothing runs on landing: Search & download genuinely adds torrents, so
+    // it must wait for the click.
+    assert.ok(!nodes.some((n) => n.type === "loading"));
+
+    // A target with no title or artist has nothing to search for — no navigation.
+    ctxActions["qbt-upgrade"]({ kind: "track" });
+    assert.equal(navigations.length, 1);
+  });
+});
+
 test("the debug tab runs the real stream resolver and narrates each step", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:tab"]({ tabId: "debug" });
@@ -757,7 +790,9 @@ test("fetch & play runs discovery on a cache miss; the instant entry never does"
     await settle();
     let texts = walk(last(views)).filter((n) => n.type === "text").map((n) => n.content).join("\n");
     assert.ok(texts.includes("stream: [local cache] no match — decline"), texts);
-    assert.ok(!texts.includes("discovery"), texts);
+    // Match the narration marker, not the bare word — the tab's intro copy
+    // legitimately mentions discovery.
+    assert.ok(!texts.includes("starting discovery"), texts);
     // …while fetch & play goes searching (the harness has no search plugins,
     // so the race settles immediately on "found nothing").
     handlers["qbt:debug-clear"]({});

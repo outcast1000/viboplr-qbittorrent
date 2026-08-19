@@ -2564,7 +2564,7 @@ function collectSearchResults(pattern, opts) {
   var jobId = null;
 
   // The web indexer sweep runs in parallel with qBittorrent's own search
-  // plugins — discovery, the Debug tab and interactive search all consume
+  // plugins — discovery, the Search tab and the Music Search tab all consume
   // this function, so websites join every one of those surfaces here.
   var webDefs = enabledWebDefs();
   var webJob = webDefs.length ? webSearchAll(webDefs, q, webFetchFn) : Promise.resolve([]);
@@ -4463,7 +4463,10 @@ function render() {
     tabs: [
       { id: "torrents", label: "Torrents", count: list.length },
       { id: "search", label: "Search" },
-      { id: "debug", label: "Debug" },
+      // The tab id stays "debug" — the qbt:debug-* action ids, tests and
+      // scrollKey all hang off it; only the user-facing name changed when the
+      // workbench became the landing surface for "Upgrade with qBittorrent".
+      { id: "debug", label: "Music Search" },
       { id: "settings", label: "Settings" }
     ]
   });
@@ -6407,17 +6410,20 @@ function resolveWebFileUrl(result, fetchFn) {
 //   idle-based and every reportProgress() resets it. Tiers 2 (wait for a file
 //   the torrent holds) and 3 (go find a torrent) live here.
 
-// --- Debug tracing ------------------------------------------------------------
+// --- Music Search (debug tracing) ----------------------------------------------
 //
-// The Debug tab runs the REAL resolver functions and watches them narrate.
-// dbg() is a no-op unless a debug run is in flight, so the production paths
+// The Music Search tab runs the REAL resolver functions and watches them
+// narrate. dbg() is a no-op unless a run is in flight, so the production paths
 // pay one boolean check per step and the narration can be written where the
-// decisions are made instead of duplicated in a shadow pipeline.
+// decisions are made instead of duplicated in a shadow pipeline. It doubles as
+// the landing surface for the "Upgrade with qBittorrent" context-menu action,
+// which arrives with the fields prefilled from the track.
 var debugRunning = false;
 var debugStartedAt = 0;
 var debugLog = [];
 var DEBUG_LOG_MAX = 300;
-// What the Debug tab's inputs hold. Session-only — this is a workbench.
+// What the Music Search tab's inputs hold. Session-only — this is a workbench,
+// and "Upgrade with qBittorrent" refills it per use anyway.
 var debugFields = { title: "", artist: "", album: "" };
 
 // A debug run is the REAL pipeline — the download test genuinely adds and
@@ -6469,8 +6475,8 @@ function debugTabNodes() {
       type: "text",
       className: "muted",
       content:
-        "Runs the real resolver against your qBittorrent and narrates every step. " +
-        "The download test is not a simulation — it can add torrents and download files, exactly as a real download would."
+        "Searches your torrents — and, when discovery is on, the qBittorrent app's search — for a track, narrating every step. " +
+        "Search & download is not a simulation: it can add torrents and download files, exactly as an automatic download would."
     },
     { type: "text-input", placeholder: "Title", action: "qbt:debug-title", value: debugFields.title },
     { type: "text-input", placeholder: "Artist", action: "qbt:debug-artist", value: debugFields.artist },
@@ -6479,9 +6485,12 @@ function debugTabNodes() {
       type: "layout",
       direction: "horizontal",
       children: [
-        { type: "button", label: "Test play (downloaded)", action: "qbt:debug-stream", variant: "accent", disabled: debugRunning },
-        { type: "button", label: "Test play (fetch & play)", action: "qbt:debug-stream-fetch", variant: "secondary", disabled: debugRunning },
-        { type: "button", label: "Test download (tiers 1–3)", action: "qbt:debug-download", variant: "secondary", disabled: debugRunning },
+        // Download leads with the accent: "Upgrade with qBittorrent" lands
+        // here to fetch a better copy, so the button that does that is the
+        // primary one. The play tests keep the resolver-workbench role.
+        { type: "button", label: "Search & download", action: "qbt:debug-download", variant: "accent", disabled: debugRunning },
+        { type: "button", label: "Play (downloaded)", action: "qbt:debug-stream", variant: "secondary", disabled: debugRunning },
+        { type: "button", label: "Play (fetch & play)", action: "qbt:debug-stream-fetch", variant: "secondary", disabled: debugRunning },
         { type: "button", label: "Clear log", action: "qbt:debug-clear", variant: "secondary", disabled: debugRunning || !debugLog.length }
       ]
     }
@@ -6762,7 +6771,7 @@ function streamResolveCore(title, artistName, albumName, durationSecs, opts, may
     });
 }
 
-// The handlers themselves, named so the Debug tab can run them directly.
+// The handlers themselves, named so the Music Search tab can run them directly.
 function resolveStreamByMetadata(title, artistName, albumName, durationSecs, opts) {
   return streamResolveCore(title, artistName, albumName, durationSecs, opts, false);
 }
@@ -7350,34 +7359,7 @@ function finalizeDisposition(hash, torrent) {
 
 // --- Registration -------------------------------------------------------------
 
-// What the last interactive search showed, so the pick can be resolved without
-// re-searching. Keyed the way search rows are keyed everywhere else.
-var interactiveMatches = {};
-var interactiveQuery = "";
-
-function pickFileForQuery(files, torrentName, query) {
-  var hay = null;
-  var best = null;
-  var list = files || [];
-  for (var i = 0; i < list.length; i++) {
-    if (!mediaKindOf(list[i].name)) continue;
-    hay = normalizeForMatch(String(list[i].name || "") + " " + String(torrentName || ""));
-    if (containsAllTokens(hay, query)) {
-      if (!best) best = list[i];
-      else return null; // ambiguous — two files match the whole query
-    }
-  }
-  if (best) return best;
-  // No file carries the query. A torrent with exactly ONE media file is still
-  // unambiguous; anything else needs the user to open it and choose.
-  var media = [];
-  for (var j = 0; j < list.length; j++) {
-    if (mediaKindOf(list[j].name)) media.push(list[j]);
-  }
-  return media.length === 1 ? media[0] : null;
-}
-
-// Named for the same reason as the stream half: the Debug tab runs it raw.
+// Named for the same reason as the stream half: the Music Search tab runs it raw.
 function resolveDownloadByMetadata(title, artistName, albumName, durationSecs, format) {
   if (!connected || !baseUrl) {
     dbg("download: not connected to qBittorrent — decline");
@@ -7407,100 +7389,15 @@ function resolveDownloadByMetadata(title, artistName, albumName, durationSecs, f
 function registerDownloadProvider() {
   if (!api.downloads || typeof api.downloads.onResolveByMetadata !== "function") return;
 
+  // Deliberately NOT interactive (no onInteractiveSearch / onInteractiveResolve):
+  // the host's interactive download modal searches by a free-text string, but a
+  // torrent hunt is two distinct matches — a release named "artist album", then
+  // the track's file inside it — and one string can't drive both. Registering
+  // interactive handlers is also what makes the host offer "Upgrade from
+  // qBittorrent…" on local tracks; this plugin replaces that with its own
+  // "Upgrade with qBittorrent" context-menu item, which lands on the Music
+  // Search tab with the track's title/artist/album prefilled.
   api.downloads.onResolveByMetadata("qbt-download", resolveDownloadByMetadata);
-
-  if (typeof api.downloads.onInteractiveSearch === "function") {
-    api.downloads.onInteractiveSearch("qbt-download", function (query, limit) {
-      if (!connected || !baseUrl || !filesAreReachable()) return Promise.resolve([]);
-      return collectSearchResults(query, { maxMs: RESOLVE_SEARCH_MAX_MS })
-        .then(function (results) {
-          var sorted = sortSearchResults(results || []);
-          interactiveMatches = {};
-          interactiveQuery = String(query || "");
-          var out = [];
-          for (var i = 0; i < sorted.length && out.length < (limit || 10); i++) {
-            var r = sorted[i];
-            if (isPluginNotice(r) || !r.fileUrl) continue;
-            var id = searchResultId(r);
-            interactiveMatches[id] = r;
-            out.push({
-              id: id,
-              title: String(r.fileName || ""),
-              // The row's second line — the download-relevant facts, since a
-              // torrent has no artist field of its own.
-              artistName: formatBytes(r.fileSize) + " · " + formatSeedCount(swarmCount(r.nbSeeders)) + " seeds · " + siteLabel(r.siteUrl),
-              durationSecs: null
-            });
-          }
-          return out;
-        })
-        .catch(function (e) {
-          if (String(e && e.message) === "no-plugins") return [];
-          throw e;
-        });
-    });
-  }
-
-  if (typeof api.downloads.onInteractiveResolve === "function") {
-    api.downloads.onInteractiveResolve("qbt-download", function (matchId, format) {
-      var r = interactiveMatches[String(matchId)];
-      if (!r) throw new Error("That result is no longer available — search again");
-      var query = interactiveQuery;
-      return enqueueDiscovery(function () {
-        resolveJob = { hashes: {}, startedAt: Date.now() };
-        var before = shallowHashSet(torrents);
-        var expected = null;
-        var addedHash = null;
-        return resolveWebFileUrl(r, webFetchFn)
-          .then(function (resolved) {
-            r = resolved;
-            expected = magnetHash(r.fileUrl);
-            return addTorrentRaw(r.fileUrl, { paused: true, downloader: downloaderFor(r) });
-          })
-          .then(function () {
-            return waitForAddedTorrent(before, expected, r.fileName || "", 0, RESOLVE_ATTACH_ATTEMPTS);
-          })
-          .then(function (hash) {
-            if (!hash) throw new Error("qBittorrent never registered that torrent");
-            addedHash = hash;
-            resolveJob.hashes[hash] = true;
-            trackOrphan(hash);
-            return waitForMetadataQuiet(hash, { maxMs: RESOLVE_META_MAX_MS });
-          })
-          .then(function (res) {
-            if (!res.ok) throw new Error("Couldn't get that torrent's file list");
-            return fetchFilesQuiet(addedHash);
-          })
-          .then(function (files) {
-            var t = torrents[addedHash];
-            var file = pickFileForQuery(files, (t && t.name) || "", query);
-            if (!file) {
-              throw new Error("Couldn't tell which file in that torrent is the track — add it from the Torrents view and choose the file there");
-            }
-            return commitCandidate({ hash: addedHash, files: files, file: file }, { title: query });
-          })
-          .catch(function (e) {
-            if (addedHash && torrents[addedHash]) {
-              untrackOrphan(addedHash);
-              return deleteTorrents([addedHash], true).then(function () {
-                throw e;
-              });
-            }
-            throw e;
-          })
-          .then(
-            function (result) {
-              resolveJob = null;
-              return result;
-            },
-            function (e) {
-              resolveJob = null;
-              throw e;
-            }
-          );
-      });
-    });
-  }
 }
 
 function registerStreamResolver() {
@@ -7806,6 +7703,30 @@ function registerContextMenu() {
     activeTab = "search";
     if (typeof api.ui.navigateToView === "function") api.ui.navigateToView(VIEW_ID);
     runSearch(query);
+  });
+
+  // "Upgrade with qBittorrent" on a track: land on the Music Search tab with
+  // the track's metadata prefilled, ready for Search & download. The tab shows
+  // and narrates the whole hunt — release search, in-torrent file pick — which
+  // is the review step the host's one-string download modal couldn't offer.
+  // Nothing runs until the user clicks: Search & download genuinely adds and
+  // downloads torrents, so it must not fire as a side effect of a menu click.
+  api.contextMenu.onAction("qbt-upgrade", function (target) {
+    var title = String((target && target.title) || "").trim();
+    var artist = String((target && target.artistName) || "").trim();
+    if (!title && !artist) {
+      api.ui.showNotification("That item carries no title or artist to search for");
+      return;
+    }
+    debugFields = {
+      title: title,
+      artist: artist,
+      album: String((target && target.albumTitle) || "").trim()
+    };
+    debugLog = []; // a stale run's narration would read as this track's
+    activeTab = "debug";
+    if (typeof api.ui.navigateToView === "function") api.ui.navigateToView(VIEW_ID);
+    render();
   });
 }
 
@@ -8545,7 +8466,6 @@ return {
   _resolvePercent: resolvePercent,
   _isResolveOrphan: isResolveOrphan,
   _pickFileForTrack: pickFileForTrack,
-  _pickFileForQuery: pickFileForQuery,
   _discoveryQueries: discoveryQueries,
   _decodeEntities: decodeEntities,
   _parseHtml: function (text) { return parseMarkup(text, true); },

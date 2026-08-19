@@ -31,6 +31,7 @@ function jsonResp(obj) {
 test("discovery resolves a track it had to go and find", async () => {
   const state = { added: false, started: false, deletes: [], prios: [], progress: [] };
   let resolveByMetadata = null;
+  let interactiveRegistered = false;
 
   const torrentRow = () => ({
     name: "Bjork - Homogenic (1997) [FLAC]",
@@ -111,8 +112,16 @@ test("discovery resolves a track it had to go and find", async () => {
       onResolveByMetadata: (id, fn) => {
         resolveByMetadata = fn;
       },
-      onInteractiveSearch: () => {},
-      onInteractiveResolve: () => {},
+      // Deliberately absent handlers: registering onInteractiveSearch /
+      // onInteractiveResolve is what makes the host offer its one-string
+      // "Upgrade from qBittorrent…" modal, which the plugin replaced with the
+      // Music Search tab. The registration asserts below they stay unused.
+      onInteractiveSearch: () => {
+        interactiveRegistered = true;
+      },
+      onInteractiveResolve: () => {
+        interactiveRegistered = true;
+      },
       reportProgress: (p) => state.progress.push(p && p.percent),
     },
     contextMenu: { onAction: () => {} },
@@ -125,6 +134,7 @@ test("discovery resolves a track it had to go and find", async () => {
     // Let activation's first refresh land so the plugin knows it is connected.
     await new Promise((r) => setTimeout(r, 150));
     assert.ok(resolveByMetadata, "download provider registered");
+    assert.equal(interactiveRegistered, false, "the provider must stay non-interactive — see Music Search");
 
     const result = await resolveByMetadata("Jóga", "Björk", "Homogenic", null, "flac");
 

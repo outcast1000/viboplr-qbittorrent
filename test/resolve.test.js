@@ -258,7 +258,6 @@ test("budget tripwire: the all-fail worst case stays inside the design envelope"
 
 const orphan = plugin._isResolveOrphan;
 const pickTrack = plugin._pickFileForTrack;
-const pickQuery = plugin._pickFileForQuery;
 
 test("the janitor only sweeps what is ours, unowned, and old", () => {
   const t = { hash: "h" };
@@ -282,22 +281,4 @@ test("pickFileForTrack applies the precision matcher inside a torrent", () => {
   assert.equal(f.index, 1);
   // Wrong release: nothing clears the threshold, nothing is picked.
   assert.equal(pickTrack(FILES, "Bjork - Homogenic", { title: "Army of Me", artist: "Björk" }), null);
-});
-
-test("pickFileForQuery is unambiguous or nothing", () => {
-  const f = pickQuery(FILES, "Bjork - Homogenic", "bjork joga");
-  assert.ok(f);
-  assert.equal(f.index, 1);
-  // Two files matching the whole query = ambiguous = decline.
-  const twins = [
-    { index: 0, name: "Joga (live).flac" },
-    { index: 1, name: "Joga (studio).flac" },
-  ];
-  assert.equal(pickQuery(twins, "Bjork", "bjork joga"), null);
-  // No match but exactly one media file: still unambiguous.
-  const single = [
-    { index: 0, name: "track.mp3" },
-    { index: 1, name: "cover.jpg" },
-  ];
-  assert.ok(pickQuery(single, "whatever", "no such words"));
 });

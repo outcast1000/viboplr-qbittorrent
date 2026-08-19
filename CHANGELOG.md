@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.31.0
+## 0.32.0
+
+**"Upgrade with qBittorrent" opens the Music Search tab, prefilled.** The old
+route was the host's download modal, which searches by one free-text string —
+and it searched "title artist". A torrent hunt is two different matches: a
+release named by *artist and album*, then the track's file *inside* it, and one
+string can't drive both (the same string was even reused to pick the file, so
+correcting the search by hand broke the file pick). The plugin now contributes
+its own context-menu item on tracks: it lands on the Music Search tab with
+title, artist and album filled in, and **Search & download** — now the primary
+button — runs the real discovery pipeline with every step narrated: which
+queries it tried, which releases it weighed, which file it chose. Nothing runs
+until you click; a search that adds torrents must not fire as a side effect of
+a menu click.
+
+**The Debug tab is now called Music Search.** Same workbench, honest name — it
+was always the real resolver with a narration, which is exactly what a manual
+music search wants to be. The play tests remain for resolver debugging.
+
+**The interactive download provider is gone.** Registering it is what made the
+host offer the one-string "Upgrade from qBittorrent…" modal, so it was retired
+along with the flow it powered. Automatic downloads (the background,
+by-metadata path — batch downloads, album downloads) are unchanged.
 
 **A downloaded video plays as video** — fixed in Viboplr itself, not here.
 Pressing Play on a `.mkv` or `.mp4` inside a torrent used to hand it to the audio
