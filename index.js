@@ -1381,7 +1381,10 @@ function parseFileTrack(name) {
 // A DOWNLOADED MEDIA file is the only one worth playing or queueing: the bytes
 // are on disk and there is something to play. It gets neither Download (nothing
 // left to fetch) nor Skip (that would only stop seeding a file the user already
-// has, which is not what "skip" means anywhere else in this list).
+// has, which is not what "skip" means anywhere else in this list). It DOES get
+// Show folder — "where did this land?" is a question about a file, not about
+// whether the file happens to be playable, and it is the downloaded track you
+// most often want to answer it for.
 //
 // A downloaded NON-media file — the cover art, the .nfo, the scans folder that
 // comes with every release — offers nothing at all. Play and Add to queue were
@@ -1422,7 +1425,19 @@ function fileRowActions(kind, done, skipped, reachable) {
   // "Downloaded", so its actions describe a file you HAVE. Priority no longer
   // matters once the bytes exist.
   if (done) {
-    if (kind) return { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" };
+    if (kind) {
+      // Show folder on a media file too, not just on the junk. "Where did this
+      // actually land?" is the same question whatever the file is, and a
+      // downloaded track is the case you most often want to answer it for — to
+      // check the rip, to copy it somewhere, to see which release it came from.
+      // Play stays first, so it keeps the accent slot and the double-click.
+      //
+      // Reachable-gated exactly like the non-media branch: revealing a path that
+      // isn't mounted on this machine can only fail.
+      return reachable
+        ? { actions: ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"], action: "qbt:play-file" }
+        : { actions: ["qbt:play-file", "qbt:enqueue-file"], action: "qbt:play-file" };
+    }
     // Non-media (cover art, .nfo, a PDF booklet): nothing to play, but the file
     // is really here — offer to open it or reveal its folder. Only when it is
     // on this machine; opening a path that isn't mounted here would just fail.
@@ -3311,8 +3326,21 @@ function fileUrlFor(path) {
 // Open a non-media file, or reveal its folder, from a file row. `data` carries
 // the row index; the file's local path comes from the same mapping playback
 // uses, so a remote-but-mounted qBittorrent works too.
+// Open a downloaded file with its associated application, or reveal it in the
+// file manager.
+//
+// This goes through `api.system.openPath` / `revealPath` rather than
+// `api.network.openUrl("file://…")`, and that is not a preference: the host's
+// openUrl is the Tauri opener plugin's JS entry point, which is scope-checked
+// against http/https/mailto/tel only — a file:// URL there is REFUSED, so both
+// buttons reported "it may not be reachable from this machine" about a file
+// sitting on the user's own disk. `revealPath` additionally selects the file in
+// its folder (and handles UNC shares), where openUrl could only ever open the
+// parent directory. Older hosts have neither, and fall back to the old attempt.
 function openLocalFile(data, folder) {
-  if (typeof api.network.openUrl !== "function") {
+  var sys = api.system || {};
+  var viaSystem = typeof sys.openPath === "function" && typeof sys.revealPath === "function";
+  if (!viaSystem && typeof api.network.openUrl !== "function") {
     api.ui.showNotification("This build can't open files");
     return;
   }
@@ -3335,10 +3363,15 @@ function openLocalFile(data, folder) {
     api.ui.showNotification("qBittorrent didn't report where this file is saved");
     return;
   }
-  var target = folder ? parentDir(path) : path;
-  api.network.openUrl(fileUrlFor(target)).catch(function (e) {
+  var job = viaSystem
+    // Reveal takes the FILE, not its parent: selecting it in the folder is the
+    // point of "Show folder", and the host already falls back to opening the
+    // directory where the shell can't select (network shares).
+    ? (folder ? sys.revealPath(path) : sys.openPath(path))
+    : api.network.openUrl(fileUrlFor(folder ? parentDir(path) : path));
+  job.catch(function (e) {
     console.error("qBittorrent: could not open " + (folder ? "the folder" : "the file") + ":", e);
-    api.ui.showNotification("Couldn't open " + (folder ? "the folder" : "the file") + " — it may not be reachable from this machine");
+    api.ui.showNotification("Couldn't open " + (folder ? "the folder" : "the file") + ": " + errText(e));
   });
 }
 
@@ -3422,20 +3455,35 @@ function readTagsForFiles(torrent, files) {
 // Tags win field by field, the filename parse fills the gaps. Per field, not
 // all-or-nothing: a release tagged with an artist but no track number should
 // still take its number off the "03 - " in front.
+//
+// A VIDEO file takes none of the guesses. `parseFileTrack` reads
+// "Some.Movie.2019.1080p.x265" as a title and splits anything with a dash into
+// artist + title, and the album fallback is the torrent's own name — all three
+// are album-shaped claims that are simply false about a film, an episode or a
+// concert upload. Real embedded tags still stand (a music video may carry them);
+// what is dropped is the invention. Same reason the row labels drop them.
 function mergeFileTrack(torrent, file, tags) {
+  var video = mediaKindOf(file.name) === "video";
   var parsed = parseFileTrack(file.name);
   var t = tags || {};
   return {
     path: qbtUri(torrent.hash, file.index),
-    title: firstText([t.title, parsed.title]),
+    // The real filename for a video: the dash-split "Artist - Title" reading is
+    // exactly the guess above, and "S01E02" is not a better title than the name
+    // on disk.
+    title: video ? firstText([t.title, baseName(file.name)]) : firstText([t.title, parsed.title]),
     // album_artist is the second choice, not the first: on a compilation it is
     // "Various Artists" while the per-track artist is the one worth showing.
-    artist_name: firstText([t.artist, t.album_artist, parsed.artist]),
-    album_title: firstText([t.album, torrent.name]),
-    track_number: firstNum([t.track_number, parsed.trackNumber]),
+    artist_name: video ? firstText([t.artist, t.album_artist]) : firstText([t.artist, t.album_artist, parsed.artist]),
+    album_title: video ? firstText([t.album]) : firstText([t.album, torrent.name]),
+    track_number: video ? firstNum([t.track_number]) : firstNum([t.track_number, parsed.trackNumber]),
     // Nothing supplied this before. A queue entry with no length shows no seek
     // bar and never scrobbles, and it comes free with the tag read.
     duration_secs: firstNum([t.duration_secs])
+    // No `format`: the host learns the container at resolve time from the file
+    // this qbt:// URI resolves to, and reclassifies the track before it picks a
+    // player. Declaring it here would be the plugin asserting what the host is
+    // about to read off the real file.
   };
 }
 
@@ -4010,8 +4058,8 @@ function fileMatchItems(entries, opts) {
           ? fileIconFor(f, t)
           : tileIcon(kind || "unknown", percentLabel(torrentDone), progressBand(torrentDone)),
         actions: offered.actions,
-        // What makes the host's own right-click menu and drag-to-queue work on
-        // these rows, same as in a torrent's contents.
+        // What makes drag-to-queue work on these rows, same as in a torrent's
+        // contents. (There is no right-click menu on either list — see the node.)
         path: playable ? qbtUri(t.hash, f.index) : null,
         album: torrentName,
         // Double-click does what the row's first button does, exactly as it
@@ -4768,7 +4816,10 @@ function render() {
       // order — see FILE_ROW_ACTIONS. There is no "Open torrent" button: this
       // list is about the files, and the torrent each one came from is named on
       // its own row.
-      actions: FILE_ROW_ACTIONS
+      actions: FILE_ROW_ACTIONS,
+      // Same reasoning as the contents list — a file is a file, and the buttons
+      // on it should not depend on which list you found it in. See fileRowsNode.
+      contextMenu: false
     });
     if (matches.overflow) {
       children.push({
@@ -7690,8 +7741,13 @@ function fileRowsNode(hash) {
       // Priority is irrelevant here: a downloaded file's bytes are on disk and
       // playable whether or not it is still selected.
       path: kind && done && filesAreReachable() ? qbtUri(hash, f.index) : null,
-      artistName: kind ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
-      albumTitle: kind && torrent ? firstText([tags && tags.album, torrent.name]) : null
+      // Audio only, and NOT because a video has no artist — because we would be
+      // making them up. The filename parse reads a dash as "Artist - Title" and
+      // the album falls back to the torrent's name, so a downloaded episode
+      // arrived in the queue credited to a release it is not part of. Same rule
+      // as mergeFileTrack, which builds the queue entry these labels preview.
+      artistName: kind === "audio" ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
+      albumTitle: kind === "audio" && torrent ? firstText([tags && tags.album, torrent.name]) : null
     });
   }
   // `selectable` selects the host's library-parity row list: hover Play /
@@ -7724,7 +7780,15 @@ function fileRowsNode(hash) {
     numbered: true,
     selectable: true,
     selectionPresets: presets,
-    actions: FILE_ROW_ACTIONS
+    actions: FILE_ROW_ACTIONS,
+    // No right-click menu on these rows. It is the host's universal TRACK menu —
+    // Play / Enqueue / Play Next plus every plugin action — and most of a
+    // torrent's contents are not tracks: it offered Play on cover.jpg and on a
+    // file that hasn't downloaded. Everything a file row can actually do is
+    // already a button on the row (see FILE_ROW_ACTIONS), which is per-row and
+    // therefore correct. Drag-to-queue is unaffected — that rides the row's
+    // `path`, which only a finished media file has.
+    contextMenu: false
   };
 }
 

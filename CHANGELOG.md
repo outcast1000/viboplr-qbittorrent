@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.31.0
+
+**A downloaded video plays as video** — fixed in Viboplr itself, not here.
+Pressing Play on a `.mkv` or `.mp4` inside a torrent used to hand it to the audio
+player: you heard the soundtrack and saw nothing. The host decides audio-vs-video
+from a track's container, falling back to its path extension, and a
+`qbt://<hash>/3` URI has neither — so every video file arrived looking like audio.
+It now reads the container off the file the URI *resolves to*, which it already
+had in hand, and reclassifies the track before choosing a player. So this plugin
+declares nothing and needs no change for it; you need a Viboplr new enough to
+carry the fix.
+
+**A video is not credited to an album it isn't part of.** The queue entry for a
+video no longer takes an artist from the "Artist - Title" reading of its
+filename, a track number from the digits in front of it, or an album from the
+torrent's name — all three are album-shaped claims that are simply false about a
+film, an episode or a concert upload, and the row labels made the same guesses.
+Its real filename is the title. Embedded tags still win where a file carries
+them, so a properly tagged music video is unaffected; what's gone is the
+invention.
+
+**Show folder is on every downloaded file, not just the junk.** A finished track
+offered Play and Add to queue; only the non-media files — cover art, `.nfo`, a
+folder of scans — offered to reveal themselves. But "where did this actually
+land?" is a question about a *file*, not about whether that file happens to be
+playable, and a downloaded track is the case you most often want to answer it
+for: to check the rip, to copy it out, to see which release it came from. Play
+keeps the first slot, so it stays the accent button and what a double-click
+fires. As before, the button only appears when the files are on this machine —
+revealing a path that isn't mounted here can only fail.
+
+**Open and Show folder actually work.** Both went through the host's
+browser-style "open a URL" call, whose permitted schemes are http, https, mailto
+and tel — a `file://` URL was *refused*, so pressing either button on a
+downloaded `.nfo` or a folder of scans reported that the file "may not be
+reachable from this machine" about a file sitting on the user's own disk. They
+now use the host's file APIs, and Show folder **selects** the file in its folder
+rather than merely opening the directory (and handles network shares, where the
+shell's select call rejects a UNC path). The failure notification says what went
+wrong instead of guessing.
+
+**No right-click menu on the file lists.** That menu is the host's universal
+*track* menu — Play, Enqueue, Play Next plus every plugin's track actions — and
+most of a torrent's contents are not tracks: it offered Play on `cover.jpg` and
+on files that hadn't downloaded. Everything a file row can really do is already a
+button on the row, where it is decided per row and can't be wrong. Dragging a
+finished media file to the queue still works; that was never the menu.
+
 ## 0.30.0
 
 **The percentage badge is a traffic light.** Its colour is now the number on it

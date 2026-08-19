@@ -145,6 +145,34 @@ test("mergeFileTrack falls back to the filename parse with no tags at all", () =
   });
 });
 
+test("mergeFileTrack invents no artist or album for a video", () => {
+  // Every one of these is an album-shaped claim that is false about a film: the
+  // dash-split "Artist - Title" reading, and the torrent name as the album.
+  const v = plugin._mergeFileTrack(
+    TORRENT,
+    { index: 1, name: "Extras/Some Band - Live At Wembley (2019) 1080p.mkv" },
+    null,
+  );
+  assert.equal(v.artist_name, null);
+  assert.equal(v.album_title, null);
+  assert.equal(v.track_number, null);
+  // The real filename, not the half after the dash.
+  assert.equal(v.title, "Some Band - Live At Wembley (2019) 1080p.mkv");
+});
+
+test("mergeFileTrack still trusts a video's own embedded tags", () => {
+  // Dropping the guesses is not the same as ignoring what the file says — a
+  // music video may genuinely carry them.
+  const v = plugin._mergeFileTrack(TORRENT, { index: 1, name: "clip.mp4" }, {
+    title: "Nude",
+    artist: "Radiohead",
+    album: "In Rainbows",
+  });
+  assert.equal(v.artist_name, "Radiohead");
+  assert.equal(v.album_title, "In Rainbows");
+  assert.equal(v.title, "Nude");
+});
+
 test("mergeFileTrack takes album_artist only as a second choice", () => {
   // On a compilation album_artist is "Various Artists" while the per-track
   // artist is the one worth showing, so it must never outrank it.
@@ -392,12 +420,32 @@ test("a folder that merely starts the same is not a shared folder", () => {
 // .nfo, a scans folder — is not playable, and offering Play / Add to queue on
 // it queued nothing and then reported "nothing there that's finished
 // downloading" about a file the same row showed as complete.
-test("a finished media file offers Play and Add to queue", () => {
-  assert.deepEqual(plugin._fileRowActions("audio", true, false), {
+test("a finished media file offers Play, Add to queue and Show folder", () => {
+  // Show folder is on every downloaded file, media included: "where did this
+  // land?" is a question about the file, not about whether it can be played.
+  assert.deepEqual(plugin._fileRowActions("audio", true, false, true), {
+    actions: ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"],
+    action: "qbt:play-file",
+  });
+  assert.deepEqual(plugin._fileRowActions("video", true, false, true).actions, [
+    "qbt:play-file",
+    "qbt:enqueue-file",
+    "qbt:file-folder",
+  ]);
+  // Play keeps the first slot, so it stays the accent button and what a
+  // double-click fires.
+  assert.equal(plugin._fileRowActions("audio", true, false, true).action, "qbt:play-file");
+});
+
+test("Show folder drops off a media file that isn't on this machine", () => {
+  // Same gate as the non-media branch: revealing a path that isn't mounted here
+  // can only fail. Play and Add to queue stay — those resolve through the
+  // plugin's own path mapping.
+  assert.deepEqual(plugin._fileRowActions("audio", true, false, false), {
     actions: ["qbt:play-file", "qbt:enqueue-file"],
     action: "qbt:play-file",
   });
-  assert.deepEqual(plugin._fileRowActions("video", true, false).actions, [
+  assert.deepEqual(plugin._fileRowActions("video", true, true, false).actions, [
     "qbt:play-file",
     "qbt:enqueue-file",
   ]);
@@ -440,11 +488,15 @@ test("a downloaded file plays even if it was later deselected", () => {
   // Downloaded wins over deselected in both the status ("Downloaded") and the
   // actions: the bytes are on disk, so a media file plays whatever its
   // priority. Deselecting a file you already have doesn't un-download it.
-  assert.deepEqual(plugin._fileRowActions("audio", true, true), {
-    actions: ["qbt:play-file", "qbt:enqueue-file"],
+  assert.deepEqual(plugin._fileRowActions("audio", true, true, true), {
+    actions: ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"],
     action: "qbt:play-file",
   });
-  assert.deepEqual(plugin._fileRowActions("video", true, true).actions, ["qbt:play-file", "qbt:enqueue-file"]);
+  assert.deepEqual(plugin._fileRowActions("video", true, true, true).actions, [
+    "qbt:play-file",
+    "qbt:enqueue-file",
+    "qbt:file-folder",
+  ]);
 });
 
 test("an unfinished file offers the choice it is not already in", () => {

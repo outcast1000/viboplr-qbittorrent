@@ -306,7 +306,7 @@ test("the matching files are a list of their own, with no toolbar over it", asyn
     assert.match(row.id, /^qbtm:[^:]+:0$/);
     assert.match(row.subtitle, /^Downloaded/);
     assert.match(row.path, /^qbt:\/\/[^/]+\/0$/);
-    assert.deepEqual(row.actions, ["qbt:play-file", "qbt:enqueue-file"]);
+    assert.deepEqual(row.actions, ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"]);
     assert.equal(row.action, "qbt:play-file", "double-click plays it, as it would inside its torrent");
   });
 });
@@ -1742,7 +1742,10 @@ test("a file row offers only what it can actually do", async () => {
     const byId = Object.fromEntries(
       nodes.find((n) => n.type === "track-row-list").items.map((i) => [i.id, i.actions]),
     );
-    assert.deepEqual(byId["0"], ["qbt:play-file", "qbt:enqueue-file"]);
+    // Show folder rides along on the downloaded one — it is about the file, not
+    // about whether the file is playable — and stays off the two that have no
+    // bytes on disk to reveal.
+    assert.deepEqual(byId["0"], ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"]);
     assert.deepEqual(byId["1"], ["qbt:file-skip"]);
     assert.deepEqual(byId["2"], ["qbt:file-download"]);
   }, { files: () => MIX });
