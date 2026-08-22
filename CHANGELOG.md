@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.36.0
+
+**The matching-files list is multi-selection again.** Pick the five takes a
+search turned up across three releases and *Play*, *Add to queue* or
+*Download* them as one act — the handlers always took a many-row selection
+(grouped per torrent, in the order shown); the single-selection list was the
+only thing stopping the gesture. Both lists on the screen now build their own
+selection, and with *Start all* / *Stop all* gone (0.35.0) no button is
+ambiguous about which one it acts on. There is still no *Downloaded* preset:
+the *Downloaded only* view toggle changes what is on screen, and *All* /
+*None* select what it left visible.
+
 ## 0.35.0
 
 **One header row over the torrent list.** The filter box, **Add torrent…**,

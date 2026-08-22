@@ -177,13 +177,12 @@ on can't blank a screen it isn't describing. *Downloaded only* can still be
 filling in while the file lists arrive; it says so rather than showing an empty
 list as a verdict.
 
-**One row at a time, and no toolbar over it.** Unlike the torrent list, this one
-is single-selection, so the host draws no *All / None / …* bar above it — that bar
-was a second copy of the buttons already on every row, over a list whose rows
-each say what they can do. "Show me only the ones I have" is the **Downloaded
-only** toggle above, which changes what is on screen rather than what is
-highlighted. A click selects, and a downloaded match can be dragged into the
-queue like any other track.
+**Multi-selection, like every other file list.** Pick the five takes a search
+turned up across three releases and *Play*, *Add to queue* or *Download* them
+as one act from the bar above the list. "Show me only the ones I have" is still
+the **Downloaded only** toggle, which changes what is on screen rather than
+what is highlighted — *All* / *None* select what the toggle left visible. A
+downloaded match can be dragged into the queue like any other track.
 
 **A match row carries the same buttons as the same file inside its torrent**,
 from the same code: **▶ Play** / **+ Add to queue** on a finished media file,

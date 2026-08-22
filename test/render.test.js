@@ -296,21 +296,23 @@ test("the badge counts the whole torrent, not the selected files", async () => {
 // "first" is in both torrents' file lists and in neither torrent's NAME, so
 // both rows here are file matches — which is what the list under the torrents
 // is for. ("flac" would match one of them by name and contribute no file row.)
-test("the matching files are a list of their own, with no toolbar over it", async () => {
+test("the matching files are a multi-selection list of their own", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:list-filter"]({ query: "first" });
     await settle();
-    // Two lists on screen: the torrents (multi-select, toolbar) and the
-    // matches (single-select, no toolbar) — one selection toolbar on screen,
-    // and it is the torrent list's.
+    // Two lists on screen, both multi-select: each toolbar acts on its own
+    // list's selection, and with Start all / Stop all gone no button is
+    // ambiguous about which. Multi is what lets "pick five found files and
+    // Play / Download them" be a gesture rather than only a handler contract.
     const lists = walk(last(views)).filter((n) => n.type === "track-row-list");
     assert.equal(lists.length, 2);
     const matches = lists[1];
     assert.equal(matches.selectable, true);
-    // One row at a time, so the host draws no All / None / actions bar over the
-    // list: it was a second copy of the buttons already on every row.
-    assert.equal(matches.selectionMode, "single");
-    assert.ok(!matches.selectionPresets, "a preset selects rows for a bar that no longer exists");
+    assert.ok(!matches.selectionMode, "absent selectionMode = the host default, multi");
+    // No Downloaded preset: "show me the ones I have" is the Downloaded only
+    // view toggle, which changes what is on screen rather than what is
+    // highlighted; All / None select what the toggle left visible.
+    assert.ok(!matches.selectionPresets);
     // The SAME buttons a file gets inside its torrent — a file is a file, and
     // which list you found it in is not a property of it. There is no "Open
     // torrent": this list is about the files, and each row already names the
@@ -349,10 +351,6 @@ test("a match that isn't downloaded offers no Play", async () => {
   });
 });
 
-// Drives the handler directly: the list is single-selection, so this many-row
-// case is the handler's contract rather than a gesture the UI can make today.
-// It is what keeps the shared play/enqueue path honest about grouping by
-// torrent — the contents list can still send several rows at once.
 test("playing a multi-torrent selection queues every torrent's files, in order", async () => {
   // The toolbar's Play acts on the whole selection, like Start / Stop / Remove.
   // It used to play only the first torrent (with a "playing the first" note),
@@ -384,6 +382,9 @@ test("playing a multi-torrent selection queues every torrent's files, in order",
   }, undefined, { torrents, files: (hash) => files(hash) });
 });
 
+// Drives the handler directly with the selection the match list's own toolbar
+// now builds. It is what keeps the shared play/enqueue path honest about
+// grouping by torrent — the contents list can send several rows at once too.
 test("playing several match rows queues them in the order shown, across torrents", async () => {
   await withPlugin(async ({ views, handlers, played }) => {
     handlers["qbt:list-filter"]({ query: "first" });

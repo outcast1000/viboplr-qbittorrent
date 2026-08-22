@@ -4813,9 +4813,12 @@ function render() {
   // alone when "Files only" is on). The torrent rows only count their matches;
   // this is where a match is readable.
   //
-  // It is single-selection (see its node below), so it never contends with the
-  // torrent list's selection above it: one list on this screen builds a
-  // multi-selection, and it is the one whose toolbar acts on it.
+  // Multi-selection, like every other file list: pick the five takes a search
+  // turned up across three releases and Play / Add to queue / Download them as
+  // one act. The handlers always took a many-row selection (matchRowGroups) —
+  // this is what lets the UI actually make the gesture. Its toolbar and the
+  // torrent list's each act on their own list's selection, and with Start all /
+  // Stop all gone there is no button left that is ambiguous about which.
   if (hasMatches) {
     children.push({
       type: "text",
@@ -4851,14 +4854,10 @@ function render() {
       type: "track-row-list",
       items: matches.rows,
       selectable: true,
-      // One row at a time, so the host draws no selection toolbar over the
-      // list. That bar — All / None / Downloaded / a count / six buttons — was
-      // a second copy of the buttons already on every row, above a list whose
-      // rows each say what they can do. "Show me the downloaded ones" is the
-      // Downloaded only toggle above, which changes what is on screen rather
-      // than what is highlighted; the preset that used to do it here selected
-      // rows for that same bar and went with it.
-      selectionMode: "single",
+      // "Show me the downloaded ones" is still the Downloaded only toggle
+      // above, which changes what is on screen rather than what is highlighted
+      // — so there is no Downloaded preset here, and All / None select what the
+      // toggle left visible.
       // The same six a file gets inside its torrent, declared in the same
       // order — see FILE_ROW_ACTIONS. There is no "Open torrent" button: this
       // list is about the files, and the torrent each one came from is named on
