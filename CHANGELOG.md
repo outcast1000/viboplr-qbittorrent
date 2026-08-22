@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.0
+
+**One header row over the torrent list.** The filter box, **Add torrent…**,
+**Refresh** and the connection status now share a single line — the filter
+flexes, the actions and the status sit at its right end — instead of a toolbar
+row plus a filter row. **Start all / Stop all are gone**: with the list
+multi-selection again, *All* + *Start* / *All* + *Stop* on the selection bar is
+the same act, so they were a second pair of buttons one row above it.
+
 ## 0.34.0
 
 **The torrent list is multi-selection again.** It went single-selection when

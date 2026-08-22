@@ -4530,9 +4530,9 @@ function render() {
   }
 
   // One torrent's contents replaces the list entirely. The add box, the server
-  // stats and the start-all/stop-all toolbar all belong to the list, and leaving
-  // them above a single torrent's file rows made it ambiguous which of the two
-  // "Stop all" would act on.
+  // stats and the header row (filter / Add / Refresh / status) all belong to
+  // the list — a torrent-list filter over a single torrent's file rows would
+  // filter nothing the eye can see.
   if (expandedHash) {
     var detailNodes = torrentDetailNodes(expandedHash);
     for (var di = 0; di < detailNodes.length; di++) children.push(detailNodes[di]);
@@ -4544,17 +4544,37 @@ function render() {
     return;
   }
 
-  children.push({
-    type: "toolbar",
-    buttons: [
-      { label: "Add torrent…", action: "qbt:add-toggle", variant: "accent", disabled: !connected },
-      { label: "Start all", action: "qbt:start-all", variant: "secondary", disabled: !connected },
-      { label: "Stop all", action: "qbt:stop-all", variant: "secondary", disabled: !connected },
-      { label: "Refresh", action: "qbt:refresh", variant: "secondary" }
-    ],
-    status: statusLine(),
-    statusVariant: lastError ? "error" : connected ? "success" : "default"
+  // One header row instead of a toolbar plus a filter line: the filter box,
+  // the two actions that are about the list as a whole (Add / Refresh) and the
+  // connection status share the line. Start all / Stop all are gone — with the
+  // list multi-selection again, All + Start / All + Stop on the selection
+  // toolbar is the same act, so they were a second copy one row above it.
+  //
+  // The filter box is also shown while it holds text over an emptied list —
+  // hiding the input WITH the last row would strand a filter nobody can clear.
+  var headerRow = [];
+  if (list.length || String(listFilter).trim()) {
+    // Live filter, like the per-torrent files box: no button label, so the
+    // host fires it on every keystroke. It flexes, so it is also what pushes
+    // the buttons and the status to the right end of the line.
+    headerRow.push({
+      type: "search-input",
+      placeholder: "Filter torrents — names and the files inside them",
+      action: "qbt:list-filter",
+      value: listFilter,
+      stateKey: "qbt-list-filter"
+    });
+  }
+  // The toolbar's own button classes, so the row reads exactly as the toolbar
+  // it replaces — a bare `button` node renders the larger plugin-button style.
+  headerRow.push({ type: "button", label: "Add torrent…", action: "qbt:add-toggle", className: "ds-btn ds-btn--primary ds-btn--sm", disabled: !connected });
+  headerRow.push({ type: "button", label: "Refresh", action: "qbt:refresh", className: "plugin-toolbar-btn" });
+  headerRow.push({
+    type: "text",
+    content: statusLine(),
+    className: "plugin-toolbar-status" + (lastError ? " plugin-toolbar-status--error" : connected ? " plugin-toolbar-status--success" : "")
   });
+  children.push({ type: "layout", direction: "horizontal", children: headerRow });
 
   // Adding is a thing you do once and then watch for an hour, so the box no
   // longer holds a permanent row above the list — it opens from the toolbar.
@@ -4632,20 +4652,6 @@ function render() {
     });
   }
 
-  // Also shown while the box holds text over an emptied list — hiding the
-  // input WITH the last row would strand a filter nobody can clear.
-  if (list.length || String(listFilter).trim()) {
-    // Live filter, like the per-torrent files box: no button label, so the
-    // host fires it on every keystroke.
-    children.push({
-      type: "search-input",
-      placeholder: "Filter torrents — names and the files inside them",
-      action: "qbt:list-filter",
-      value: listFilter,
-      stateKey: "qbt-list-filter"
-    });
-  }
-
   var filtered = filterTorrentList(list, listFilter, fileNamesByHash);
 
   // One character filters torrent names only. Said out loud, because the box
@@ -4713,9 +4719,9 @@ function render() {
 
   if (hideTorrents) {
     // "Files only": the torrent rows and their empty states are all skipped.
-    // Nothing else is — the toolbar above still carries Add torrent, Start all
-    // / Stop all and the connection status, and those act on the same filtered
-    // set they always did whether or not its rows are drawn.
+    // Nothing else is — the header row above still carries the filter, Add
+    // torrent, Refresh and the connection status, none of which are about the
+    // rows being hidden.
   } else if (!list.length) {
     children.push({
       type: "text",
@@ -4758,8 +4764,9 @@ function render() {
       // click builds the selection, so acting on several torrents at once —
       // stop these three, remove those two — is back to being one gesture per
       // row plus one button, through the same handlers the hover tray fires
-      // (hashesOf takes the whole selection). Start all / Stop all still act
-      // on every row shown, selection or none.
+      // (hashesOf takes the whole selection). This selection toolbar is also
+      // what replaced Start all / Stop all: All + Start / All + Stop is the
+      // same act, without a second pair of buttons a row above it.
       // A torrent is a container, so clicking its NAME opens it; clicking the
       // rest of the row only selects it, so you can land on a torrent — to read
       // its stats, to reach its hover tray — without being thrown into its file
@@ -5072,7 +5079,7 @@ function settingsTree(d, destOptions, status, statusChildren) {
             // ever touch torrents in the category above" described a filter
             // that wasn't running.
             description: d.category
-              ? "On (recommended): the Torrents view and its Start all / Stop all buttons only ever touch torrents in the “" + d.category + "” category. Off: everything in qBittorrent is listed and bulk actions reach all of it."
+              ? "On (recommended): the Torrents view and its bulk actions only ever touch torrents in the “" + d.category + "” category. Off: everything in qBittorrent is listed and bulk actions reach all of it."
               : "No category set above, so there is nothing to restrict — every torrent in qBittorrent is listed and bulk actions reach all of it. Name a category above to use this.",
             control: { type: "toggle", label: "", action: "qbt:set-restrict", checked: !!d.restrictToCategory }
           },
@@ -7934,14 +7941,6 @@ function registerActions() {
     }
   });
 
-  api.ui.onAction("qbt:start-all", function () {
-    actOn(startEndpoint(), hashesInView(), "Starting the torrents");
-  });
-
-  api.ui.onAction("qbt:stop-all", function () {
-    actOn(stopEndpoint(), hashesInView(), "Stopping the torrents");
-  });
-
   api.ui.onAction("qbt:show-files", function (data) {
     // One at a time: the contents panel replaces the list, so a multi-row
     // selection opens the first of them rather than nothing at all.
@@ -8315,17 +8314,6 @@ function registerActions() {
   api.ui.onAction("qbt:test", function () {
     testConnection();
   });
-}
-
-// Bulk actions act on exactly what the user can see — which, with the category
-// restriction on, is only this plugin's own torrents, and with the list filter
-// typed, only the rows it shows. "Stop all" over a filter for one release must
-// not halt the other hundred transfers sitting off-screen.
-function hashesInView() {
-  var filtered = filterTorrentList(visibleTorrents(), listFilter, fileNamesByHash);
-  var out = [];
-  for (var i = 0; i < filtered.shown.length; i++) out.push(filtered.shown[i].torrent.hash);
-  return out;
 }
 
 // ---------------------------------------------------------------------------

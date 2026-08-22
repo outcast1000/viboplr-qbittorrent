@@ -173,6 +173,27 @@ test("the torrents view renders one row list, not a stack of sections", async ()
   });
 });
 
+test("one header row: filter, Add, Refresh and the status share the line", async () => {
+  await withPlugin(async ({ views }) => {
+    const nodes = walk(last(views));
+    // The old toolbar node is gone; its two surviving actions and the status
+    // ride the filter line instead, so the list keeps one row of furniture.
+    assert.ok(!nodes.some((n) => n.type === "toolbar"), "the toolbar row is back");
+    const row = nodes.find((n) => n.type === "layout" && n.direction === "horizontal" &&
+      (n.children || []).some((c) => c.action === "qbt:list-filter"));
+    assert.ok(row, "no header row holding the filter");
+    const actions = (row.children || []).map((c) => c.action);
+    assert.ok(actions.includes("qbt:add-toggle"), "Add torrent left the header row");
+    assert.ok(actions.includes("qbt:refresh"), "Refresh left the header row");
+    const status = (row.children || []).find((c) => c.type === "text");
+    assert.match(status.content, /Connected/);
+    assert.match(status.className, /plugin-toolbar-status--success/);
+    // Start all / Stop all are gone for good: the selection bar's All + Start /
+    // All + Stop is the same act.
+    assert.ok(!nodes.some((n) => n.action === "qbt:start-all" || n.action === "qbt:stop-all"));
+  });
+});
+
 test("each torrent row carries name, size, status and a tile", async () => {
   await withPlugin(async ({ views }) => {
     const list = walk(last(views)).find((n) => n.type === "track-row-list");
@@ -438,9 +459,10 @@ test("“Files only” hides the torrent rows, keeping the matches", async () =>
     const lists = nodes.filter((n) => n.type === "track-row-list");
     assert.equal(lists.length, 1, "the torrent list should be gone");
     assert.ok(lists[0].items.every((i) => /^qbtm:/.test(i.id)), "what remains must be the file matches");
-    // The toolbar stays: it carries Add torrent, Start all / Stop all and the
-    // connection status, none of which are about the rows being hidden.
-    assert.ok(nodes.some((n) => n.type === "toolbar"));
+    // The header row stays: it carries the filter, Add torrent, Refresh and
+    // the connection status, none of which are about the rows being hidden.
+    assert.ok(nodes.some((n) => n.action === "qbt:add-toggle"));
+    assert.ok(nodes.some((n) => n.action === "qbt:list-filter"));
 
     handlers["qbt:view-files-only"]({ checked: false });
     await settle();
@@ -559,13 +581,14 @@ test("opening a torrent's contents replaces the list", async () => {
     handlers["qbt:show-files"]({ selectedIds: ["aaa"], itemId: "aaa" });
     await settle();
     const nodes = walk(last(views));
-    // The list's own furniture is gone: no add box and no start-all/stop-all,
-    // which would be ambiguous about what they act on. (The panel has a
+    // The list's own furniture is gone: no add box and no header row, whose
+    // torrent-list filter would filter nothing on this screen. (The panel has a
     // stats-grid of its own — the torrent's facts, not the server's.)
     // By action, not by node type — the panel has a search-input of its own now
     // (the file filter), so counting them would pass for the wrong reason.
     assert.ok(!nodes.some((n) => n.action === "qbt:add"), "the list's add box is still here");
-    assert.ok(!nodes.some((n) => n.action === "qbt:start-all"), "the list's Start all is still here");
+    assert.ok(!nodes.some((n) => n.action === "qbt:add-toggle"), "the list's Add torrent is still here");
+    assert.ok(!nodes.some((n) => n.action === "qbt:list-filter"), "the list's filter is still here");
     assert.ok(nodes.some((n) => n.type === "detail-header"), "no hero");
     // The hero carries Back as `backAction` — the host's own control, in the
     // same place as on every Artist/Album/Track page — not a button labelled
@@ -607,10 +630,10 @@ test("Back returns to the list", async () => {
   });
 });
 
-test("the add box hides behind the toolbar button, and toggles", async () => {
+test("the add box hides behind the header-row button, and toggles", async () => {
   await withPlugin(async ({ views, handlers }) => {
     // A list with torrents in it: the box is closed, so the row above the list
-    // is the toolbar rather than a paste field nobody is using.
+    // is the header row rather than a paste field nobody is using.
     assert.ok(!walk(last(views)).some((n) => n.action === "qbt:add"), "the add box is open over a populated list");
 
     handlers["qbt:add-toggle"]();

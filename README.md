@@ -99,8 +99,10 @@ again, with the *All / None / Play / Start / Stop / Remove* bar above it —
 stop these three, remove those two, one gesture per row plus one button. *Play*
 on a selection queues every selected torrent's playable files as one list,
 torrent by torrent in the order shown.
-*Start all* / *Stop all* below still act on every row the list is showing you,
-selection or none.
+
+That selection bar is also what replaced *Start all* / *Stop all*: *All* +
+*Start* or *All* + *Stop* is the same act, without a second pair of buttons a
+row above it.
 
 Hovering a row reveals **▶ Play**, **⇅ Start** *or* **⏹ Stop**, and
 **🗑 Remove** — only the ones that would actually do something:
@@ -128,13 +130,13 @@ WebAPI 2.11 renamed pause/resume to stop/start precisely because they were one
 pair — so a button posting to the same endpoint under a different name would be
 a lie about what the client can do. *Stop* is the pause.
 
-*Start all* / *Stop all* act on every torrent the list shows you — which, with
-the category filter on, is only the ones this plugin added, and with the filter
-box typed into, only the rows it shows.
+The list's header is a single row: the filter box, then **Add torrent…**,
+**Refresh** and the connection status at its right end — one line of furniture
+above the rows instead of two.
 
 ### Adding a torrent
 
-**Add torrent…** leads the toolbar and opens an *Add a torrent* panel: paste a
+**Add torrent…** sits on the header row and opens an *Add a torrent* panel: paste a
 magnet link or the address of a `.torrent` file, or press **Paste** to take
 what's on the clipboard and add it in one click. The panel says what will happen
 — it starts downloading straight away, or arrives paused when *Choose files
@@ -240,7 +242,7 @@ notice it.
 
 Torrents added from Viboplr are tagged with a **category** (`viboplr` by
 default), and *Only manage my own category* is **on** by default. While it is on,
-the list and the Start all / Stop all buttons only ever see torrents in that
+the list and its bulk actions only ever see torrents in that
 category — they cannot reach anything you manage yourself in qBittorrent. Turn it
 off to manage everything.
 
