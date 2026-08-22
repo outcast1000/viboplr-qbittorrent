@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.33.0
+
+**Click a torrent's name to open it; click the rest of the row to select it.**
+The list used to open the contents on a click anywhere, which made simply
+landing on a torrent — to read its stats, to reach its hover buttons —
+impossible without being thrown into its file list. Now the title is the link
+(the host underlines it on hover) and the body of the row selects.
+Double-click and Enter still open from anywhere. Uses the host's new
+`openOnClick: "title"` mode; an older host reads the value as truthy and keeps
+the previous open-anywhere behaviour, so no minimum app version bump.
+
 ## 0.32.0
 
 **"Upgrade with qBittorrent" opens the Music Search tab, prefilled.** The old

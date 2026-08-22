@@ -194,11 +194,11 @@ test("the row list offers exactly the four torrent actions", async () => {
       "qbt:stop",
       "qbt:delete-ask",
     ]);
-    // No Contents button — the row itself opens the contents, on a plain click
+    // No Contents button — the row itself opens the contents, on a title click
     // and on double-click, so a third route would only cost tray width.
     assert.ok(!list.actions.some((a) => a.id === "qbt:show-files"));
     assert.equal(list.items[0].action, "qbt:show-files", "the row no longer opens at all");
-    assert.equal(list.openOnClick, true);
+    assert.equal(list.openOnClick, "title");
   });
 });
 
@@ -1243,12 +1243,15 @@ test("speeds and a time-left are hidden on a torrent that isn't moving", async (
     assert.ok(!("Upload speed" in kv), Object.keys(kv).join(", "));
   }, undefined, { files: () => MIXED, torrents: STOPPED });
 });
-test("a torrent list row opens on a plain click", async () => {
+test("a torrent list row opens on a title click", async () => {
   // The host only fires a row's `action` on click when the list opts in; this
-  // pins the opt-in being sent, since without it a click merely selects.
+  // pins the opt-in being sent, since without it a click merely selects. The
+  // "title" value narrows the hotspot to the row's name — clicking the rest of
+  // the row selects it — and an older host reads it as truthy, i.e. as the
+  // open-anywhere behaviour this list shipped with.
   await withPlugin(async ({ views }) => {
     const list = walk(last(views)).find((n) => n.type === "track-row-list");
-    assert.equal(list.openOnClick, true);
+    assert.equal(list.openOnClick, "title");
     assert.equal(list.items[0].action, "qbt:show-files");
   });
 });

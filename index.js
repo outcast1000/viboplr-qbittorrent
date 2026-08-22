@@ -4728,14 +4728,20 @@ function render() {
       //
       // On an older host this field is ignored and the list behaves as it did.
       selectionMode: "single",
-      // A torrent is a container, so clicking one opens it — and with no
-      // multi-selection to build, a modifier click opens it too.
-      openOnClick: true,
+      // A torrent is a container, so clicking its NAME opens it; clicking the
+      // rest of the row only selects it, so you can land on a torrent — to read
+      // its stats, to reach its hover tray — without being thrown into its file
+      // list. The title is the part of the row that names the thing you would
+      // be opening, so it is the part that acts as the link (the host
+      // underlines it on hover). Double-click and Enter still open from
+      // anywhere. Older hosts read the string as truthy and open on any click —
+      // exactly the previous behaviour, so no minAppVersion bump.
+      openOnClick: "title",
       items: rows,
       // Play first: it takes the primary overlay slot, and it is the only one of
       // the four that is about the music rather than about the transfer.
       //
-      // No Contents button: the row already opens on a plain click and on
+      // No Contents button: the row already opens on a title click and on
       // double-click, so a button for it was a third route to the same place,
       // taking tray width from the actions that have no other route.
       //
