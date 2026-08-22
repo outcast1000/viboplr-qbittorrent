@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.34.0
+
+**The torrent list is multi-selection again.** It went single-selection when
+every click opened the row — a selection then existed only to feed the toolbar,
+and building it cost a modifier. With the title now the open hotspot (0.33.0),
+a plain click on the body of a row builds the selection, so the *All / None /
+Play / Start / Stop / Remove* bar is back and acting on several torrents at
+once — stop these three, remove those two — is one gesture per row plus one
+button. Start, Stop and Remove always took a whole selection (`hashesOf`);
+**Play now does too** — every selected torrent's playable files queue as one
+list, torrent by torrent in the order shown, where it used to play only the
+first with a "playing the first" note (a leftover from when no multi-selection
+could be built). A torrent that can't be read is skipped rather than sinking
+the rest. *Start all* / *Stop all* still act on every row shown, selection or
+none. The matching-files list stays single-selection — its buttons live on each
+row, and one selection toolbar per screen is enough.
+
 ## 0.33.0
 
 **Click a torrent's name to open it; click the rest of the row to select it.**

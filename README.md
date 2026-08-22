@@ -88,17 +88,19 @@ file list is in hand (any torrent you have opened), it is counted file by file,
 so a file you downloaded and later *deselected* still counts. The same number
 appears on the torrent's own page, its bar and its Info tab.
 
-**Clicking a row opens it** — a torrent is a container, and a click that only
-highlighted it read as nothing having happened. Modifier-clicks open it too:
-the list is **single-selection**, so there is no multi-selection for them to
-build.
+**Clicking a torrent's name opens it; clicking the rest of the row selects
+it.** A torrent is a container, so its name is a link (it underlines on hover)
+— but landing on a row to read its stats, reach its hover buttons or build a
+selection shouldn't throw you into its file list, so the body of the row
+selects instead. Double-click and Enter still open from anywhere.
 
-That is why there is no *All / None / Play / Start / Stop / Remove* bar above
-the list any more. Everything you do to a torrent you do to *that* torrent, and
-all four are on its own hover tray — so the bar was a second copy of the same
-buttons, fed by a selection that existed only to feed it. Acting on many at once
-is still *Start all* / *Stop all* below, which act on every row the list is
-showing you.
+Because selecting is back to a plain click, the list is **multi-selection**
+again, with the *All / None / Play / Start / Stop / Remove* bar above it —
+stop these three, remove those two, one gesture per row plus one button. *Play*
+on a selection queues every selected torrent's playable files as one list,
+torrent by torrent in the order shown.
+*Start all* / *Stop all* below still act on every row the list is showing you,
+selection or none.
 
 Hovering a row reveals **▶ Play**, **⇅ Start** *or* **⏹ Stop**, and
 **🗑 Remove** — only the ones that would actually do something:
@@ -173,8 +175,8 @@ on can't blank a screen it isn't describing. *Downloaded only* can still be
 filling in while the file lists arrive; it says so rather than showing an empty
 list as a verdict.
 
-**One row at a time, and no toolbar over it.** Like the torrent list, this one is
-single-selection, so the host draws no *All / None / …* bar above it — that bar
+**One row at a time, and no toolbar over it.** Unlike the torrent list, this one
+is single-selection, so the host draws no *All / None / …* bar above it — that bar
 was a second copy of the buttons already on every row, over a list whose rows
 each say what they can do. "Show me only the ones I have" is the **Downloaded
 only** toggle above, which changes what is on screen rather than what is

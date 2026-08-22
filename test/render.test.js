@@ -279,9 +279,9 @@ test("the matching files are a list of their own, with no toolbar over it", asyn
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:list-filter"]({ query: "first" });
     await settle();
-    // Two lists on screen: the torrents (single-select, no toolbar) and the
-    // matches. The matches are the one you can build a selection in — which is
-    // only possible because the torrent list stopped being one.
+    // Two lists on screen: the torrents (multi-select, toolbar) and the
+    // matches (single-select, no toolbar) — one selection toolbar on screen,
+    // and it is the torrent list's.
     const lists = walk(last(views)).filter((n) => n.type === "track-row-list");
     assert.equal(lists.length, 2);
     const matches = lists[1];
@@ -332,6 +332,37 @@ test("a match that isn't downloaded offers no Play", async () => {
 // case is the handler's contract rather than a gesture the UI can make today.
 // It is what keeps the shared play/enqueue path honest about grouping by
 // torrent — the contents list can still send several rows at once.
+test("playing a multi-torrent selection queues every torrent's files, in order", async () => {
+  // The toolbar's Play acts on the whole selection, like Start / Stop / Remove.
+  // It used to play only the first torrent (with a "playing the first" note),
+  // from when the torrent list was single-selection and a many-hash call was
+  // only a handler contract.
+  const torrents = {
+    aaa: { hash: "aaa", name: "Album One [FLAC]", state: "stalledUP", progress: 1, size: 1, added_on: 200, category: "viboplr" },
+    bbb: { hash: "bbb", name: "Album Two [FLAC]", state: "stalledUP", progress: 1, size: 1, added_on: 100, category: "viboplr" },
+  };
+  const files = (hash) => [
+    { index: 0, name: hash + " 01.flac", size: 1, progress: 1, priority: 1 },
+    { index: 1, name: hash + " 02.flac", size: 1, progress: 1, priority: 1 },
+  ];
+  await withPlugin(async ({ views, handlers, played }) => {
+    const list = walk(last(views)).find((n) => n.type === "track-row-list");
+    handlers["qbt:play-torrent"]({ selectedIds: list.items.map((i) => i.id) });
+    await settle();
+    await settle();
+    assert.equal(played.length, 1, "one queue, not one play per torrent");
+    assert.equal(played[0].tracks.length, 4, "every selected torrent's files");
+    // Torrent by torrent, in the order the list showed them — never interleaved
+    // by whichever file list answered first.
+    const hashesInOrder = played[0].tracks.map((t) => /^qbt:\/\/([^/]+)/.exec(t.path)[1]);
+    assert.deepEqual(hashesInOrder, [
+      list.items[0].id, list.items[0].id,
+      list.items[1].id, list.items[1].id,
+    ]);
+    assert.match(played[0].context.name, /2 torrents/);
+  }, undefined, { torrents, files: (hash) => files(hash) });
+});
+
 test("playing several match rows queues them in the order shown, across torrents", async () => {
   await withPlugin(async ({ views, handlers, played }) => {
     handlers["qbt:list-filter"]({ query: "first" });
@@ -503,14 +534,15 @@ test("a single character filters names only, and says so", async () => {
   });
 });
 
-test("the torrent list is single-selection; the files inside one are not", async () => {
+test("the torrent list is multi-selection again; so are the files inside one", async () => {
   await withPlugin(async ({ views, handlers }) => {
     const torrents = walk(last(views)).find((n) => n.type === "track-row-list");
-    // Every action here acts on one torrent and is on that torrent's own row,
-    // so the host's All / None / action toolbar had nothing left to act on.
-    assert.equal(torrents.selectionMode, "single");
-    assert.equal(torrents.selectable, true, "single-select still needs the listbox list");
-    assert.ok(!torrents.selectionPresets, "a preset selects several rows — meaningless here");
+    // Multi restored: with the title as the open hotspot, a plain body click
+    // builds the selection, so the toolbar's Play / Start / Stop / Remove have
+    // a selection to act on that no longer costs a modifier to build.
+    assert.ok(!torrents.selectionMode, "absent selectionMode = the host default, multi");
+    assert.equal(torrents.selectable, true);
+    assert.ok(!torrents.selectionPresets, "no named subsets of torrents to select");
 
     // The files inside a torrent are the opposite case: choosing which of them
     // download is inherently a multi-row job, and the presets are the point.

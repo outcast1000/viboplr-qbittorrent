@@ -3631,6 +3631,40 @@ function playFiles(hash, startIndex) {
   });
 }
 
+// Every playable file of every listed torrent, as one queue — torrents in the
+// order given, files in playableFiles' order within each. The file lists are
+// read one torrent at a time so the queue order cannot depend on which fetch
+// answered first, and a torrent that cannot be read is skipped rather than
+// sinking the rest — the same rule as tracksForTargets.
+function playTorrentsTogether(hashes) {
+  var tracks = [];
+  var chain = Promise.resolve();
+  hashes.forEach(function (hash) {
+    chain = chain
+      .then(function () {
+        var torrent = torrents[hash];
+        if (!torrent) return null;
+        return ensureFiles(hash).then(function (files) {
+          var playable = playableFiles(files);
+          if (!playable.length) return null;
+          return readTagsForFiles(torrent, playable).then(function () {
+            for (var i = 0; i < playable.length; i++) tracks.push(trackForFile(torrent, playable[i]));
+          });
+        });
+      })
+      .catch(function (e) {
+        console.error("qBittorrent: could not read a selected torrent's files:", e);
+      });
+  });
+  return chain.then(function () {
+    if (!tracks.length) {
+      api.ui.showNotification("Nothing finished downloading in those torrents yet");
+      return;
+    }
+    api.playback.playTracks(tracks, 0, { name: hashes.length + " torrents" });
+  });
+}
+
 function deleteTorrents(hashes, deleteFiles) {
   var list = [].concat(hashes || []);
   if (!list.length) return Promise.resolve();
@@ -4718,16 +4752,14 @@ function render() {
     children.push({
       type: "track-row-list",
       selectable: true,
-      // One torrent at a time. Everything you do to a torrent you do to THAT
-      // torrent — start it, stop it, open it, remove it — and each of those is
-      // already on the row's own hover tray, so a selection existed only to
-      // feed a toolbar of All / None / Play / Start / Stop / Remove sitting
-      // above the list restating the same four buttons. Bulk start and stop
-      // are still there and always were: the list toolbar's Start all / Stop
-      // all act on every torrent shown, filter included.
-      //
-      // On an older host this field is ignored and the list behaves as it did.
-      selectionMode: "single",
+      // Multi-selection, restored. It went single when every click opened the
+      // row — a selection then existed only to feed the toolbar, and building
+      // it cost a modifier. With the title now the open hotspot, a plain body
+      // click builds the selection, so acting on several torrents at once —
+      // stop these three, remove those two — is back to being one gesture per
+      // row plus one button, through the same handlers the hover tray fires
+      // (hashesOf takes the whole selection). Start all / Stop all still act
+      // on every row shown, selection or none.
       // A torrent is a container, so clicking its NAME opens it; clicking the
       // rest of the row only selects it, so you can land on a torrent — to read
       // its stats, to reach its hover tray — without being thrown into its file
@@ -4774,10 +4806,9 @@ function render() {
   // alone when "Files only" is on). The torrent rows only count their matches;
   // this is where a match is readable.
   //
-  // It is a SELECTION of its own, and can be because the torrent list above
-  // stopped being one: a second multi-selection under a toolbar of Start all /
-  // Stop all was ambiguous about what those acted on, and that toolbar's
-  // per-selection buttons are gone.
+  // It is single-selection (see its node below), so it never contends with the
+  // torrent list's selection above it: one list on this screen builds a
+  // multi-selection, and it is the one whose toolbar acts on it.
   if (hasMatches) {
     children.push({
       type: "text",
@@ -7958,10 +7989,14 @@ function registerActions() {
   api.ui.onAction("qbt:play-torrent", function (data) {
     var hashes = hashesOf(data);
     if (!hashes.length) return;
-    // One at a time: playing replaces the queue, so a multi-row selection would
-    // otherwise silently discard all but one of the torrents the user picked.
-    if (hashes.length > 1) api.ui.showNotification("Playing the first of the selected torrents");
-    playFiles(hashes[0], null);
+    if (hashes.length === 1) { playFiles(hashes[0], null); return; }
+    // A selection plays as ONE queue: every selected torrent's playable files,
+    // torrent by torrent in the order the list showed them. It used to play
+    // just the first with a "playing the first" note, from when the torrent
+    // list was single-selection and a many-hash call was only a handler
+    // contract — with the toolbar back, Play must act on the whole selection
+    // exactly like Start / Stop / Remove do.
+    playTorrentsTogether(hashes);
   });
 
   // One set of handlers for BOTH file lists — a torrent's contents and the
