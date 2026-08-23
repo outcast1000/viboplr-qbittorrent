@@ -118,6 +118,10 @@ test("mergeFileTrack prefers the file's own tags over the filename", () => {
     album_title: "In Rainbows",
     track_number: 3,
     duration_secs: 255.3,
+    // The kind, read off the same filename the host reads at resolve time, so
+    // the queue row classifies before anything plays. Advisory — the resolve
+    // patch wins if the file disagrees.
+    kind: "audio",
   });
 });
 
@@ -142,6 +146,7 @@ test("mergeFileTrack falls back to the filename parse with no tags at all", () =
     album_title: TORRENT.name,
     track_number: 3,
     duration_secs: null,
+    kind: "audio",
   });
 });
 
@@ -158,6 +163,8 @@ test("mergeFileTrack invents no artist or album for a video", () => {
   assert.equal(v.track_number, null);
   // The real filename, not the half after the dash.
   assert.equal(v.title, "Some Band - Live At Wembley (2019) 1080p.mkv");
+  // And it says so, so the queue row shows a film reel before anything plays.
+  assert.equal(v.kind, "video");
 });
 
 test("mergeFileTrack still trusts a video's own embedded tags", () => {

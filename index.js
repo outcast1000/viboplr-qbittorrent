@@ -3527,11 +3527,15 @@ function mergeFileTrack(torrent, file, tags) {
     track_number: video ? firstNum([t.track_number]) : firstNum([t.track_number, parsed.trackNumber]),
     // Nothing supplied this before. A queue entry with no length shows no seek
     // bar and never scrobbles, and it comes free with the tag read.
-    duration_secs: firstNum([t.duration_secs])
-    // No `format`: the host learns the container at resolve time from the file
-    // this qbt:// URI resolves to, and reclassifies the track before it picks a
-    // player. Declaring it here would be the plugin asserting what the host is
-    // about to read off the real file.
+    duration_secs: firstNum([t.duration_secs]),
+    // The KIND, read off the same filename the host will read at resolve time —
+    // so the queue row classifies (film-reel icon, frame-thumb candidacy,
+    // routing) before anything plays instead of sitting as an audio disc until
+    // resolved. Still no `format`: the container is the host's to learn from
+    // the real file; declaring it here would assert what we can't know, and it
+    // has teeth (the transcode decision). Advisory — the resolve-time patch
+    // wins if the file disagrees. Older hosts ignore the field.
+    kind: video ? "video" : "audio"
   };
 }
 
@@ -4143,6 +4147,8 @@ function fileMatchItems(entries, opts) {
         // What makes drag-to-queue work on these rows, same as in a torrent's
         // contents. (There is no right-click menu on either list — see the node.)
         path: playable ? qbtUri(t.hash, f.index) : null,
+        // Same claim the contents rows make, for drag-to-queue classification.
+        kind: kind || undefined,
         album: torrentName,
         // Double-click does what the row's first button does, exactly as it
         // does inside a torrent. A single click SELECTS — the list has a
@@ -7730,7 +7736,12 @@ function fileRowsNode(hash) {
       // arrived in the queue credited to a release it is not part of. Same rule
       // as mergeFileTrack, which builds the queue entry these labels preview.
       artistName: kind === "audio" ? firstText([tags && tags.artist, tags && tags.album_artist, parsed.artist]) : null,
-      albumTitle: kind === "audio" && torrent ? firstText([tags && tags.album, torrent.name]) : null
+      albumTitle: kind === "audio" && torrent ? firstText([tags && tags.album, torrent.name]) : null,
+      // Same claim mergeFileTrack makes, so a row DRAGGED into the queue
+      // classifies pre-play too (the host threads TrackRowItem.kind through
+      // drag-to-queue). Only rows with a path can be dragged, and those always
+      // have a media kind.
+      kind: kind || undefined
     });
   }
   // `selectable` selects the host's library-parity row list: hover Play /

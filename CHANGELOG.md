@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.38.0
+
+**Queue entries declare what they are.** Every track and file row now carries
+`kind: "audio" | "video"`, read off the same filename the host reads at
+resolve time — so a torrent video enqueued (or dragged) into the queue shows
+the film reel and is a frame-thumb candidate *before* anything plays, instead
+of sitting as an audio disc until resolved. Advisory and provisional by
+design: the host still learns the real container from the file at resolve
+time and that wins. Still no `format` claim — the container is the host's to
+read, and it has teeth (the transcode decision). Older hosts ignore the field.
+
 ## 0.37.0
 
 **The Search tab reads like the torrent list.** Clicking a result's **name
