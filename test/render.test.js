@@ -89,8 +89,11 @@ function run(stored, opts) {
           }
           posts.push({ url, form });
         }
-        const body =
-          url.includes("/app/webapiVersion") ? "2.11"
+        // A test can answer endpoints the defaults don't know (the search
+        // flow); returning null/undefined falls through to them.
+        const custom = opts && opts.onFetch ? opts.onFetch(url) : null;
+        const body = custom != null ? custom
+          : url.includes("/app/webapiVersion") ? "2.11"
             : url.includes("/app/version") ? "v5.2.4"
               : url.includes("/torrents/files") ? JSON.stringify(filesFor(/hash=([^&]*)/.exec(url)?.[1] ?? ""))
                 : url.includes("/sync/maindata") ? JSON.stringify({ rid: 1, full_update: true, torrents: torrentsFor(), server_state: {} })
@@ -1907,4 +1910,41 @@ test("an older host gets the bare URL, not a file:// candidate", async () => {
     assert.equal(typeof out, "object");
     assert.equal(out.sourceUrl, "file:///mnt/music/01 - First.flac");
   }, undefined, { torrents: T, files, appVersion: "1.0.28" });
+});
+
+// --- Search tab -----------------------------------------------------------
+
+test("a search names its facilities, opens on title clicks, and keeps indexer failures out of the UI", async () => {
+  const results = {
+    status: "Stopped",
+    results: [
+      { fileName: "Artist - Album [FLAC]", fileUrl: "https://x/a.torrent", fileSize: 100, nbSeeders: 5, nbLeechers: 1, engineName: "jackett", siteUrl: "https://rutracker.org/t/1" },
+      // A qBittorrent search plugin reports its own failure as a fake result
+      // row: -1 size and swarm, the error text as the name.
+      { fileName: "invalid credentials — check your API key", fileUrl: "https://jackett/help", fileSize: -1, nbSeeders: -1, nbLeechers: -1, engineName: "jackett" },
+    ],
+  };
+  const onFetch = (url) =>
+    url.includes("/search/plugins") ? JSON.stringify([{ name: "jackett", enabled: true }])
+      : url.includes("/search/start") ? JSON.stringify({ id: 7 })
+        : url.includes("/search/results") ? JSON.stringify(results)
+          : null;
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:search"]({ query: "artist album" });
+    await settle();
+    await settle();
+    const nodes = walk(last(views));
+    const list = nodes.find((n) => n.type === "track-row-list");
+    assert.ok(list, "no results list rendered");
+    // The failure row is a diagnostic: logged at ingestion, never a row and
+    // never a warning banner burying the results the working indexers found.
+    assert.equal(list.items.length, 1);
+    assert.ok(!nodes.some((n) => /check your API key/.test(n.content || "")), "the indexer failure leaked into the UI");
+    // Same gesture as the torrent list: the name opens the contents (paused),
+    // the rest of the row selects; Download stays a deliberate button press.
+    assert.equal(list.openOnClick, "title");
+    assert.equal(list.items[0].action, "qbt:search-view");
+    // Who found it — the site alone can't say which indexer is working.
+    assert.match(list.items[0].subtitle, /via jackett/);
+  }, undefined, { onFetch });
 });

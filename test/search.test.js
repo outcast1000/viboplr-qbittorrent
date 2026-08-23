@@ -153,11 +153,36 @@ test("a result row leads with the name and puts size in its own column", () => {
   assert.match(row.subtitle, /12 seeders/);
 });
 
-test("a result row acts on double-click and Enter", () => {
-  // Without a per-row action the host's selectable list only SELECTS on click
-  // and does nothing on double-click, which is what got this list replaced with
-  // a stack of cards the first time round.
-  assert.equal(plugin._searchResultRow({ fileName: "x", fileUrl: "https://x/y" }).action, "qbt:search-add");
+test("a result row opens its contents on click-the-title, double-click and Enter", () => {
+  // The row's action is View contents (adds paused — look before committing),
+  // matching the torrent list; Download stays a deliberate overlay/toolbar
+  // press, never the side effect of a plain click. Without a per-row action the
+  // host's selectable list only SELECTS on click, which is what got this list
+  // replaced with a stack of cards the first time round.
+  assert.equal(plugin._searchResultRow({ fileName: "x", fileUrl: "https://x/y" }).action, "qbt:search-view");
+});
+
+// --- naming the search facility ----------------------------------------------
+
+test("engineLabel names the facility that produced a result", () => {
+  // Web rows carry "web:<id>" — name the indexer definition; a qBittorrent
+  // search plugin's engineName is already the honest label; no engine, no
+  // claim.
+  assert.equal(plugin._engineLabel({ engineName: "web:tpb" }), "The Pirate Bay");
+  assert.equal(plugin._engineLabel({ engineName: "web:nonsense" }), "nonsense");
+  assert.equal(plugin._engineLabel({ engineName: "jackett" }), "jackett");
+  assert.equal(plugin._engineLabel({}), "");
+});
+
+test("the subtitle says who found the result", () => {
+  // An aggregator proxies many sites, so the site hostname alone can't answer
+  // "which of my indexers is working?".
+  assert.match(
+    plugin._searchResultSubtitle({ nbSeeders: 5, engineName: "jackett", siteUrl: "https://rutracker.org/t/1" }),
+    /rutracker\.org  ·  via jackett/
+  );
+  // …but when the facility IS the site, saying it twice is noise.
+  assert.ok(!/via/.test(plugin._searchResultSubtitle({ nbSeeders: 5, engineName: "rutracker.org", siteUrl: "https://rutracker.org/t/1" })));
 });
 
 test("a nameless result still renders a row", () => {

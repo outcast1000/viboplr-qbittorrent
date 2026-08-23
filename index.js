@@ -1623,6 +1623,22 @@ function siteLabel(url) {
   return m ? m[1] : "";
 }
 
+// Which search facility produced a result — the answer to "who found this?",
+// which the site hostname alone can't give: an aggregator (Jackett) proxies
+// many sites, and a web row's siteUrl names the tracker rather than the
+// indexer definition that scraped it. Web rows carry "web:<id>"; anything
+// else is one of qBittorrent's own search plugins, whose engineName is
+// already the honest label.
+function engineLabel(r) {
+  var name = String((r && r.engineName) || "");
+  if (!name) return "";
+  if (name.indexOf("web:") === 0) {
+    var def = webDefById(name.slice(4));
+    return (def && def.name) || name.slice(4);
+  }
+  return name;
+}
+
 // A qBittorrent search plugin reports its OWN failures as if they were results:
 // a row whose fileName is the error text, with -1 for size and swarm and its
 // help page as the link. Rendering those as torrents invites the user to
@@ -1677,6 +1693,10 @@ function searchResultSubtitle(r) {
   if (leech !== null) bits.push(leech + " leechers");
   var site = siteLabel(r && r.siteUrl);
   if (site) bits.push(site);
+  // The facility that found it, always last. Skipped only when it would
+  // repeat the site verbatim (a web indexer whose name IS the site).
+  var engine = engineLabel(r);
+  if (engine && engine.toLowerCase() !== site.toLowerCase()) bits.push("via " + engine);
   return bits.join("  ·  ");
 }
 
@@ -1692,10 +1712,13 @@ function searchResultRow(r) {
     // Audio / video / unknown read off the release name, over a colour-coded
     // seeder badge — see mediaIconFor.
     imageUrl: mediaIconFor(classifyTorrentMedia(r && r.fileName), swarmCount(r && r.nbSeeders)),
-    // Double-click and Enter download, matching the primary overlay button.
-    // A row whose plain interactions did nothing at all is what this list was
-    // reported as broken for the first time round.
-    action: "qbt:search-add"
+    // Title click, double-click and Enter all open the contents (View contents
+    // adds it paused — look before committing), matching the torrent list: a
+    // result is a container, so "open it" means seeing inside, and Download
+    // stays one deliberate press on the overlay/toolbar. A row whose plain
+    // interactions did nothing at all is what this list was reported as broken
+    // for the first time round.
+    action: "qbt:search-view"
   };
 }
 
@@ -2414,6 +2437,22 @@ function disposeSearch(id) {
 // spinner runs while EITHER is still working.
 var lastQbtRows = [];
 var webSearchRows = [];
+// Notices already logged for this search, so the cumulative results poll
+// doesn't re-log the same misconfigured indexer every pass. Reset per search.
+var loggedSearchNotices = {};
+
+// A qBittorrent search plugin's self-reported failure (see isPluginNotice).
+// It matters — a broken indexer's results are otherwise just missing — but it
+// is a diagnostic, not a torrent, so it goes to the host log instead of the
+// results view, once per distinct message.
+function logSearchNotice(r) {
+  var msg = ((r && r.engineName) ? r.engineName + ": " : "") +
+    String((r && r.fileName) || "This search plugin reported a problem");
+  if (loggedSearchNotices[msg]) return;
+  loggedSearchNotices[msg] = true;
+  console.error("qBittorrent search plugin notice: " + msg);
+  if (api && typeof api.log === "function") api.log("warn", msg, "qbt-search");
+}
 var qbtSearchActive = false;
 var webSearchActive = false;
 
@@ -2438,6 +2477,7 @@ function runSearch(query) {
   searchResults = [];
   lastQbtRows = [];
   webSearchRows = [];
+  loggedSearchNotices = {};
   searchJobId = null;
   searchStopped = false;
   activeTab = "search";
@@ -2517,7 +2557,15 @@ function pollSearch(id, gen, elapsed) {
   return readSearchResultsPage(id, SEARCH_LIMIT)
     .then(function (data) {
       if (gen !== searchGen) return null;
-      lastQbtRows = (data && data.results) || [];
+      // Split the plugins' self-reported failures out at ingestion: they are
+      // logged (once each), never rendered — see logSearchNotice.
+      var fetched = (data && data.results) || [];
+      var real = [];
+      for (var ri = 0; ri < fetched.length; ri++) {
+        if (isPluginNotice(fetched[ri])) logSearchNotice(fetched[ri]);
+        else real.push(fetched[ri]);
+      }
+      lastQbtRows = real;
       mergeSearchRows();
       var done = String((data && data.status) || "") !== "Running" || elapsed >= SEARCH_MAX_MS;
       if (done) {
@@ -7543,18 +7591,10 @@ function searchTabNodes() {
     className: "muted"
   });
 
-  // Plugin error rows first, as warnings rather than fake torrents — an indexer
-  // that is misconfigured is worth saying out loud, since otherwise its results
-  // are simply missing with no explanation.
-  for (var n = 0; n < searchResults.length; n++) {
-    if (!isPluginNotice(searchResults[n])) continue;
-    children.push({
-      type: "text",
-      className: "ds-banner ds-banner--warning",
-      content: (searchResults[n].engineName ? searchResults[n].engineName + ": " : "") +
-        String(searchResults[n].fileName || "This search plugin reported a problem")
-    });
-  }
+  // No indexer-failure banners here: a misconfigured search plugin's
+  // self-reported errors are logged at ingestion (logSearchNotice), not
+  // rendered — they are diagnostics about the plumbing, and a warning strip
+  // per broken indexer buried the results the working ones returned.
 
   // A results list, not a stack of cards. One section per result gave every row
   // a title bar, a paragraph and two full-width buttons, so four results filled
@@ -7575,10 +7615,13 @@ function searchTabNodes() {
     type: "track-row-list",
     selectable: true,
     items: rows,
-    // Download is first, so it takes the primary/accent overlay slot and is what
-    // a double-click falls back to. "View contents" adds the torrent paused, so
-    // it is a way of looking before committing, not a preview — hence the
-    // second, quieter slot.
+    // Same gesture as the torrent list: the result's NAME opens its contents
+    // (paused — look before committing), the rest of the row selects, so a
+    // selection for the toolbar's bulk Download never costs a modifier.
+    openOnClick: "title",
+    // Download is first, so it takes the primary/accent overlay slot; opening
+    // is the row's own click/double-click/Enter. Adding a torrent should be
+    // one deliberate press, not the side effect of any plain click.
     actions: [
       { id: "qbt:search-add", label: "Download", icon: "⬇" },
       { id: "qbt:search-view", label: "View contents", icon: "📂" }
@@ -8421,6 +8464,7 @@ return {
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
   _searchResultSubtitle: searchResultSubtitle,
+  _engineLabel: engineLabel,
   _searchResultRow: searchResultRow,
   _swarmCount: swarmCount,
   _collectionForPath: collectionForPath,

@@ -492,8 +492,10 @@ compounds / descendant / `>` / `:nth-child(n)`.
 
 Results are a normal row list, the same one every other search surface in the app
 uses. Each row leads with the **name**, carries its **size** in the trailing
-column, and puts **seeders / leechers** and the indexer underneath. The thumbnail
-carries the two facts you decide on:
+column, and puts **seeders / leechers**, the site and — *via X* — the **search
+facility that found it** underneath, so when an indexer misbehaves you can see
+which of the others is still delivering. The thumbnail carries the two facts
+you decide on:
 
 - **What it is** — a **music note or a film strip**, read off the release name.
   `FLAC`, `MP3`, `320kbps`, `24bit`, `vinyl` mean audio; `1080p`, `x265`,
@@ -506,12 +508,17 @@ carries the two facts you decide on:
   past 999 read as `1.2k`. Results are sorted by seeders, so the colour runs
   green to red down the list.
 
-Hovering a row
-reveals **⬇ Download** and **📂 View contents**; double-click or Enter downloads.
-Click, Cmd/Ctrl-click and Shift-click select, and **Download** in the toolbar
-above the list takes everything selected in one go. *View contents* stays one at
-a time — it adds a real (paused) torrent, and doing that to a whole selection
-would leave a pile of them to clean up.
+Hovering a row reveals **⬇ Download** and **📂 View contents**. The same
+gesture as the torrent list: **clicking the name opens the contents** (as does
+double-click or Enter), clicking the rest of the row selects — adding a
+torrent is one deliberate press on ⬇, never the side effect of a plain click.
+**Download** in the toolbar above the list takes everything selected in one
+go. *View contents* stays one at a time — it adds a real (paused) torrent, and
+doing that to a whole selection would leave a pile of them to clean up.
+
+An indexer that reports a problem (bad credentials, a dead endpoint) no longer
+puts a warning strip over the results — its message goes to the host log,
+once, and the results the working indexers returned stay in front.
 
 *View contents* adds the torrent **paused**, and once qBittorrent has the file
 list it **starts it with every file set to skip**. Nothing transfers — there is

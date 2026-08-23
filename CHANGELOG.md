@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.37.0
+
+**The Search tab reads like the torrent list.** Clicking a result's **name
+opens its contents** (added paused — look before committing, same as
+double-click and Enter); clicking the rest of the row selects it, so a
+selection for the toolbar's bulk Download never costs a modifier. Downloading
+is always a deliberate press — ⬇ on the row or Download over the selection —
+never the side effect of a plain click.
+
+**Every row names the facility that found it** — "via Jackett", "via The
+Pirate Bay" — next to the site. The site hostname alone couldn't say which of
+your indexers is working: an aggregator proxies many sites. Skipped when it
+would repeat the site verbatim.
+
+**Indexer failures go to the log, not the UI.** A qBittorrent search plugin
+reports its own failures as fake result rows; they used to render as warning
+strips over the list, burying the results the working indexers returned. They
+are now filtered out at ingestion and logged (host log, once per distinct
+message) — diagnostics about the plumbing, not torrents.
+
 ## 0.36.0
 
 **The matching-files list is multi-selection again.** Pick the five takes a
