@@ -700,9 +700,16 @@ test("removing a multi-row selection confirms once, by count", async () => {
   await withPlugin(async ({ views, handlers }) => {
     handlers["qbt:delete-ask"]({ selectedIds: ["aaa", "bbb"] });
     await settle();
-    const confirm = walk(last(views)).find((n) => n.type === "confirm");
+    const nodes = walk(last(views));
+    const confirm = nodes.find((n) => n.type === "confirm");
     assert.ok(confirm, "no confirm rendered");
     assert.match(confirm.message, /2 torrents/);
+    // The confirm is a host modal OVER the view, not a replacement for it —
+    // the torrent list must still be rendered underneath.
+    assert.ok(
+      nodes.some((n) => n.type === "track-row-list"),
+      "the view behind the confirm was cleared"
+    );
     // Cancel must be the harmless side — the host fires it on Escape too.
     assert.equal(confirm.cancelAction, "qbt:delete-cancel");
     handlers["qbt:delete-cancel"]();

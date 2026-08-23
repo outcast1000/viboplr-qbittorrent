@@ -4497,12 +4497,17 @@ function deleteConfirmNode(hashes) {
 function render() {
   if (!api) return;
 
-  if (pendingDelete && pendingDelete.length) {
-    api.ui.setViewData(VIEW_ID, deleteConfirmNode(pendingDelete));
-    return;
-  }
-
   var children = [];
+
+  // The confirm rides ON TOP of the view, not instead of it: the host renders
+  // a `confirm` node as a fixed full-screen modal overlay, so appending it
+  // leaves the list the user was looking at intact (and safely unclickable)
+  // underneath. Returning it as the whole view used to blank the screen behind
+  // the dialog. Its place in `children` doesn't matter visually — pushed first
+  // so every render branch below carries it.
+  if (pendingDelete && pendingDelete.length) {
+    children.push(deleteConfirmNode(pendingDelete));
+  }
   var banner = statusBanner();
   if (banner) children.push(banner);
 

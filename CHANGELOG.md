@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.39.0
+
+**The remove confirmation no longer blanks the view behind it.** The host
+renders a `confirm` node as a full-screen modal overlay, so the dialog never
+needed the view to itself — it is now appended on top of whatever was being
+rendered (torrent list, detail page, search results), which stays visible and
+safely unclickable underneath while you decide.
+
 ## 0.38.0
 
 **Queue entries declare what they are.** Every track and file row now carries
