@@ -314,6 +314,22 @@ test("every space-separated term must match", () => {
   assert.equal(m("Live At Wembley.mkv", "live flac"), false);
 });
 
+test("accents fold on both sides, so a Greek or Latin accent is optional", () => {
+  const m = plugin._matchesFilter;
+  // Typed without accents, against text that has them. This is the case that
+  // returned nothing at all before, while the same two strings matched
+  // everywhere the host does a library lookup (strip_diacritics(unicode_lower)).
+  assert.equal(m("Χάρης Αλεξίου - Ζωή", "χαρης"), true);
+  assert.equal(m("Björk - Jóga", "joga"), true);
+  // …and the other way round: accented query, unaccented text.
+  assert.equal(m("Bjork - Joga", "jóga"), true);
+  // Shouting in Greek still matches, and needs no help from us: JS applies
+  // Unicode's final-sigma rule, so ΧΑΡΗΣ lowercases to χαρης with ς.
+  assert.equal(m("Χάρης Αλεξίου", "ΧΑΡΗΣ"), true);
+  // The fold is diacritics only — it must not start ignoring letters.
+  assert.equal(m("Χάρης Αλεξίου", "χαρις"), false);
+});
+
 test("an empty or whitespace filter shows everything", () => {
   const m = plugin._matchesFilter;
   assert.equal(m("anything.flac", ""), true);
@@ -520,6 +536,33 @@ test("an unfinished file offers the choice it is not already in", () => {
   assert.deepEqual(plugin._fileRowActions(null, false, true), {
     actions: ["qbt:file-download"],
     action: "qbt:file-download",
+  });
+});
+
+test("a file that has started downloading also offers Show folder", () => {
+  // Bytes are on disk, so the file physically exists in the save path — "where
+  // is this going?" is a fair question about a download in progress. The fetch
+  // choice keeps the double-click; Show folder rides alongside.
+  // Signature: (kind, done, skipped, reachable, started).
+  assert.deepEqual(plugin._fileRowActions("audio", false, false, true, true), {
+    actions: ["qbt:file-skip", "qbt:file-folder"],
+    action: "qbt:file-skip",
+  });
+  // Junk files in progress get it too — same "where did it land" question.
+  assert.deepEqual(plugin._fileRowActions(null, false, false, true, true).actions, [
+    "qbt:file-skip",
+    "qbt:file-folder",
+  ]);
+  // Gated on reachability, exactly like the finished-file Show folder: a path
+  // that isn't mounted here can't be revealed.
+  assert.deepEqual(plugin._fileRowActions("audio", false, false, false, true), {
+    actions: ["qbt:file-skip"],
+    action: "qbt:file-skip",
+  });
+  // Not started (0 bytes) is unchanged — nothing on disk to show yet.
+  assert.deepEqual(plugin._fileRowActions("audio", false, false, true, false), {
+    actions: ["qbt:file-skip"],
+    action: "qbt:file-skip",
   });
 });
 

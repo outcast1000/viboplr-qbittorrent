@@ -174,6 +174,10 @@ var searchPlugins = null; // null = not asked yet, [] = none installed
 var searchJobId = null;
 var searchGen = 0; // guards a late poll against a newer search
 var searchStopped = false; // the user cut it short, so "no results" isn't a verdict
+// How many web indexers THIS search swept, captured when it started rather than
+// read live: the user can enable or disable definitions while results are on
+// screen, and the header describes the search that ran, not the current config.
+var searchWebCount = 0;
 
 // Local collections, and which torrents we have already seen finish.
 var localCollections = [];
@@ -206,6 +210,37 @@ var addOpen = null;
 // left on can never blank a screen it isn't describing.
 var viewFilesOnly = false;
 var viewDownloadedOnly = false;
+
+// The Search tab's filters OVER a result set — a second, cheap pass on rows
+// already fetched, not a second query. An indexer sweep returns sixty rows
+// spanning a 4 MB single and a 40 GB concert film, sorted only by seeders, and
+// re-typing the query to narrow that costs another round of scrapes.
+//
+// The text box clears on every new search (it describes a list that no longer
+// exists) while the three pickers do NOT — "healthy, album-sized, from the
+// websites" is a mode the user is in for a run of searches, the same reasoning
+// as viewFilesOnly above.
+var resultFilter = "";
+var resultMinSeeders = 0;
+var resultSizeBand = "any";
+var resultSource = "any";
+// Which column the results table is ordered by. Seeders descending is the
+// default for the reason in sortSearchResults, and — like the pickers above —
+// an order the user chose survives the next search.
+var resultSortBy = "seeders";
+var resultSortDir = "desc";
+// Which engines this search asked, and what each one said. The merged list
+// can't answer either question: an indexer that returned nothing and an indexer
+// that was never asked look identical in it, and a broken one looks the same
+// again — its failure is a diagnostic that must not be rendered as a torrent
+// (see isPluginNotice), so until now it was only written to the log.
+//
+// Collapsed by default. It answers "why so few results?", which is a question
+// you ask occasionally and never while reading the list itself.
+var searchEnginesRan = [];
+var searchEngineErrors = {};
+var searchEngineStatuses = {};
+var engineSummaryOpen = false;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -791,6 +826,20 @@ function torrentPercent(t, files) {
 // the badge owns the bottom 11 units (~14px), enough for bold 8-unit digits —
 // four characters' worth, which is what caps both "1.2k" and "100%".
 function mediaTileSvg(kind, label, band) {
+  // No label, no badge — the glyph takes the whole tile and grows into the
+  // space the badge held. A tile with a coloured bar and nothing written on it
+  // is a mystery, so the two go together. This is what a search result gets now
+  // that every figure it used to carry has a column of its own.
+  if (!label) {
+    return (
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+      '<g transform="translate(3.5 3.5) scale(1.05)" fill="none" stroke="' +
+      ICON_COLOR +
+      '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      (MEDIA_GLYPHS[kind] || MEDIA_GLYPHS.unknown) +
+      "</g></svg>"
+    );
+  }
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
     '<g transform="translate(6.5 1) scale(0.79)" fill="none" stroke="' +
@@ -813,14 +862,17 @@ function mediaTileSvg(kind, label, band) {
 var tileCache = {};
 
 function tileIcon(kind, label, band) {
-  var key = (kind || "unknown") + ":" + label + ":" + band.fill;
+  var key = (kind || "unknown") + ":" + label + ":" + (band ? band.fill : "");
   if (!tileCache[key]) tileCache[key] = "data:image/svg+xml," + encodeURIComponent(mediaTileSvg(kind, label, band));
   return tileCache[key];
 }
 
-// Search results: seeder count, banded by health.
-function mediaIconFor(kind, seeds) {
-  return tileIcon(kind, formatSeedCount(seeds), seedBand(seeds));
+// Search results: the media glyph, and nothing else. It used to carry a
+// seeder-count badge, which the Seeders column now holds — sortable, aligned
+// with every other row's, and next to the other three figures it is weighed
+// against. A number printed twice on one row is a number to keep in step.
+function mediaIconFor(kind) {
+  return tileIcon(kind, "", null);
 }
 
 // Torrents: how much of the whole torrent is downloaded, as a number and as the
@@ -944,10 +996,31 @@ function filterFor(hash) {
 // against the file's full path. The path and not just the basename, so "extras"
 // finds a whole folder — which on a release full of scans and samples is the
 // thing you actually want to select or skip in one go.
+// Case- and accent-insensitive, on BOTH sides. The fold is the cheap half of
+// normalizeForMatch — lowercase plus NFD minus the combining marks — and
+// nothing else: this filters what is on screen, so it must not throw away the
+// punctuation and release qualifiers the user can see and will type.
+//
+// Accents are not a nicety here. A Greek user typing "χαρης" against "Χάρης",
+// or "joga" against "Jóga", got nothing at all, while the SAME two strings
+// match everywhere the host does a library lookup (its SQL is
+// strip_diacritics(unicode_lower())). Note the one thing that needs no help:
+// JS already applies Unicode's final-sigma rule, so "ΧΑΡΗΣ" lowercases to
+// "χαρης" with ς and matches text written that way.
+function foldForFilter(s) {
+  var out = String(s == null ? "" : s).toLowerCase();
+  // An older webview without String.normalize just skips the fold — the match
+  // gets stricter, never wronger. Same bargain as normalizeForMatch.
+  if (typeof out.normalize === "function") {
+    out = out.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+  return out;
+}
+
 function matchesFilter(name, query) {
-  var q = String(query == null ? "" : query).trim().toLowerCase();
+  var q = foldForFilter(String(query == null ? "" : query).trim());
   if (!q) return true;
-  var hay = String(name || "").replace(/\\/g, "/").toLowerCase();
+  var hay = foldForFilter(String(name || "").replace(/\\/g, "/"));
   var terms = q.split(/\s+/);
   for (var i = 0; i < terms.length; i++) {
     if (hay.indexOf(terms[i]) === -1) return false;
@@ -1420,7 +1493,7 @@ var FILE_ROW_ACTIONS = [
   { id: "qbt:file-skip", label: "Skip", icon: "⊘" }
 ];
 
-function fileRowActions(kind, done, skipped, reachable) {
+function fileRowActions(kind, done, skipped, reachable, started) {
   // Downloaded wins, matching fileState(): a file with bytes on disk reads
   // "Downloaded", so its actions describe a file you HAVE. Priority no longer
   // matters once the bytes exist.
@@ -1445,10 +1518,17 @@ function fileRowActions(kind, done, skipped, reachable) {
       ? { actions: ["qbt:file-open", "qbt:file-folder"], action: "qbt:file-open" }
       : { actions: [], action: null };
   }
-  // Not downloaded: offer the choice it is not already in.
-  return skipped
-    ? { actions: ["qbt:file-download"], action: "qbt:file-download" }
-    : { actions: ["qbt:file-skip"], action: "qbt:file-skip" };
+  // Not finished: offer the fetch choice it is not already in. And once bytes
+  // have STARTED landing — a file actively downloading — offer Show folder too:
+  // the file physically exists in the save path now, and "where is this going?"
+  // is a fair question about a download in progress, not only a finished one.
+  // Reveal-gated like every other Show folder (an unmounted path can't be
+  // shown), and the fetch choice keeps the double-click.
+  var choice = skipped ? "qbt:file-download" : "qbt:file-skip";
+  if (started && reachable) {
+    return { actions: [choice, "qbt:file-folder"], action: choice };
+  }
+  return { actions: [choice], action: choice };
 }
 
 function qbtUri(hash, index) {
@@ -1639,6 +1719,22 @@ function engineLabel(r) {
   return name;
 }
 
+// Which of the two FACILITIES found a result, as opposed to which individual
+// indexer did. The Search tab merges qBittorrent's own search plugins with this
+// plugin's web sweep into one seeder-sorted list, and the engine name alone
+// cannot tell them apart: both facilities cover the same trackers, so a
+// "piratebay" qBittorrent plugin and the bundled "The Pirate Bay" web
+// definition produce near-identical labels for rows that were fetched in
+// completely different ways — which matters the moment one of them is broken.
+// Web rows are tagged "web:<id>" at ingestion (webSearchAll / runDefOnBody).
+function isWebResult(r) {
+  return String((r && r.engineName) || "").indexOf("web:") === 0;
+}
+
+function facilityLabel(r) {
+  return isWebResult(r) ? "web indexer" : "qBittorrent plugin";
+}
+
 // A qBittorrent search plugin reports its OWN failures as if they were results:
 // a row whose fileName is the error text, with -1 for size and swarm and its
 // help page as the link. Rendering those as torrents invites the user to
@@ -1656,15 +1752,301 @@ function isPluginNotice(r) {
   return Number(r.fileSize) < 0 && Number(r.nbSeeders) < 0 && Number(r.nbLeechers) < 0;
 }
 
-// Seeders first — for a torrent it is the difference between a download and a
-// dead entry, and every indexer's own default sort. Ties break on size so the
-// order is stable rather than dependent on which indexer answered first.
-function sortSearchResults(results) {
+// How many results each facility contributed. One merged, seeder-sorted list
+// makes a facility that returned NOTHING invisible — a dead qBittorrent search
+// looks exactly like a thin query when the web sweep filled the page on its own.
+function searchResultCounts(list) {
+  var rows = list || [];
+  var web = 0;
+  for (var i = 0; i < rows.length; i++) {
+    if (isWebResult(rows[i])) web++;
+  }
+  return { total: rows.length, web: web, qbt: rows.length - web };
+}
+
+function countLabel(n, one, many) {
+  return n + " " + (n === 1 ? one : many);
+}
+
+// What a running search is actually asking. "Searching 4 indexers…" counted
+// qBittorrent's plugins alone and left the web sweep unmentioned even when the
+// sweep was the only thing running.
+function searchSourceSummary(qbtCount, webCount) {
+  var bits = [];
+  if (qbtCount) bits.push(countLabel(qbtCount, "qBittorrent plugin", "qBittorrent plugins"));
+  if (webCount) bits.push(countLabel(webCount, "website", "websites"));
+  return bits.join(" and ");
+}
+
+// The results header's source line. Silent unless BOTH facilities were asked —
+// with only one in play, "all from websites" is noise.
+function searchResultBreakdown(counts, askedQbt, askedWeb) {
+  if (!counts || !counts.total || !askedQbt || !askedWeb) return "";
+  if (counts.web && counts.qbt) {
+    return counts.qbt + " from qBittorrent, " + counts.web + " from websites";
+  }
+  return counts.web ? "all from websites" : "all from qBittorrent";
+}
+
+// --- Per-engine summary ------------------------------------------------------
+
+// One row per engine: what it is, how many results it contributed, and its own
+// error if it reported one.
+//
+// Built from the UNION of the engines the search asked and the engines that
+// actually answered, because neither list alone is the truth: a qBittorrent
+// plugin can return rows under a name that isn't in /search/plugins, and an
+// engine that returned nothing appears in no row at all — which is exactly the
+// case this panel exists to show.
+// `activity` is `{ qbt, web }` — whether each facility is still searching.
+// Omitted (the tests' settled fixtures) means everything has finished. It is
+// what lets a row be PENDING rather than lying: an engine that hasn't answered
+// yet is not an engine with "no results", and during the poll loop every row
+// used to read as a verdict the engine never gave.
+//
+// Pending is per-facility-shaped because that is what each facility can say:
+// a web indexer answers individually (its status lands the moment its fetch
+// settles, so it is pending only until then), while qBittorrent reports the
+// search JOB, not its plugins — so every qbt row stays pending until the job
+// completes, and one that already has rows may still gain more.
+function searchEngineSummary(rows, ran, errors, statuses, activity) {
+  var codes = statuses || {};
+  var act = activity || {};
+  var counts = {};
+  var list = rows || [];
+  for (var i = 0; i < list.length; i++) {
+    var key = String((list[i] && list[i].engineName) || "");
+    if (key) counts[key] = (counts[key] || 0) + 1;
+  }
+  var errs = errors || {};
+  var out = [];
+  var seen = {};
+  var declared = ran || [];
+  for (var d = 0; d < declared.length; d++) {
+    var e = declared[d];
+    if (!e || seen[e.key]) continue;
+    seen[e.key] = 1;
+    // hasOwnProperty, not truthiness: a recorded 0 means "settled with no
+    // response" (a timeout), which must not read as still-searching.
+    var answered = Object.prototype.hasOwnProperty.call(codes, e.key);
+    var webPending = e.facility === "web indexer" && !!act.web && !answered;
+    var qbtPending = e.facility === "qBittorrent plugin" && !!act.qbt;
+    out.push({
+      key: e.key,
+      name: e.name,
+      facility: e.facility,
+      count: counts[e.key] || 0,
+      error: errs[e.key] || null,
+      status: answered ? codes[e.key] : 0,
+      pending: !errs[e.key] && (webPending || qbtPending),
+      url: e.url || null
+    });
+  }
+  for (var k in counts) {
+    if (!Object.prototype.hasOwnProperty.call(counts, k) || seen[k]) continue;
+    var fac = facilityLabel({ engineName: k });
+    out.push({
+      key: k,
+      name: engineLabel({ engineName: k }) || k,
+      facility: fac,
+      count: counts[k],
+      error: errs[k] || null,
+      status: codes[k] || 0,
+      pending: !errs[k] && fac === "qBittorrent plugin" && !!act.qbt,
+      // An engine we never declared is one we never built a URL for.
+      url: null
+    });
+  }
+  // Failures first — they are the reason anyone opens this — then by how much
+  // each engine contributed, then by name so the order is stable between polls.
+  out.sort(function (a, b) {
+    if (!!a.error !== !!b.error) return a.error ? -1 : 1;
+    if (a.count !== b.count) return b.count - a.count;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return out;
+}
+
+// "1337x — HTTP 403 · failed". No facility parenthetical: the rows render
+// grouped under a facility heading, and naming it again on every line is the
+// heading restated.
+//
+// The code leads because it is the diagnosis: 403 is a bot wall, 404 a moved
+// search path, 503 the site being down, and 200-with-no-results means the
+// definition's selectors have gone stale — four different fixes that all look
+// like "no results" without it.
+//
+// A qBittorrent plugin has no code of its own: the plugin never talks to that
+// indexer, qBittorrent does, and its API reports only the search job. Printing
+// "HTTP 200" from our own /search/results call would be a number about the
+// wrong request, so those rows say nothing and the panel explains once.
+function searchEngineSummaryLine(row) {
+  // Still searching: no verdicts of any kind. "no results" is an answer, and
+  // "no response" doubly so — this engine simply hasn't spoken yet. A qbt row
+  // with rows already in hand says "so far", because more may land.
+  if (row.pending) {
+    return row.name + " — " + (row.count
+      ? row.count + (row.count === 1 ? " result" : " results") + " so far…"
+      : "searching…");
+  }
+  var bits = [];
+  if (row.status) bits.push("HTTP " + row.status);
+  else if (row.facility === "web indexer") bits.push("no response");
+  if (row.error) {
+    // Don't print "HTTP 403 · failed — HTTP 403": the error text IS the code
+    // for the commonest failure.
+    var msg = row.status && row.error === "HTTP " + row.status ? null : row.error;
+    bits.push(msg ? "failed — " + msg : "failed");
+  } else {
+    bits.push(row.count ? row.count + (row.count === 1 ? " result" : " results") : "no results");
+  }
+  return row.name + " — " + bits.join(" · ");
+}
+
+// --- Filtering a result set --------------------------------------------------
+
+// Bands, not a free number pair. Two numeric inputs would be four more things to
+// get wrong on a row of chrome, and the useful questions here are coarse: is
+// this an mp3 album, a lossless one, or a concert film that happened to match
+// the artist's name? Binary units, matching formatBytes.
+var MB = 1024 * 1024;
+var GB = 1024 * MB;
+var SEARCH_SIZE_BANDS = [
+  { value: "any", label: "Any size", min: 0, max: Infinity },
+  { value: "lt250mb", label: "Under 250 MB", min: 0, max: 250 * MB },
+  { value: "250mb-1gb", label: "250 MB – 1 GB", min: 250 * MB, max: GB },
+  { value: "1-5gb", label: "1 – 5 GB", min: GB, max: 5 * GB },
+  { value: "5-20gb", label: "5 – 20 GB", min: 5 * GB, max: 20 * GB },
+  { value: "gt20gb", label: "Over 20 GB", min: 20 * GB, max: Infinity }
+];
+
+var SEARCH_SEED_BANDS = [
+  { value: "0", label: "Any seeders" },
+  { value: "1", label: "1+ seeders" },
+  { value: "5", label: "5+ seeders" },
+  { value: "20", label: "20+ seeders" },
+  { value: "100", label: "100+ seeders" }
+];
+
+var SEARCH_SOURCE_OPTIONS = [
+  { value: "any", label: "Any source" },
+  { value: "qbt", label: "qBittorrent plugins" },
+  { value: "web", label: "Websites" }
+];
+
+function searchSizeBand(id) {
+  for (var i = 0; i < SEARCH_SIZE_BANDS.length; i++) {
+    if (SEARCH_SIZE_BANDS[i].value === id) return SEARCH_SIZE_BANDS[i];
+  }
+  return SEARCH_SIZE_BANDS[0];
+}
+
+function searchFilterActive(f) {
+  if (!f) return false;
+  return !!(
+    String(f.text == null ? "" : f.text).trim() ||
+    Number(f.minSeeders) > 0 ||
+    (f.sizeBand && f.sizeBand !== "any") ||
+    (f.source && f.source !== "any")
+  );
+}
+
+// Text matches the whole ROW, not just the release name. "1337x" and
+// "rutracker" are words the user can see on screen and will therefore type, and
+// the facility labels make "websites" reachable by typing as well as by picking
+// from the source list.
+function searchFilterHaystack(r) {
+  return [
+    (r && r.fileName) || "",
+    engineLabel(r),
+    facilityLabel(r),
+    siteLabel(r && r.siteUrl)
+  ].join(" ");
+}
+
+// A second pass over rows already fetched — no indexer is re-asked, so this is
+// free and can run on every keystroke.
+//
+// Unknown size and unknown swarm are treated as FAILING a band, not passing it:
+// "at least 20 seeders" is a claim the row cannot make, and letting it through
+// would put the rows the user is trying to hide back at the top of a
+// seeder-sorted list. With no band set, they are shown as before.
+function filterSearchResults(rows, f) {
+  var list = rows || [];
+  if (!searchFilterActive(f)) return list.slice();
+  var band = searchSizeBand(f.sizeBand);
+  var minSeeds = Number(f.minSeeders) || 0;
+  var source = f.source || "any";
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i];
+    if (source !== "any" && (source === "web") !== isWebResult(r)) continue;
+    if (minSeeds > 0) {
+      var seeds = swarmCount(r && r.nbSeeders);
+      if (seeds === null || seeds < minSeeds) continue;
+    }
+    if (band.value !== "any") {
+      var size = Number(r && r.fileSize);
+      if (!isFinite(size) || size < 0 || size < band.min || size >= band.max) continue;
+    }
+    if (!matchesFilter(searchFilterHaystack(r), f.text)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+// The table's sortable columns. Name and Source sort as text; the rest are
+// numbers, which is why the plugin sorts and the host doesn't — the host only
+// ever sees "400 MB" and "1.2 GB", which sort backwards as strings.
+var SEARCH_SORT_COLUMNS = {
+  name: "text",
+  size: "number",
+  files: "number",
+  added: "number",
+  seeders: "number",
+  leechers: "number",
+  source: "text"
+};
+
+function searchSortValue(r, column) {
+  if (column === "name") return foldForFilter((r && r.fileName) || "");
+  if (column === "source") return foldForFilter(facilityLabel(r) + " " + engineLabel(r));
+  // swarmCount is the generic "a number, or null if the source didn't say" —
+  // size, file count and the added-date (unix seconds, bigger = newer) all
+  // want exactly the same rule.
+  if (column === "size") return swarmCount(r && r.fileSize);
+  if (column === "files") return swarmCount(r && r.nbFiles);
+  if (column === "added") return swarmCount(r && r.added);
+  if (column === "leechers") return swarmCount(r && r.nbLeechers);
+  return swarmCount(r && r.nbSeeders);
+}
+
+// Seeders descending is the default and stays the default — for a torrent that
+// is the difference between a download and a dead entry, and it is every
+// indexer's own order.
+//
+// Rows the source said nothing about sink to the bottom in BOTH directions.
+// Sorting ascending by file count would otherwise open the list with every row
+// that has no file count at all, which is the opposite of what "sort by files"
+// was asked for. Ties break on seeders then size, so the order is stable rather
+// than dependent on which indexer answered first.
+function sortSearchResults(results, sortBy, sortDir) {
+  var column = SEARCH_SORT_COLUMNS[sortBy] ? sortBy : "seeders";
+  var sign = sortDir === "asc" ? 1 : -1;
   var list = (results || []).slice();
   list.sort(function (a, b) {
-    var sa = Number((a && a.nbSeeders) || 0);
-    var sb = Number((b && b.nbSeeders) || 0);
-    if (sb !== sa) return sb - sa;
+    var va = searchSortValue(a, column);
+    var vb = searchSortValue(b, column);
+    var ua = va === null || va === "";
+    var ub = vb === null || vb === "";
+    if (ua !== ub) return ua ? 1 : -1;
+    if (!ua) {
+      var cmp = typeof va === "string" ? (va < vb ? -1 : va > vb ? 1 : 0) : va - vb;
+      if (cmp) return sign * cmp;
+    }
+    var sa = swarmCount(a && a.nbSeeders);
+    var sb = swarmCount(b && b.nbSeeders);
+    if ((sb || 0) !== (sa || 0)) return (sb || 0) - (sa || 0);
     return Number((b && b.fileSize) || 0) - Number((a && a.fileSize) || 0);
   });
   return list;
@@ -1680,38 +2062,73 @@ function swarmCount(n) {
   return v;
 }
 
-// The swarm line. Size is NOT here — it has its own trailing column, because
-// size is the number you compare down a list of results, and a column does that
-// where a mid-sentence value doesn't. Seeders lead: for a torrent they are the
-// difference between a download and a dead entry. Leechers follow, always, even
-// at zero, so the fields sit in the same place on every row.
-function searchResultSubtitle(r) {
-  var bits = [];
-  var seeds = swarmCount(r && r.nbSeeders);
-  var leech = swarmCount(r && r.nbLeechers);
-  bits.push(seeds === null ? "swarm unknown" : seeds + " seeders");
-  if (leech !== null) bits.push(leech + " leechers");
-  var site = siteLabel(r && r.siteUrl);
-  if (site) bits.push(site);
-  // The facility that found it, always last. Skipped only when it would
-  // repeat the site verbatim (a web indexer whose name IS the site).
+// A result row has NO second line. Every fact it used to carry has a column,
+// and the last one that didn't — which facility found it — is now the Source
+// cell's prefix (see searchSourceCell), so a subtitle would only repeat the row
+// above it at half the size and double every row's height.
+//
+// The one thing that goes with it is the site hostname. It was worth a line
+// when the row was prose; against a Source column naming the indexer it is a
+// near-duplicate for everything except an aggregator, and the engine summary
+// panel lists the indexers in full anyway.
+
+// Short, because it is a prefix on a 140px cell, and FIRST, because sorting by
+// Source should group the facilities: every "web · …" together, every "qBT · …"
+// together, rather than interleaving them alphabetically by indexer.
+function searchSourceCell(r) {
   var engine = engineLabel(r);
-  if (engine && engine.toLowerCase() !== site.toLowerCase()) bits.push("via " + engine);
-  return bits.join("  ·  ");
+  if (!engine) return "";
+  return (isWebResult(r) ? "web · " : "qBT · ") + engine;
 }
 
-// One row of the results list. The name is what the user is reading the list
-// for, so it is the row title and gets the full width; size takes the trailing
-// column; the swarm and the indexer ride the subtitle underneath.
+// The table's trailing columns, in the order asked for. Name isn't here — it is
+// the row's own title, the one column that flexes. Numbers are right-aligned so
+// their digits line up down the list, which is the whole point of a column.
+var SEARCH_COLUMNS = [
+  { id: "size", label: "Size", width: 88, align: "right", sortable: true },
+  { id: "files", label: "Files", width: 64, align: "right", sortable: true },
+  { id: "added", label: "Added", width: 104, align: "right", sortable: true },
+  { id: "seeders", label: "Seeders", width: 76, align: "right", sortable: true },
+  { id: "leechers", label: "Leechers", width: 82, align: "right", sortable: true },
+  { id: "source", label: "Source", width: 140, align: "left", sortable: true }
+];
+
+// "" — not "0", not a dash of our own — for anything the source didn't report.
+// The host renders an em dash for an empty cell, so unknown looks the same
+// everywhere instead of each caller inventing its own.
+function searchCellNumber(n) {
+  var v = swarmCount(n);
+  return v === null ? "" : String(v);
+}
+
+function searchResultCells(r) {
+  var size = swarmCount(r && r.fileSize);
+  var added = swarmCount(r && r.added);
+  return {
+    size: size === null ? "" : formatBytes(size),
+    files: searchCellNumber(r && r.nbFiles),
+    // Relative age, not an exact timestamp — "3 days ago" is what you ask of a
+    // download. formatAge already renders it; the sort still keys off the raw
+    // unix seconds (searchSortValue), so display and order can't disagree.
+    added: added === null ? "" : formatAge(added),
+    seeders: searchCellNumber(r && r.nbSeeders),
+    leechers: searchCellNumber(r && r.nbLeechers),
+    source: searchSourceCell(r)
+  };
+}
+
+// One row of the results table. The name is what the user is reading the list
+// for, so it is the row title and takes the flexing column; every figure worth
+// comparing across rows is a `cells` entry under a sortable header.
 function searchResultRow(r) {
   return {
     id: searchResultId(r),
     title: (r && r.fileName) || "(untitled)",
-    subtitle: searchResultSubtitle(r),
-    duration: formatBytes(r && r.fileSize),
-    // Audio / video / unknown read off the release name, over a colour-coded
-    // seeder badge — see mediaIconFor.
-    imageUrl: mediaIconFor(classifyTorrentMedia(r && r.fileName), swarmCount(r && r.nbSeeders)),
+    // No subtitle, deliberately — see above searchSourceCell.
+    cells: searchResultCells(r),
+    // Audio / video / unknown, read off the release name. Glyph only: the
+    // seeder badge it used to carry is the Seeders column now.
+    imageUrl: mediaIconFor(classifyTorrentMedia(r && r.fileName)),
     // Title click, double-click and Enter all open the contents (View contents
     // adds it paused — look before committing), matching the torrent list: a
     // result is a container, so "open it" means seeing inside, and Download
@@ -2448,6 +2865,7 @@ var loggedSearchNotices = {};
 function logSearchNotice(r) {
   var msg = ((r && r.engineName) ? r.engineName + ": " : "") +
     String((r && r.fileName) || "This search plugin reported a problem");
+  recordEngineError(r);
   if (loggedSearchNotices[msg]) return;
   loggedSearchNotices[msg] = true;
   console.error("qBittorrent search plugin notice: " + msg);
@@ -2460,8 +2878,24 @@ function refreshSearchRunning() {
   searchRunning = qbtSearchActive || webSearchActive;
 }
 
+// The engine's own error text, kept for the summary panel rather than only
+// logged. Notice rows never reach the list (isPluginNotice), so without this
+// the only trace of a misconfigured indexer was a console line.
+function recordEngineError(r) {
+  var key = String((r && r.engineName) || "");
+  if (!key) return;
+  searchEngineErrors[key] = String((r && r.fileName) || "reported a problem");
+}
+
 function mergeSearchRows() {
-  searchResults = sortSearchResults(lastQbtRows.concat(webSearchRows));
+  var all = lastQbtRows.concat(webSearchRows);
+  // Web failures arrive as notice rows in the merged set (the qBittorrent ones
+  // are split out at ingestion, in pollSearch). Harvest them here so both
+  // facilities reach the summary by one route.
+  for (var i = 0; i < all.length; i++) {
+    if (isPluginNotice(all[i])) recordEngineError(all[i]);
+  }
+  searchResults = sortSearchResults(all, resultSortBy, resultSortDir);
 }
 
 function runSearch(query) {
@@ -2480,16 +2914,45 @@ function runSearch(query) {
   loggedSearchNotices = {};
   searchJobId = null;
   searchStopped = false;
+  // The text filter described the rows this search is about to replace, so it
+  // goes. The three pickers stay — see the declaration.
+  resultFilter = "";
   activeTab = "search";
 
   var webDefs = enabledWebDefs();
+  searchWebCount = webDefs.length;
+  // The web half of the roster is known up front; the qBittorrent half only
+  // after /search/plugins answers, so it is appended there.
+  searchEngineErrors = {};
+  searchEngineStatuses = {};
+  searchEnginesRan = [];
+  for (var wi = 0; wi < webDefs.length; wi++) {
+    searchEnginesRan.push({
+      key: "web:" + webDefs[wi].id,
+      name: webDefs[wi].name || webDefs[wi].id,
+      facility: "web indexer",
+      // The exact URL this search fetched. It is the fastest way to tell a
+      // broken definition from a broken site: open it and see whether the
+      // browser gets results where we got a 403 or an empty page. Only a web
+      // indexer has one — see searchEngineSummaryLine on why a qBittorrent
+      // plugin has no request of ours to link to.
+      url: buildSearchUrl(webDefs[wi], q)
+    });
+  }
   qbtSearchActive = true;
   webSearchActive = !!webDefs.length;
   refreshSearchRunning();
   render();
 
   if (webDefs.length) {
-    webSearchAll(webDefs, q, webFetchFn).then(function (rows) {
+    webSearchAll(webDefs, q, webFetchFn, {
+      onStatus: function (key, status) {
+        // Guarded on the generation like every other late write here: a slow
+        // indexer from the previous search must not stamp a code onto the
+        // roster of the one now on screen.
+        if (gen === searchGen) searchEngineStatuses[key] = status;
+      }
+    }).then(function (rows) {
       if (gen !== searchGen) return;
       webSearchRows = rows;
       webSearchActive = false;
@@ -2506,6 +2969,16 @@ function runSearch(query) {
       return searchPlugins === null ? loadSearchPlugins() : searchPlugins;
     })
     .then(function (plugins) {
+      if (gen === searchGen) {
+        for (var pi = 0; pi < plugins.length; pi++) {
+          // Keyed on fullName where there is one: that is what qBittorrent
+          // stamps on a result's engineName, and the key has to match or the
+          // summary lists the same indexer twice — once as "asked, no results"
+          // and once as the rows it actually returned.
+          var pname = String((plugins[pi] && (plugins[pi].fullName || plugins[pi].name)) || "");
+          if (pname) searchEnginesRan.push({ key: pname, name: pname, facility: "qBittorrent plugin" });
+        }
+      }
       if (!plugins.length) {
         // With web indexers enabled the search runs on them alone; the
         // "install search plugins" banner only fires when NOTHING can search.
@@ -4111,6 +4584,8 @@ function fileMatchItems(entries, opts) {
       var f = byName[String(m[j])];
       var kind = mediaKindOf(m[j]);
       var done = !!f && numOr(f.progress, 0) >= 1;
+      // Any bytes on disk — an actively downloading file whose folder exists.
+      var started = !!f && numOr(f.progress, 0) > 0 && !done;
       var playable = done && !!kind && filesAreReachable();
       // The SAME buttons a file gets inside its torrent, from the same helper:
       // Play / Add to queue on a finished media file, Open / Show folder on a
@@ -4121,7 +4596,7 @@ function fileMatchItems(entries, opts) {
       // A row whose torrent has not been read yet offers nothing: with no file
       // behind it there is nothing to be right about.
       var offered = f
-        ? fileRowActions(kind, done, numOr(f.priority, 1) === 0, filesAreReachable())
+        ? fileRowActions(kind, done, numOr(f.priority, 1) === 0, filesAreReachable(), started)
         : { actions: [], action: null };
       // A file index is the id when there is one, so an action lands on the
       // file the row is about. A name-only row carries its POSITION instead,
@@ -4484,8 +4959,17 @@ function deleteConfirmNode(hashes) {
     title: list.length === 1 ? "Remove torrent" : "Remove torrents",
     message:
       "Remove " + what + " from qBittorrent?\n\n" +
-      "The downloaded files stay on disk — this only stops the transfer and drops " +
-      (list.length === 1 ? "it" : "them") + " from the list.",
+      "By default the downloaded files stay on disk — this only stops the transfer " +
+      "and drops " + (list.length === 1 ? "it" : "them") + " from the list.",
+    // The destructive reading of the same action, offered where the user is
+    // already reading what Remove does — NOT as a second menu entry, which
+    // would put an unrecoverable delete one mis-click from the ordinary one.
+    // Always starts unticked: qBittorrent deletes the files outright (no
+    // Recycle Bin), so a remembered tick could silently destroy a library
+    // import on the next unrelated removal.
+    checkboxLabel:
+      "Also delete the downloaded files from disk — this cannot be undone",
+    checkboxDefault: false,
     confirmLabel: "Remove",
     cancelLabel: "Cancel",
     confirmVariant: "danger",
@@ -5601,12 +6085,45 @@ var AUTO_CLOSE = {
   option: { option: 1 }
 };
 
+// The core five, matched case-insensitively (&AMP; is as valid as &amp;), plus
+// nbsp folded to an ordinary space — a non-breaking space in a title is not
+// something the list wants to preserve.
 var NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
+
+// The rest, as code points resolved on lookup — release names are littered with
+// these (a dash is nearly always "&ndash;", and accented artists arrive as
+// "&eacute;" from an HTML indexer that entity-escaped its output). Stored as
+// numbers rather than literal glyphs so the source stays plain ASCII. Matched
+// case-SENSITIVELY, because these entities are: &Eacute; is É, &eacute; é.
+var NAMED_ENTITY_CODES = {
+  // Punctuation & typography.
+  ndash: 8211, mdash: 8212, hellip: 8230, lsquo: 8216, rsquo: 8217, sbquo: 8218,
+  ldquo: 8220, rdquo: 8221, bdquo: 8222, dagger: 8224, Dagger: 8225, bull: 8226,
+  prime: 8242, Prime: 8243, lsaquo: 8249, rsaquo: 8250, oline: 8254, frasl: 8260,
+  permil: 8240,
+  // Symbols & Latin-1 punctuation.
+  iexcl: 161, cent: 162, pound: 163, curren: 164, yen: 165, brvbar: 166, sect: 167,
+  uml: 168, copy: 169, ordf: 170, laquo: 171, not: 172, shy: 173, reg: 174, macr: 175,
+  deg: 176, plusmn: 177, sup2: 178, sup3: 179, acute: 180, micro: 181, para: 182,
+  middot: 183, cedil: 184, sup1: 185, ordm: 186, raquo: 187, frac14: 188, frac12: 189,
+  frac34: 190, iquest: 191, times: 215, divide: 247, euro: 8364, trade: 8482,
+  // Accented Latin, upper then lower.
+  Agrave: 192, Aacute: 193, Acirc: 194, Atilde: 195, Auml: 196, Aring: 197, AElig: 198,
+  Ccedil: 199, Egrave: 200, Eacute: 201, Ecirc: 202, Euml: 203, Igrave: 204, Iacute: 205,
+  Icirc: 206, Iuml: 207, ETH: 208, Ntilde: 209, Ograve: 210, Oacute: 211, Ocirc: 212,
+  Otilde: 213, Ouml: 214, Oslash: 216, Ugrave: 217, Uacute: 218, Ucirc: 219, Uuml: 220,
+  Yacute: 221, THORN: 222, szlig: 223,
+  agrave: 224, aacute: 225, acirc: 226, atilde: 227, auml: 228, aring: 229, aelig: 230,
+  ccedil: 231, egrave: 232, eacute: 233, ecirc: 234, euml: 235, igrave: 236, iacute: 237,
+  icirc: 238, iuml: 239, eth: 240, ntilde: 241, ograve: 242, oacute: 243, ocirc: 244,
+  otilde: 245, ouml: 246, oslash: 248, ugrave: 249, uacute: 250, ucirc: 251, uuml: 252,
+  yacute: 253, thorn: 254, yuml: 255
+};
 
 function decodeEntities(s) {
   var str = String(s == null ? "" : s);
   if (str.indexOf("&") === -1) return str;
-  return str.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z]+);/g, function (whole, body) {
+  return str.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, function (whole, body) {
     if (body.charAt(0) === "#") {
       var hex = body.charAt(1) === "x" || body.charAt(1) === "X";
       var code = parseInt(body.substring(hex ? 2 : 1), hex ? 16 : 10);
@@ -5614,8 +6131,14 @@ function decodeEntities(s) {
       // degrades to the raw entity text, which is fine.
       return isFinite(code) && code > 0 && code < 0xffff ? String.fromCharCode(code) : whole;
     }
+    // Case-insensitive for the core five; exact-case for the code table, whose
+    // entries genuinely differ by case.
     var lower = body.toLowerCase();
-    return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, lower) ? NAMED_ENTITIES[lower] : whole;
+    if (Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, lower)) return NAMED_ENTITIES[lower];
+    if (Object.prototype.hasOwnProperty.call(NAMED_ENTITY_CODES, body)) {
+      return String.fromCharCode(NAMED_ENTITY_CODES[body]);
+    }
+    return whole;
   });
 }
 
@@ -5983,7 +6506,34 @@ function parseSize(s) {
   return Math.round(value * mult);
 }
 
-var KNOWN_FILTERS = { trim: 1, regex: 2, parseSize: 1, parseInt: 1, prepend: 2, append: 2, querystring: 2, replace: 3 };
+// A date string from wherever an indexer keeps one → unix SECONDS, the shape
+// formatAge wants. Sources vary wildly and this has to swallow all of them:
+// apibay ships raw unix seconds ("1363971375"); nyaa an RFC-822 pubDate; rargb
+// "2026-08-08 09:06:09"; bitsearch "2/22/2024"; 1337x the ugliest, "Mar. 3rd
+// '18" — an abbreviated month, an ordinal suffix, and a two-digit year. null
+// for anything unrecognisable, so a stale-format column reads "—" rather than
+// a wrong date. Local-timezone for the bare datetime forms, which is fine for
+// a coarse "added" column that formatAge rounds to days anyway.
+function parseDate(v) {
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  // Already a unix timestamp — 10 digits is seconds, 13 is milliseconds.
+  if (/^\d{9,14}$/.test(s)) {
+    var n = parseInt(s, 10);
+    if (s.length >= 13) n = Math.floor(n / 1000);
+    return n > 0 ? n : null;
+  }
+  // Normalise the human forms Date.parse won't take: "3rd" → "3", "'18" → 2018.
+  var norm = s.replace(/(\d)(st|nd|rd|th)\b/gi, "$1").replace(/'(\d{2})\b/g, "20$1");
+  var t = Date.parse(norm);
+  // A trailing period on an abbreviated month ("Mar.") defeats some engines.
+  if (isNaN(t)) t = Date.parse(norm.replace(/\./g, ""));
+  if (isNaN(t)) return null;
+  var secs = Math.floor(t / 1000);
+  return secs > 0 ? secs : null;
+}
+
+var KNOWN_FILTERS = { trim: 1, regex: 2, parseSize: 1, parseInt: 1, parseDate: 1, prepend: 2, append: 2, querystring: 2, replace: 3 };
 
 function applyFilters(value, filters) {
   var v = value == null ? "" : value;
@@ -5996,6 +6546,7 @@ function applyFilters(value, filters) {
       var rm = new RegExp(f[1]).exec(String(v));
       v = rm ? (rm[1] !== undefined ? rm[1] : rm[0]) : "";
     } else if (name === "parseSize") v = parseSize(v);
+    else if (name === "parseDate") v = parseDate(v);
     else if (name === "parseInt") {
       var cleaned = String(v)
         .replace(/[\s\u00a0]/g, "")
@@ -6102,7 +6653,12 @@ function runDefOnBody(def, bodyText) {
 function mapDefRow(def, row) {
   var fields = def.fields || {};
   var result = { siteUrl: def.siteUrl, engineName: "web:" + def.id };
-  var names = ["fileName", "fileUrl", "fileSize", "nbSeeders", "nbLeechers", "descrLink"];
+  // nbFiles is optional and rare — apibay reports it, an HTML scrape almost
+  // never does, and qBittorrent's own search API has no such field at all. A
+  // row without it says "—" in the Files column rather than "0": the only
+  // honest alternative would be adding the torrent and fetching its metadata,
+  // which a search result must not do.
+  var names = ["fileName", "fileUrl", "fileSize", "nbFiles", "added", "nbSeeders", "nbLeechers", "descrLink"];
   for (var i = 0; i < names.length; i++) {
     var key = names[i];
     var spec = fields[key];
@@ -6120,7 +6676,7 @@ function mapDefRow(def, row) {
     }
     // Unknown numbers stay ABSENT, never -1: a row with -1 size and -1 swarm
     // is the isPluginNotice shape and would render as an engine error.
-    if (key === "fileSize" || key === "nbSeeders" || key === "nbLeechers") {
+    if (key === "fileSize" || key === "nbFiles" || key === "added" || key === "nbSeeders" || key === "nbLeechers") {
       if (typeof value === "number" && isFinite(value) && value >= 0) result[key] = value;
     } else if (value) {
       result[key] = String(value);
@@ -6170,6 +6726,8 @@ var WEB_DEFS = [
         }
       },
       fileSize: { path: "size", filters: [["parseInt"]] },
+      nbFiles: { path: "num_files", filters: [["parseInt"]] },
+      added: { path: "added", filters: [["parseDate"]] },
       nbSeeders: { path: "seeders", filters: [["parseInt"]] },
       nbLeechers: { path: "leechers", filters: [["parseInt"]] },
       descrLink: { path: "id", filters: [["prepend", "https://thepiratebay.org/description.php?id="]] }
@@ -6187,6 +6745,7 @@ var WEB_DEFS = [
       fileName: { tag: "title" },
       fileUrl: { tag: "link" },
       fileSize: { tag: "nyaa:size", filters: [["parseSize"]] },
+      added: { tag: "pubDate", filters: [["parseDate"]] },
       nbSeeders: { tag: "nyaa:seeders", filters: [["parseInt"]] },
       nbLeechers: { tag: "nyaa:leechers", filters: [["parseInt"]] },
       descrLink: { tag: "guid" }
@@ -6206,28 +6765,74 @@ var WEB_DEFS = [
       nbSeeders: { selector: "td.coll-2", filters: [["parseInt"]] },
       nbLeechers: { selector: "td.coll-3", filters: [["parseInt"]] },
       // The size cell embeds a completed-count span; take the leading size.
-      fileSize: { selector: "td.coll-4", filters: [["regex", "^[\\d.,]+\\s*[KMGT]?i?B"], ["parseSize"]] }
+      fileSize: { selector: "td.coll-4", filters: [["regex", "^[\\d.,]+\\s*[KMGT]?i?B"], ["parseSize"]] },
+      // "Mar. 3rd '18" — parseDate normalises the ordinal and two-digit year.
+      added: { selector: "td.coll-date", filters: [["parseDate"]] }
     },
     magnetFollow: { selector: "a[href^=magnet]", attribute: "href" }
   },
   {
+    // A meta-search that scrapes many trackers and — unlike almost every other
+    // HTML indexer — ships the magnet, size and full swarm IN the result row,
+    // so no per-result detail fetch is needed. Verified server-rendered (2026-08).
+    // The domain is mid-move: bitsearch.to 302s to bitsearch.eu, so we point
+    // straight at .eu to save the hop (and to keep redirectHijack quiet).
     schemaVersion: 1,
-    id: "tgx",
-    name: "TorrentGalaxy",
-    siteUrl: "https://torrentgalaxy.to",
+    id: "bitsearch",
+    name: "BitSearch",
+    siteUrl: "https://bitsearch.eu",
     type: "html",
-    search: { url: "https://torrentgalaxy.to/torrents.php?search={q}&c22=1&c26=1&sort=seeders&order=desc" },
-    rows: { selector: "div.tgxtablerow" },
+    search: { url: "https://bitsearch.eu/search?q={q}" },
+    // A Tailwind card list: the result cards are the p-6 variant; the page's
+    // other cards (the results-count header) are p-4, so .p-6 alone isolates them.
+    rows: { selector: "div.shadow-sm.p-6" },
     fields: {
-      fileName: { selector: "div.tgxtablecell a.txlight" },
-      descrLink: { selector: "div.tgxtablecell a.txlight", attribute: "href", filters: [["prepend", "https://torrentgalaxy.to"]] },
+      fileName: { selector: "h3 a" },
       fileUrl: { selector: "a[href^=magnet]", attribute: "href" },
-      fileSize: { selector: "span.badge-secondary", filters: [["parseSize"]] },
-      nbSeeders: { selector: "span[title*=Seeder]", filters: [["regex", "(\\d+)\\s*/"], ["parseInt"]] },
-      nbLeechers: { selector: "span[title*=Seeder]", filters: [["regex", "/\\s*(\\d+)"], ["parseInt"]] }
+      // The info row (.mb-3) holds category · size · date; size is its 2nd
+      // DIRECT child span — the descendant form catches the inner text spans.
+      fileSize: { selector: ".mb-3 > span:nth-child(2)", filters: [["regex", "[0-9.,]+\\s*[KMGT]?i?B"], ["parseSize"]] },
+      // The info row's 3rd direct child is the date span ("2/22/2024").
+      added: { selector: ".mb-3 > span:nth-child(3)", filters: [["parseDate"]] },
+      // Swarm counts carry colour classes of their own — the only clean hook.
+      nbSeeders: { selector: ".text-green-600 .font-medium", filters: [["parseInt"]] },
+      nbLeechers: { selector: ".text-red-600 .font-medium", filters: [["parseInt"]] }
     }
+  },
+  {
+    // A RARBG-lineage clone with the classic `lista2` results table. The magnet
+    // lives on the detail page, so this is a magnetFollow def — one extra fetch
+    // per result the user actually adds, never during the search. Verified
+    // server-rendered (2026-08); may sit behind a Cloudflare challenge on some
+    // networks, in which case the summary panel reports it as failed/blocked.
+    schemaVersion: 1,
+    id: "rargb",
+    name: "RARGB",
+    siteUrl: "https://rargb.to",
+    type: "html",
+    search: { url: "https://rargb.to/search/?search={q}" },
+    rows: { selector: "tr.lista2" },
+    fields: {
+      // Match the torrent-detail anchor directly: the row's first cell is a
+      // category-image link, so a positional `td a` picks the wrong one.
+      fileName: { selector: "a[href^=/torrent/]" },
+      descrLink: { selector: "a[href^=/torrent/]", attribute: "href", filters: [["prepend", "https://rargb.to"]] },
+      fileSize: { selector: "td:nth-child(5)", filters: [["parseSize"]] },
+      // The 4th cell is the upload datetime ("2026-08-08 09:06:09").
+      added: { selector: "td:nth-child(4)", filters: [["parseDate"]] },
+      // Seeders sit inside a <font> tag; nodeText reads through it.
+      nbSeeders: { selector: "td:nth-child(6)", filters: [["parseInt"]] },
+      nbLeechers: { selector: "td:nth-child(7)", filters: [["parseInt"]] }
+    },
+    magnetFollow: { selector: "a[href^=magnet]", attribute: "href" }
   }
 ];
+// TorrentGalaxy (`tgx`) was removed as a bundled definition. A def that no
+// longer answers is worse than one less indexer: it costs every search a
+// timeout, and the summary panel now reports the failure on every single run.
+// A user who still wants it can paste the definition back in from Settings —
+// removing it from WEB_DEFS doesn't touch custom indexers, and a stale
+// "disabled" entry left in webIndexersDisabled for it is harmless.
 
 // --- Validation -----------------------------------------------------------------
 
@@ -6259,7 +6864,7 @@ function validateIndexerDef(def, existingIds) {
     if (!d.rows || typeof d.rows.path !== "string") push("a json definition needs “rows.path” (\"\" for the response root)");
   }
   var fields = d.fields || {};
-  var allowedFields = { fileName: 1, fileUrl: 1, fileSize: 1, nbSeeders: 1, nbLeechers: 1, descrLink: 1 };
+  var allowedFields = { fileName: 1, fileUrl: 1, fileSize: 1, nbFiles: 1, added: 1, nbSeeders: 1, nbLeechers: 1, descrLink: 1 };
   for (var key in fields) {
     if (!Object.prototype.hasOwnProperty.call(fields, key)) continue;
     if (!allowedFields[key]) {
@@ -6369,10 +6974,42 @@ function throttledWebFetch(url, def, fetchFn, opts) {
       return null;
     }
   );
+  // Resolves `{ status, body, url }` rather than the body alone, and a non-2xx
+  // error carries `.status` too — the code is the most useful thing an indexer
+  // ever tells us (403 is a bot wall, 404 a moved search path, 503 the site
+  // being down) and the summary panel reports it per engine. Throwing a bare
+  // "HTTP 403" string forced the caller to re-parse its own message. `url` is
+  // the final URL after redirects (absent on hosts older than the field) —
+  // see redirectHijack for why it matters.
   return run.then(function (resp) {
-    if (resp.status < 200 || resp.status >= 300) throw new Error("HTTP " + resp.status);
-    return resp.text();
+    var status = Number(resp && resp.status) || 0;
+    if (status < 200 || status >= 300) {
+      var err = new Error("HTTP " + status);
+      err.status = status;
+      throw err;
+    }
+    return resp.text().then(function (body) {
+      return { status: status, body: body, url: resp.url };
+    });
   });
+}
+
+// The host a response REALLY came from, when it isn't the one asked — or null
+// when the answer is honest (or the host is too old to say, `resp.url` absent).
+//
+// This is how national ISP blocking looks from inside a fetch: the request for
+// 1337x.to is 302'd to the regulator's notice page (Greece's edppi.gr, and its
+// equivalents in the UK, Italy, Portugal…), which answers HTTP 200 with a page
+// that naturally contains no torrent rows. Without this check that reads as
+// "HTTP 200 · no results" — the stale-selectors diagnosis — sending whoever
+// debugs it to exactly the wrong place. `www.` is stripped before comparing so
+// a site canonicalising to/from its www form doesn't read as a hijack.
+function redirectHijack(requestUrl, finalUrl) {
+  var asked = hostOf(requestUrl);
+  var got = hostOf(finalUrl);
+  if (!asked || !got) return null;
+  var strip = function (h) { return h.replace(/^www\./, ""); };
+  return strip(asked) === strip(got) ? null : got;
 }
 
 function recordWebStat(id, ok, err) {
@@ -6393,6 +7030,13 @@ function webSearchAll(defs, query, fetchFn, opts) {
   var list = defs || [];
   var q = String(query == null ? "" : query).trim();
   if (!q || !list.length) return Promise.resolve([]);
+  // Optional, so this stays a function of its arguments: the Search tab hands
+  // in a recorder for its summary panel, and the headless callers (discovery,
+  // the Music Search tab) pass nothing and are unaffected.
+  var onStatus = (opts && opts.onStatus) || null;
+  var reportStatus = function (id, status) {
+    if (onStatus) onStatus("web:" + id, status);
+  };
   var jobs = [];
   for (var i = 0; i < list.length; i++) {
     (function (def) {
@@ -6400,14 +7044,37 @@ function webSearchAll(defs, query, fetchFn, opts) {
       dbg("search: [web:" + def.id + "] GET " + url);
       jobs.push(
         throttledWebFetch(url, def, fetchFn, opts)
-          .then(function (body) {
-            var rows = runDefOnBody(def, body);
+          .then(function (res) {
+            var rows = runDefOnBody(def, res.body);
+            reportStatus(def.id, res.status);
+            // Zero rows from a host we never asked is a block page wearing a
+            // 200, not an empty answer — say so, as a failure. Only when zero:
+            // a mirror redirect that still parses fine is results, not a fault.
+            var hijack = rows.length ? null : redirectHijack(url, res.url);
+            if (hijack) {
+              var msg = "redirected to " + hijack + " — the site looks blocked on your network";
+              recordWebStat(def.id, false, msg);
+              dbg("search: [web:" + def.id + "] " + msg);
+              return [
+                {
+                  fileName: msg,
+                  fileSize: -1,
+                  nbSeeders: -1,
+                  nbLeechers: -1,
+                  engineName: "web:" + def.id,
+                  siteUrl: def.siteUrl
+                }
+              ];
+            }
             recordWebStat(def.id, true);
-            dbg("search: [web:" + def.id + "] " + rows.length + " rows");
+            dbg("search: [web:" + def.id + "] HTTP " + res.status + ", " + rows.length + " rows");
             return rows;
           })
           .catch(function (e) {
             recordWebStat(def.id, false, errText(e));
+            // 0 for "never got a response at all" — a timeout or a DNS failure,
+            // which is a different diagnosis from a site that answered 403.
+            reportStatus(def.id, (e && e.status) || 0);
             console.error("qBittorrent: web indexer " + def.id + " failed:", e);
             dbg("search: [web:" + def.id + "] failed — " + errText(e));
             return [
@@ -6480,8 +7147,8 @@ function resolveWebFileUrl(result, fetchFn) {
   var def = webDefById(result.webFollow);
   if (!def || !def.magnetFollow) return Promise.resolve(result);
   dbg("add: [web:" + def.id + "] fetching the detail page for its magnet — " + result.fileUrl);
-  return throttledWebFetch(result.fileUrl, def, fetchFn).then(function (body) {
-    var el = selectFirst(parseMarkup(body, true), def.magnetFollow.selector);
+  return throttledWebFetch(result.fileUrl, def, fetchFn).then(function (res) {
+    var el = selectFirst(parseMarkup(res.body, true), def.magnetFollow.selector);
     var magnet = el && el.attrs ? el.attrs[String(def.magnetFollow.attribute || "href").toLowerCase()] : null;
     if (!magnet || magnet.indexOf("magnet:") !== 0) {
       throw new Error("No magnet link found on the torrent's page");
@@ -7542,6 +8209,183 @@ function registerStreamResolver() {
   });
 }
 
+// The live filter state, as one object, so the pure filter and every reader of
+// "is anything filtered?" can't drift from the four variables behind it.
+function currentSearchFilters() {
+  return {
+    text: resultFilter,
+    minSeeders: resultMinSeeders,
+    sizeBand: resultSizeBand,
+    source: resultSource
+  };
+}
+
+// The row under the search box: filter the results already on screen instead of
+// re-running the query. The text box flexes (the host gives a `search-input` in
+// a horizontal layout `flex: 1`) and the three pickers sit at the right end.
+//
+// Deliberately NOT a sort control: the list is seeder-sorted because for a
+// torrent that is the difference between a download and a dead entry, and a row
+// of chrome that can quietly re-order the thing it sits above is how a user ends
+// up picking a 2-seeder release believing it was the best hit.
+function searchFilterStrip() {
+  var strip = [
+    {
+      type: "search-input",
+      placeholder: "Filter these results — name, indexer or site",
+      action: "qbt:result-filter",
+      value: resultFilter,
+      stateKey: "qbt-result-filter"
+    },
+    {
+      type: "select",
+      label: "",
+      action: "qbt:result-seeders",
+      value: String(resultMinSeeders),
+      options: SEARCH_SEED_BANDS
+    },
+    {
+      type: "select",
+      label: "",
+      action: "qbt:result-size",
+      value: resultSizeBand,
+      options: SEARCH_SIZE_BANDS
+    },
+    {
+      type: "select",
+      label: "",
+      action: "qbt:result-source",
+      value: resultSource,
+      options: SEARCH_SOURCE_OPTIONS
+    }
+  ];
+  // Four controls, three of which survive the next search — one press has to
+  // put all of them back, or a forgotten band silently thins a later result set.
+  if (searchFilterActive(currentSearchFilters())) {
+    strip.push({
+      type: "button",
+      label: "Clear filters",
+      action: "qbt:result-filter-clear",
+      className: "plugin-toolbar-btn"
+    });
+  }
+  return { type: "layout", direction: "horizontal", children: strip };
+}
+
+// The collapsed per-engine roster: one summary button, and the rows behind it
+// only while it is open.
+//
+// A button rather than a `section`, because the host's section node doesn't
+// collapse — and this must be collapsed by default. It answers "why so few
+// results?", which is a question you ask now and then, not something to read
+// past on every search.
+// One engine row: the summary line, plus — for a web indexer — the exact URL
+// this search fetched, opened in the browser. That link is the one check a
+// code alone can't make: a 403 or an empty 200 could be the site blocking us
+// or the definition having gone stale, and seeing the same URL work in a
+// browser tells the two apart in one click. A qBittorrent plugin's request is
+// made inside qBittorrent and we never see its URL, so its row gets no button
+// — one that opened nothing would be worse than none.
+function engineSummaryRowNode(row) {
+  var line = {
+    type: "text",
+    // A failed engine keeps the default text colour while the rest are muted,
+    // so the one row worth acting on is the one that stands out.
+    className: row.error ? "" : "muted",
+    content: searchEngineSummaryLine(row)
+  };
+  if (!row.url) return line;
+  return {
+    type: "layout",
+    direction: "horizontal",
+    children: [
+      line,
+      {
+        type: "button",
+        label: "Open search",
+        action: "qbt:open-engine-search",
+        className: "plugin-toolbar-btn",
+        data: { url: row.url }
+      }
+    ]
+  };
+}
+
+// A facility group's headline tally: what its engines have delivered between
+// them, or the one state they all share.
+function engineGroupTally(rows) {
+  var results = 0;
+  var pending = 0;
+  var failed = 0;
+  for (var i = 0; i < rows.length; i++) {
+    results += rows[i].count;
+    if (rows[i].pending) pending++;
+    if (rows[i].error) failed++;
+  }
+  if (results) return results + (results === 1 ? " result" : " results");
+  if (pending === rows.length) return "searching…";
+  if (failed === rows.length) return "all failed";
+  return "no results";
+}
+
+function engineSummaryNodes() {
+  var summary = searchEngineSummary(
+    realSearchResults(),
+    searchEnginesRan,
+    searchEngineErrors,
+    searchEngineStatuses,
+    { qbt: qbtSearchActive, web: webSearchActive }
+  );
+  if (!summary.length) return [];
+  var failed = 0;
+  var stillSearching = 0;
+  for (var i = 0; i < summary.length; i++) {
+    if (summary[i].error) failed++;
+    if (summary[i].pending) stillSearching++;
+  }
+  var label =
+    (engineSummaryOpen ? "▾ " : "▸ ") +
+    summary.length +
+    (summary.length === 1 ? " search engine" : " search engines") +
+    (stillSearching ? " · " + stillSearching + " still searching" : "") +
+    // "all N failed" is the headline that matters most: it is the difference
+    // between "this album doesn't exist" and "nothing could look for it".
+    (failed ? " · " + (failed === summary.length && summary.length > 1 ? "all " : "") + failed + " failed" : "");
+  var nodes = [
+    { type: "button", label: label, action: "qbt:engine-summary-toggle", className: "plugin-toolbar-btn" }
+  ];
+  if (!engineSummaryOpen) return nodes;
+  // One section per facility, not one flat list: the two halves fail in
+  // different ways and are fixed in different places (a web definition is
+  // ours to edit in Settings; a qBittorrent plugin lives in qBittorrent), so
+  // reading them apart is reading them right. Order matches the running
+  // spinner's phrasing — qBittorrent plugins first, then websites.
+  var groups = [
+    { facility: "qBittorrent plugin", title: "qBittorrent plugins" },
+    { facility: "web indexer", title: "Web indexers" }
+  ];
+  for (var g = 0; g < groups.length; g++) {
+    var rows = [];
+    for (var r = 0; r < summary.length; r++) {
+      if (summary[r].facility === groups[g].facility) rows.push(summary[r]);
+    }
+    if (!rows.length) continue;
+    var lines = [];
+    for (var j = 0; j < rows.length; j++) lines.push(engineSummaryRowNode(rows[j]));
+    if (groups[g].facility === "qBittorrent plugin") {
+      lines.push({
+        type: "text",
+        className: "muted",
+        content:
+          "qBittorrent's own plugins run inside qBittorrent, which reports only the search job — " +
+          "so there is no response code of theirs to show."
+      });
+    }
+    nodes.push({ type: "section", title: groups[g].title + " — " + engineGroupTally(rows), children: lines });
+  }
+  return nodes;
+}
+
 function searchTabNodes() {
   var children = [
     {
@@ -7552,6 +8396,19 @@ function searchTabNodes() {
       value: searchQuery
     }
   ];
+
+  // Shown while there is something to filter — and while a filter is SET over an
+  // emptied list, or clearing it would need the rows it is hiding to come back
+  // first. Same rule as the torrent list's box.
+  if (realSearchResults().length || searchFilterActive(currentSearchFilters())) {
+    children.push(searchFilterStrip());
+  }
+
+  // Above the early returns below, on purpose: "every engine failed" and
+  // "nothing found" look the same on screen, and the panel is the difference
+  // between them.
+  var summaryNodes = engineSummaryNodes();
+  for (var si = 0; si < summaryNodes.length; si++) children.push(summaryNodes[si]);
 
   if (searchError === "no-plugins") {
     children.push({
@@ -7569,11 +8426,18 @@ function searchTabNodes() {
   }
 
   if (searchRunning) {
+    // Name both facilities, and only the ones STILL going: the two finish
+    // independently, so the message narrows to "3 websites…" once qBittorrent's
+    // plugins are done rather than implying the whole thing is still pending.
+    var runningSummary = searchSourceSummary(
+      qbtSearchActive && searchPlugins ? searchPlugins.length : 0,
+      webSearchActive ? searchWebCount : 0
+    );
     children.push({
       type: "loading",
-      message: searchResults.length
-        ? "Searching… " + searchResults.length + " so far"
-        : "Searching " + (searchPlugins ? searchPlugins.length : 0) + " indexers…"
+      message:
+        (runningSummary ? "Searching " + runningSummary + "…" : "Searching…") +
+        (searchResults.length ? "  " + searchResults.length + " so far" : "")
     });
     // A slow indexer can hold a search open for the full 45s budget, and until
     // now the only way out was to start a different search.
@@ -7596,11 +8460,35 @@ function searchTabNodes() {
     return children;
   }
 
+  var all = realSearchResults();
+  var visible = filterSearchResults(all, currentSearchFilters());
+  // The breakdown describes what is ON SCREEN, so it counts the filtered rows —
+  // "7 from websites" next to a list showing three of them would be a lie about
+  // the very thing the source filter was just used on.
+  var counts = searchResultCounts(visible);
+  var breakdown = searchResultBreakdown(counts, !!(searchPlugins && searchPlugins.length), !!searchWebCount);
+  var filtering = visible.length !== all.length;
   children.push({
     type: "text",
-    content: realSearchResults().length + " results" + (searchStopped ? " — stopped early" : ""),
+    content:
+      (filtering ? counts.total + " of " + all.length + " results" : counts.total + " results") +
+      (breakdown ? " — " + breakdown : "") +
+      (searchStopped ? " — stopped early" : ""),
     className: "muted"
   });
+
+  // Everything filtered out. Not "nothing found" — the search worked and the
+  // rows are still there, so the way forward is the filters, not the query.
+  if (!visible.length) {
+    children.push({ type: "text", content: "No result matches these filters." });
+    children.push({
+      type: "button",
+      label: "Clear filters",
+      action: "qbt:result-filter-clear",
+      variant: "secondary"
+    });
+    return children;
+  }
 
   // No indexer-failure banners here: a misconfigured search plugin's
   // self-reported errors are logged at ingestion (logSearchNotice), not
@@ -7618,14 +8506,23 @@ function searchTabNodes() {
   // nothing acted on the row — is fixed by giving each row an `action`, so
   // double-click and Enter download it, exactly like a track anywhere else.
   var rows = [];
-  for (var i = 0; i < searchResults.length; i++) {
-    if (isPluginNotice(searchResults[i])) continue;
-    rows.push(searchResultRow(searchResults[i]));
+  for (var i = 0; i < visible.length; i++) {
+    rows.push(searchResultRow(visible[i]));
   }
   children.push({
     type: "track-row-list",
     selectable: true,
     items: rows,
+    // A table, because choosing a torrent is a comparison across four numbers
+    // at once — 300 MB/2 seeders against 900 MB/400 — and a sentence per row
+    // makes the reader hold each one in their head. The header sorts by any of
+    // them; the plugin does the sorting (see sortSearchResults), the host only
+    // reports the click.
+    showHeader: true,
+    columns: SEARCH_COLUMNS,
+    sortBy: resultSortBy,
+    sortDir: resultSortDir,
+    sortAction: "qbt:result-sort",
     // Same gesture as the torrent list: the result's NAME opens its contents
     // (paused — look before committing), the rest of the row selects, so a
     // selection for the toolbar's bulk Download never costs a modifier.
@@ -7692,6 +8589,9 @@ function fileRowsNode(hash) {
     // Same numeric coercion as everything else reading these fields — see numOr.
     var done = numOr(f.progress, 0) >= 1;
     var skipped = numOr(f.priority, 1) === 0;
+    // Bytes on disk but not finished — a file actively downloading, whose
+    // folder exists to be shown.
+    var started = numOr(f.progress, 0) > 0 && !done;
     var parsed = parseFileTrack(f.name);
     // The file's own tags when they're already cached — the read was started
     // when this list arrived. Read-only on purpose: rendering must never kick
@@ -7717,7 +8617,7 @@ function fileRowsNode(hash) {
     // torrent row: the two are read together, and a trailing column put them at
     // opposite ends of the row.
     var subtitle = fileStatusText(f, torrent) + "  ·  " + formatBytes(f.size);
-    var offered = fileRowActions(kind, done, skipped, filesAreReachable());
+    var offered = fileRowActions(kind, done, skipped, filesAreReachable(), started);
     items.push({
       id: String(f.index),
       // No "⊘"/"◌" prefix on the name any more: the tile carries the state in
@@ -8138,6 +9038,67 @@ function registerActions() {
     render();
   });
 
+  // Filtering a result set already in hand: no indexer is re-asked, so these
+  // are plain state writes and a re-render.
+  api.ui.onAction("qbt:result-filter", function (data) {
+    resultFilter = String((data && data.query) || "");
+    render();
+  });
+  api.ui.onAction("qbt:result-seeders", function (data) {
+    resultMinSeeders = Number((data && data.value) || 0) || 0;
+    render();
+  });
+  api.ui.onAction("qbt:result-size", function (data) {
+    resultSizeBand = String((data && data.value) || "any");
+    render();
+  });
+  api.ui.onAction("qbt:result-source", function (data) {
+    resultSource = String((data && data.value) || "any");
+    render();
+  });
+  // A header click. The host suggests a direction; the plugin decides, because
+  // only it knows what the column holds: clicking a NEW number column should
+  // open with the biggest (most seeders, biggest file), while a new text column
+  // should open at A. Clicking the sorted column always just flips it.
+  api.ui.onAction("qbt:result-sort", function (data) {
+    var col = String((data && data.column) || "");
+    if (!SEARCH_SORT_COLUMNS[col]) return;
+    if (col === resultSortBy) {
+      resultSortDir = resultSortDir === "desc" ? "asc" : "desc";
+    } else {
+      resultSortBy = col;
+      resultSortDir = SEARCH_SORT_COLUMNS[col] === "text" ? "asc" : "desc";
+    }
+    mergeSearchRows();
+    render();
+  });
+
+  api.ui.onAction("qbt:open-engine-search", function (data) {
+    var url = String((data && data.url) || "");
+    if (!url) return;
+    if (typeof api.network.openUrl !== "function") {
+      api.ui.showNotification("This app build can't open a browser window");
+      return;
+    }
+    api.network.openUrl(url).catch(function (e) {
+      console.error("qBittorrent: could not open an indexer's search page:", e);
+      api.ui.showNotification("Couldn't open that search page: " + errText(e));
+    });
+  });
+
+  api.ui.onAction("qbt:engine-summary-toggle", function () {
+    engineSummaryOpen = !engineSummaryOpen;
+    render();
+  });
+
+  api.ui.onAction("qbt:result-filter-clear", function () {
+    resultFilter = "";
+    resultMinSeeders = 0;
+    resultSizeBand = "any";
+    resultSource = "any";
+    render();
+  });
+
   api.ui.onAction("qbt:list-filter-clear", function () {
     listFilter = "";
     render();
@@ -8167,9 +9128,13 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:delete-confirm", function (data) {
-    // The confirm node carries no data — the pending list is the only source,
-    // so a stale `hash` on the event can't delete something else.
-    deleteTorrents(pendingDelete || [], false);
+    // WHICH torrents comes from the pending list, never from the event — a
+    // stale `hash` on the payload must not be able to delete something else.
+    // WHETHER to delete the files is the one thing only the event knows: it is
+    // the checkbox the user just ticked in that dialog. A host too old for
+    // `checkboxLabel` renders no checkbox and sends nothing, which reads as
+    // false — the previous behaviour, and the safe one.
+    deleteTorrents(pendingDelete || [], !!(data && data.checkboxChecked));
   });
 
   api.ui.onAction("qbt:delete-cancel", function () {
@@ -8479,8 +9444,23 @@ return {
   _nextPreviousCategory: nextPreviousCategory,
   _siteLabel: siteLabel,
   _sortSearchResults: sortSearchResults,
-  _searchResultSubtitle: searchResultSubtitle,
   _engineLabel: engineLabel,
+  _isWebResult: isWebResult,
+  _facilityLabel: facilityLabel,
+  _searchResultCounts: searchResultCounts,
+  _searchSourceSummary: searchSourceSummary,
+  _searchResultBreakdown: searchResultBreakdown,
+  _filterSearchResults: filterSearchResults,
+  _searchResultCells: searchResultCells,
+  _searchSourceCell: searchSourceCell,
+  _searchEngineSummary: searchEngineSummary,
+  _searchEngineSummaryLine: searchEngineSummaryLine,
+  _engineGroupTally: engineGroupTally,
+  _redirectHijack: redirectHijack,
+  _SEARCH_COLUMNS: SEARCH_COLUMNS,
+  _searchFilterActive: searchFilterActive,
+  _searchSizeBand: searchSizeBand,
+  _SEARCH_SIZE_BANDS: SEARCH_SIZE_BANDS,
   _searchResultRow: searchResultRow,
   _swarmCount: swarmCount,
   _collectionForPath: collectionForPath,
@@ -8564,6 +9544,7 @@ return {
   _selectFirst: selectFirst,
   _childByTag: childByTag,
   _parseSize: parseSize,
+  _parseDate: parseDate,
   _applyFilters: applyFilters,
   _jsonPath: jsonPath,
   _buildSearchUrl: buildSearchUrl,

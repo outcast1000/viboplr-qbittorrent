@@ -1,5 +1,191 @@
 # Changelog
 
+## 0.40.0
+
+**Search results have an "Added" column.** Sortable like the rest, showing a
+relative age ("3 days ago") rather than an exact timestamp — what you actually
+ask of a download. All five bundled indexers report it, each in its own format
+(The Pirate Bay's raw unix time, Nyaa's RFC date, 1337x's `Mar. 3rd '18`,
+rargb's datetime, BitSearch's `M/D/YYYY`); a new `parseDate` filter normalises
+every shape to one sortable value, and a source that gives no date shows "—".
+Sorting by it defaults to newest-first, and undated rows sink to the bottom
+either way.
+
+**Files still downloading now offer "Show folder" too.** Previously only a
+finished file could reveal where it landed; a file in progress has bytes on
+disk already, so "where is this going?" is a fair question about it — the
+action rides alongside Download/Skip once a file has actually started (and only
+when its path is reachable from this machine).
+
+**Torrent names show their punctuation, not `&ndash;`.** HTML indexers often
+entity-escape their titles, and the decoder only knew the five basic entities,
+so a dash arrived as a literal `&ndash;` and an accented artist as `&eacute;`.
+It now decodes the full set of typographic and accented-Latin entities
+(case-sensitively, so `&Eacute;` is É and `&eacute;` é); an entity it doesn't
+recognise is still left exactly as-is rather than guessed at.
+
+**Two new bundled web indexers: BitSearch and RARGB.** Both were checked to be
+server-rendered (results in the raw HTML, no JavaScript), which is the bar for
+a definition that works from inside the app. **BitSearch** ships the magnet,
+size and full swarm right in each result row — no per-result detail fetch — so
+it is as cheap as The Pirate Bay. **RARGB** (a RARBG-lineage clone) keeps its
+magnet on the torrent's detail page, so it is a magnet-follow definition: one
+extra fetch only for a result you actually add, never during the search. Both
+join the sweep alongside The Pirate Bay, Nyaa and 1337x.
+
+Also researched and **rejected**, each for a concrete reason: **Snowfl**,
+**AIO Search** and **TorrentSeeker** render results only via JavaScript (their
+raw pages carry no torrents, so a scraper sees nothing); **Torrentz2** returned
+a server error; **iDope** didn't resolve at all; **SolidTorrents** now lands on
+a parked-domain page; **BTDigg** rate-limits automated requests (HTTP 429). If
+any of them changes, it can be added later — and a user can always paste a
+custom definition into Settings.
+
+**TorrentGalaxy is gone from the bundled indexers.** A definition that no
+longer answers is worse than one fewer indexer: it costs every search a
+timeout and now reports a failure in the summary panel on every single run.
+Custom indexers are untouched, and anyone who wants it back can paste the
+definition into Settings.
+
+**An ISP block page no longer masquerades as "no results".** National site
+blocking works by redirecting the request to a regulator's notice page —
+Greece's edppi.gr, and its equivalents elsewhere — which answers **HTTP 200**
+from a different host with, naturally, no torrent rows on it. That used to
+read as `HTTP 200 · no results`: the stale-selectors diagnosis, pointing
+whoever debugs it at exactly the wrong thing. The sweep now checks which host
+actually answered (the app reports the post-redirect URL on new enough builds)
+and, when zero rows came from a host it never asked, reports the engine as
+**failed — `redirected to edppi.gr — the site looks blocked on your
+network`**. A redirect that still parses rows is left alone — mirrors are
+results, not faults — and the row's *Open search* button demonstrates the
+diagnosis: your browser lands on the same block page. This is why 1337x showed
+nothing on a Greek connection; the panel now says so instead of shrugging.
+
+**Engines that haven't answered yet say "searching…", not "no results".** An
+unanswered engine used to read as a verdict it never gave. Now a web indexer's
+row is pending until its own fetch settles (each one answers individually),
+and a qBittorrent plugin's row is pending until the search job completes —
+saying `12 results so far…` when rows are streaming in, since qBittorrent
+reports the job, not its plugins. The collapsed line carries the same truth:
+`▸ 5 search engines · 3 still searching · 1 failed` — and when every engine
+failed it says `all 4 failed`, which is the difference between "this album
+doesn't exist" and "nothing could look for it".
+
+**The engine summary is grouped by facility.** One section per half —
+`qBittorrent plugins — 12 results` and `Web indexers — searching…` — each
+headlining its own tally (`N results` / `searching…` / `all failed` / `no
+results`). The two halves fail differently and are fixed in different places
+(a web definition is yours to edit in Settings; a qBittorrent plugin lives in
+qBittorrent), so reading them apart is reading them right. With the facility
+in the heading, the rows dropped their `(web indexer)` parentheticals, and the
+"no response code" explainer sits inside the qBittorrent group it explains.
+
+**Each web indexer's row links to the search it actually ran.** An **Open
+search** button next to the engine opens that exact URL — query and all,
+percent-encoded as it was sent — in your browser. It settles what a response
+code can't on its own: a 403 or an empty 200 is either the site blocking us or
+the definition's selectors having gone stale, and seeing the same URL work in
+a browser tells the two apart in one click. Only web indexers get the button:
+a qBittorrent search plugin's request is made inside qBittorrent, so there is
+no URL of ours to offer, and a button that opened nothing for half the rows
+would be worse than none.
+
+**Every web indexer reports its response code.** The summary rows lead with
+it — `1337x (web indexer) — HTTP 403 · failed`, `Nyaa (web indexer) — HTTP 200
+· no results` — because the code is the diagnosis that a bare "no results"
+hides: 403 is a bot wall, 404 a moved search path, 503 a site that is down,
+and **200 with nothing in it** means the definition's selectors have gone
+stale. Four different fixes that used to look identical. An indexer that never
+answered at all (a timeout, a DNS failure) says `no response`, which is again
+a different problem from one that answered 403. qBittorrent's own plugins
+carry no code, and the panel says why: they run inside qBittorrent, which
+reports only the search job — a code from our own call to it would be a number
+about the wrong request.
+
+**A collapsed per-engine summary.** One line under the filter row — `▸ 5
+search engines · 2 failed` — opening to a row per engine: what it is, which
+facility it belongs to, and how many results it contributed. It answers the
+question the merged list can't: an indexer that returned nothing, an indexer
+nobody asked, and a **broken** indexer all look identical in a merged list of
+torrents. That last one especially — a misconfigured qBittorrent search plugin
+reports its failure *as a fake result row*, which must never be rendered as
+something you can download, so until now "invalid credentials — check your API
+key" went to the log and nowhere else. It is there now, in the plugin's own
+words, one click away. Collapsed by default, because it answers "why so few
+results?" — a question you ask occasionally, not something to read past on
+every search.
+
+**One line per result, and no number on the tile.** The second line is gone:
+every fact it carried has a column now, including which facility found the
+result, which is the Source cell's prefix (`web · The Pirate Bay`,
+`qBT · jackett`) — and putting the facility first means sorting by Source
+groups the two rather than interleaving them. The row tile is the media glyph
+alone; the seeder badge it used to carry is the Seeders column, sortable and
+lined up with the other three figures. The site hostname went with the
+subtitle: against a Source column naming the indexer it was a near-duplicate,
+and the summary panel lists the indexers in full.
+
+**Removing a torrent can delete its files.** The Remove dialog now carries an
+**"Also delete the downloaded files from disk"** tick. It starts off every
+time and is never remembered: qBittorrent deletes outright, with no Recycle
+Bin behind it, so a remembered tick could quietly destroy a release on the
+next unrelated removal. Left unticked, Remove does exactly what it always did
+— stops the transfer, drops the row, leaves the files. It is one dialog and
+one menu entry rather than a second "Remove and delete files…" item, which
+would put the unrecoverable variant one mis-click from the ordinary one.
+(Needs a host new enough to render a checkbox in a `confirm`; on older ones
+no tick appears and Remove keeps the files, as before.)
+
+**Filter boxes ignore accents.** Every in-plugin filter (a torrent's contents,
+the torrent list, the new results row) now folds diacritics on both sides, so
+`χαρης` finds "Χάρης Αλεξίου" and `joga` finds "Jóga" — the same two strings
+have always matched everywhere the app does a library lookup. Shouting in
+Greek already worked and needed no change: JS applies Unicode's final-sigma
+rule, so `ΧΑΡΗΣ` lowercases to `χαρης` with ς.
+
+**Search results are a sortable table.** Columns for **Name, Size, Files,
+Seeders, Leechers and Source**, each header a click away from ordering by it —
+click again to reverse. Choosing a torrent is a comparison across four numbers
+at once (300 MB with 2 seeders against 900 MB with 400), and a sentence per row
+made you hold each one in your head; the numbers are right-aligned so their
+digits line up down the list. Seeders descending is still the default order,
+and the line under the name now carries only what has no column of its own —
+which facility found it, and the site the release sits on.
+
+Two honest gaps. **Files is blank for most rows**: apibay (The Pirate Bay)
+reports a file count, an HTML scrape almost never does, and qBittorrent's own
+search API has no such field — the only way to know is to add the torrent and
+fetch its metadata, which a search result must not do. And a row that reported
+no size or swarm shows an em dash rather than a zero, and sinks to the bottom
+whichever way you sort, so sorting ascending by Files doesn't open the list
+with every row that hasn't got one.
+
+**A filter row under the search box.** Sixty results spanning a 4 MB single
+and a 40 GB concert film, sorted only by seeders, used to leave re-typing the
+query as the only way to narrow them — another round of scrapes for a list you
+already had. There is now a live text filter (matching the release name, the
+indexer and the site) plus pickers for minimum seeders, size band and source.
+Nothing is re-fetched; it is a second pass over the rows on screen, so it
+narrows as you type. The count says `1 of 2 results` while it is hiding
+anything, and filtering everything out says so and offers **Clear filters**
+rather than reading as "nothing found". Rows that report no size or no swarm
+fail a band rather than passing it — "20+ seeders" is a claim they can't make.
+The text box clears on each new search; the three pickers persist, because
+"healthy, album-sized, from the websites" is a mode you stay in for a run of
+searches. There is deliberately no sort control: the list is seeder-sorted
+because for a torrent that is the difference between a download and a dead
+entry.
+
+**The Search tab says which facility found each result.** The tab merges two
+sources into one seeder-sorted list — qBittorrent's own search plugins and
+this plugin's web indexer sweep — and both cover the same trackers, so
+"piratebay" and "The Pirate Bay" were indistinguishable rows. Every result now
+reads `via qBittorrent plugin <name>` or `via web indexer <name>`, the spinner
+names both halves and narrows as each finishes (`Searching 4 qBittorrent
+plugins and 3 websites…`), and the results header splits the count
+(`12 results — 5 from qBittorrent, 7 from websites`) so a facility that
+returned nothing is visible instead of reading as a thin query.
+
 ## 0.39.0
 
 **The remove confirmation no longer blanks the view behind it.** The host

@@ -52,6 +52,7 @@ function run(stored, opts) {
   const ctxActions = {};
   const navigations = [];
   const posts = [];
+  const opened = [];
   const played = [];
   const resolvers = {};
   // A thunk, so a test can change what the server serves mid-run (qBittorrent
@@ -100,7 +101,7 @@ function run(stored, opts) {
                   : "Ok.";
         return { status: 200, ok: true, text: async () => body, json: async () => JSON.parse(body) };
       },
-      openUrl: async () => {},
+      openUrl: async (url) => { opened.push(url); },
     },
     collections: { getLocalCollections: async () => [], resync: async () => {} },
     playback: {
@@ -115,7 +116,7 @@ function run(stored, opts) {
   const g = Object.freeze({});
   const plugin = new Function("api", "window", "globalThis", "self", "document", SOURCE)(undefined, g, g, g, g);
   plugin.activate(api);
-  return { plugin, views, settingsViews, handlers, ctxActions, navigations, api, posts, played, resolvers };
+  return { plugin, views, settingsViews, handlers, ctxActions, navigations, api, posts, opened, played, resolvers };
 }
 
 // Let the activate-time promise chain (settings read → version probe → poll)
@@ -713,6 +714,37 @@ test("removing a multi-row selection confirms once, by count", async () => {
     // Cancel must be the harmless side — the host fires it on Escape too.
     assert.equal(confirm.cancelAction, "qbt:delete-cancel");
     handlers["qbt:delete-cancel"]();
+  });
+});
+
+test("removing keeps the files unless the user ticks the box", async () => {
+  await withPlugin(async ({ views, handlers, posts }) => {
+    handlers["qbt:delete-ask"]({ selectedIds: ["aaa"] });
+    await settle();
+    const confirm = walk(last(views)).find((n) => n.type === "confirm");
+    // The destructive reading is an opt-in inside the dialog, and it starts
+    // OFF — qBittorrent deletes outright, with no Recycle Bin behind it.
+    assert.match(confirm.checkboxLabel, /delete the downloaded files/i);
+    assert.ok(!confirm.checkboxDefault);
+
+    // Confirming without the tick is the old behaviour: the transfer stops,
+    // the files stay.
+    handlers["qbt:delete-confirm"]({});
+    await settle();
+    let post = posts.filter((p) => /torrents\/delete/.test(p.url)).pop();
+    assert.ok(post, "nothing was deleted");
+    assert.equal(post.form.hashes, "aaa");
+    assert.equal(post.form.deleteFiles, "false");
+
+    // Ticking it is the only thing that passes deleteFiles=true, and it rides
+    // in on the action payload the host merges the checkbox state into.
+    handlers["qbt:delete-ask"]({ selectedIds: ["bbb"] });
+    await settle();
+    handlers["qbt:delete-confirm"]({ checkboxChecked: true });
+    await settle();
+    post = posts.filter((p) => /torrents\/delete/.test(p.url)).pop();
+    assert.equal(post.form.hashes, "bbb");
+    assert.equal(post.form.deleteFiles, "true");
   });
 });
 
@@ -1846,11 +1878,12 @@ test("a file row offers only what it can actually do", async () => {
     const byId = Object.fromEntries(
       nodes.find((n) => n.type === "track-row-list").items.map((i) => [i.id, i.actions]),
     );
-    // Show folder rides along on the downloaded one — it is about the file, not
-    // about whether the file is playable — and stays off the two that have no
-    // bytes on disk to reveal.
+    // Show folder rides along wherever there are bytes on disk to reveal — the
+    // finished file AND the one still downloading (its folder exists now) — but
+    // stays off the skipped one, which has nothing on disk. The fetch choice
+    // still leads on the partial row, so its double-click is unchanged.
     assert.deepEqual(byId["0"], ["qbt:play-file", "qbt:enqueue-file", "qbt:file-folder"]);
-    assert.deepEqual(byId["1"], ["qbt:file-skip"]);
+    assert.deepEqual(byId["1"], ["qbt:file-skip", "qbt:file-folder"]);
     assert.deepEqual(byId["2"], ["qbt:file-download"]);
   }, { files: () => MIX });
 });
@@ -1951,7 +1984,217 @@ test("a search names its facilities, opens on title clicks, and keeps indexer fa
     // the rest of the row selects; Download stays a deliberate button press.
     assert.equal(list.openOnClick, "title");
     assert.equal(list.items[0].action, "qbt:search-view");
-    // Who found it — the site alone can't say which indexer is working.
-    assert.match(list.items[0].subtitle, /via jackett/);
+    // Who found it, in two halves: the indexer in its own sortable column (the
+    // site alone can't say which of your indexers is working), the facility in
+    // the line underneath (the indexer alone can't say which of the two ran it).
+    assert.equal(list.items[0].cells.source, "qBT · jackett");
+    // One line per result — the facility rides the Source cell's prefix, so
+    // there is nothing left for a subtitle to say.
+    assert.equal(list.items[0].subtitle, undefined);
+    // The table itself: the six columns, ordered by seeders until told otherwise.
+    assert.deepEqual(list.columns.map((c) => c.id), ["size", "files", "added", "seeders", "leechers", "source"]);
+    assert.equal(list.showHeader, true);
+    assert.equal(list.sortBy, "seeders");
+    assert.equal(list.sortDir, "desc");
+    // …and the header owns up to which facility the results came from: the web
+    // sweep ran alongside qBittorrent here and returned nothing, which a bare
+    // "1 results" would have hidden.
+    assert.ok(
+      nodes.some((n) => /^1 results — all from qBittorrent/.test(String(n.content || ""))),
+      "no source breakdown in the results header"
+    );
+  }, undefined, { onFetch });
+});
+
+test("the engine summary is collapsed, and explains a search that found nothing", async () => {
+  // The case it exists for: a plugin that reported a CONFIGURATION ERROR. Those
+  // arrive as fake result rows (-1 size and swarm) which are never rendered as
+  // torrents — so before this panel, "0 results" and "your indexer is broken"
+  // looked identical on screen and the reason was in the console only.
+  const results = {
+    status: "Stopped",
+    results: [
+      { fileName: "invalid credentials — check your API key", fileUrl: "https://jackett/help", fileSize: -1, nbSeeders: -1, nbLeechers: -1, engineName: "jackett" },
+    ],
+  };
+  const onFetch = (url) =>
+    url.includes("/search/plugins") ? JSON.stringify([{ name: "jackett", enabled: true }])
+      : url.includes("/search/start") ? JSON.stringify({ id: 7 })
+        : url.includes("/search/results") ? JSON.stringify(results)
+          : null;
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:search"]({ query: "artist album" });
+    await settle();
+    await settle();
+    const nodes = () => walk(last(views));
+    const toggle = nodes().find((n) => n.action === "qbt:engine-summary-toggle");
+    assert.ok(toggle, "no engine summary");
+    // Collapsed by default: the count and the failure tally, nothing else.
+    // Both facilities are in the roster — the web sweep ran here too — so the
+    // count is every engine asked, not just qBittorrent's.
+    assert.match(toggle.label, /6 search engines/);
+    assert.match(toggle.label, /· \d+ failed/);
+    assert.ok(!nodes().some((n) => /check your API key/.test(String(n.content || ""))), "the panel was open");
+
+    handlers["qbt:engine-summary-toggle"]();
+    await settle();
+    // Open, the indexer's own words are there — the failure a result row must
+    // never be allowed to look like.
+    assert.ok(nodes().some((n) => /jackett .* failed — invalid credentials/.test(String(n.content || ""))));
+    // Each web indexer's response code is on its own row — the harness answers
+    // 403 for one of them and serves the rest.
+    assert.ok(nodes().some((n) => /HTTP \d{3}/.test(String(n.content || ""))), "no response codes");
+    // …and the panel says once why the qBittorrent rows carry none.
+    assert.ok(nodes().some((n) => /no response code of theirs/.test(String(n.content || ""))));
+    // The rows are grouped by facility, each group headlining its own tally —
+    // the two halves fail differently and are fixed in different places.
+    const sections = nodes().filter((n) => n.type === "section");
+    assert.ok(sections.some((s) => /^qBittorrent plugins — /.test(String(s.title))), "no qbt group");
+    assert.ok(sections.some((s) => /^Web indexers — /.test(String(s.title))), "no web group");
+    handlers["qbt:engine-summary-toggle"]();
+    await settle();
+    assert.ok(!nodes().some((n) => /check your API key/.test(String(n.content || ""))));
+  }, undefined, { onFetch });
+});
+
+test("a web indexer's row links to the exact search it ran", async () => {
+  // The one check a response code can't make on its own: a 403 or an empty 200
+  // is either the site blocking us or the definition having gone stale, and
+  // opening the same URL in a browser tells the two apart in one click.
+  const onFetch = (url) =>
+    url.includes("/search/plugins") ? JSON.stringify([{ name: "jackett", enabled: true }])
+      : url.includes("/search/start") ? JSON.stringify({ id: 7 })
+        : url.includes("/search/results") ? JSON.stringify({ status: "Stopped", results: [] })
+          : null;
+  await withPlugin(async ({ views, handlers, opened }) => {
+    handlers["qbt:search"]({ query: "bjork homogenic" });
+    await settle();
+    await settle();
+    handlers["qbt:engine-summary-toggle"]();
+    await settle();
+    const buttons = walk(last(views)).filter((n) => n.action === "qbt:open-engine-search");
+    // One per bundled WEB indexer and no more: a qBittorrent plugin's request
+    // is made inside qBittorrent, so there is no URL of ours to offer.
+    assert.equal(buttons.length, loadPlugin()._WEB_DEFS.length);
+    const urls = buttons.map((b) => b.data.url);
+    // The URL carries the query as it was actually sent, percent-encoded.
+    assert.ok(urls.some((u) => /apibay\.org.*bjork%20homogenic/.test(u)), urls.join(" "));
+
+    handlers["qbt:open-engine-search"](buttons[0].data);
+    await settle();
+    assert.deepEqual(opened, [buttons[0].data.url]);
+    // A button with nothing behind it must not reach the opener.
+    handlers["qbt:open-engine-search"]({});
+    await settle();
+    assert.equal(opened.length, 1);
+  }, undefined, { onFetch });
+});
+
+test("a header click re-orders the table without re-searching", async () => {
+  const MB = 1024 * 1024;
+  const results = {
+    status: "Stopped",
+    results: [
+      { fileName: "big but dead", fileUrl: "https://x/a.torrent", fileSize: 900 * MB, nbSeeders: 2, nbLeechers: 0, engineName: "jackett", siteUrl: "https://rutracker.org/t/1" },
+      { fileName: "small but alive", fileUrl: "https://x/b.torrent", fileSize: 120 * MB, nbSeeders: 400, nbLeechers: 9, engineName: "jackett", siteUrl: "https://rutracker.org/t/2" },
+    ],
+  };
+  let starts = 0;
+  const onFetch = (url) => {
+    if (url.includes("/search/plugins")) return JSON.stringify([{ name: "jackett", enabled: true }]);
+    if (url.includes("/search/start")) { starts++; return JSON.stringify({ id: 7 }); }
+    if (url.includes("/search/results")) return JSON.stringify(results);
+    return null;
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:search"]({ query: "artist album" });
+    await settle();
+    await settle();
+    const list = () => walk(last(views)).find((n) => n.type === "track-row-list");
+    const order = () => list().items.map((r) => r.title);
+    // Seeders descending until told otherwise — for a torrent that is the
+    // difference between a download and a dead entry.
+    assert.deepEqual(order(), ["small but alive", "big but dead"]);
+
+    handlers["qbt:result-sort"]({ column: "size", direction: "desc" });
+    await settle();
+    assert.deepEqual(order(), ["big but dead", "small but alive"]);
+    // The header shows which column it is on, so the order is never a mystery.
+    assert.equal(list().sortBy, "size");
+    assert.equal(list().sortDir, "desc");
+
+    // Clicking the sorted column flips it; the host's suggested direction is
+    // only a suggestion, and the plugin owns the state either way.
+    handlers["qbt:result-sort"]({ column: "size", direction: "asc" });
+    await settle();
+    assert.deepEqual(order(), ["small but alive", "big but dead"]);
+    assert.equal(list().sortDir, "asc");
+
+    // A fresh TEXT column opens at A, not Z — "desc" is only the right default
+    // for a number.
+    handlers["qbt:result-sort"]({ column: "name", direction: "desc" });
+    await settle();
+    assert.equal(list().sortDir, "asc");
+    assert.deepEqual(order(), ["big but dead", "small but alive"]);
+
+    // An unknown column is ignored rather than blanking the order.
+    handlers["qbt:result-sort"]({ column: "nonsense" });
+    await settle();
+    assert.equal(list().sortBy, "name");
+    assert.equal(starts, 1, "sorting re-ran the search");
+  }, undefined, { onFetch });
+});
+
+test("the results filter row narrows what's on screen without re-searching", async () => {
+  const MB = 1024 * 1024;
+  const results = {
+    status: "Stopped",
+    results: [
+      { fileName: "Artist - Album [FLAC]", fileUrl: "https://x/a.torrent", fileSize: 400 * MB, nbSeeders: 120, nbLeechers: 2, engineName: "jackett", siteUrl: "https://rutracker.org/t/1" },
+      { fileName: "Artist - Album [MP3]", fileUrl: "https://x/b.torrent", fileSize: 120 * MB, nbSeeders: 3, nbLeechers: 1, engineName: "jackett", siteUrl: "https://rutracker.org/t/2" },
+    ],
+  };
+  let starts = 0;
+  const onFetch = (url) => {
+    if (url.includes("/search/plugins")) return JSON.stringify([{ name: "jackett", enabled: true }]);
+    if (url.includes("/search/start")) { starts++; return JSON.stringify({ id: 7 }); }
+    if (url.includes("/search/results")) return JSON.stringify(results);
+    return null;
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["qbt:search"]({ query: "artist album" });
+    await settle();
+    await settle();
+    const rows = () => (walk(last(views)).find((n) => n.type === "track-row-list") || { items: [] }).items;
+    assert.equal(rows().length, 2);
+
+    // The strip sits under the search box, and its text field is a LIVE filter
+    // (no buttonLabel) — it narrows as you type rather than on a press.
+    const strip = walk(last(views)).find((n) => n.action === "qbt:result-filter");
+    assert.ok(strip, "no results filter box");
+    assert.ok(!strip.buttonLabel, "the filter box waits for a button press");
+
+    handlers["qbt:result-filter"]({ query: "flac" });
+    await settle();
+    assert.deepEqual(rows().map((r) => r.title), ["Artist - Album [FLAC]"]);
+    // The count owns up to hiding rows, and NOTHING was re-fetched — this is a
+    // second pass over results already in hand.
+    assert.ok(walk(last(views)).some((n) => /^1 of 2 results/.test(String(n.content || ""))));
+    assert.equal(starts, 1, "filtering re-ran the search");
+
+    handlers["qbt:result-filter"]({ query: "" });
+    handlers["qbt:result-seeders"]({ value: "100" });
+    await settle();
+    assert.deepEqual(rows().map((r) => r.title), ["Artist - Album [FLAC]"]);
+
+    // Filtered down to nothing is not "nothing found": the rows are still
+    // there, so the way out offered is the filters, not the query.
+    handlers["qbt:result-size"]({ value: "gt20gb" });
+    await settle();
+    assert.equal(rows().length, 0);
+    assert.ok(walk(last(views)).some((n) => /No result matches these filters/.test(String(n.content || ""))));
+    handlers["qbt:result-filter-clear"]();
+    await settle();
+    assert.equal(rows().length, 2);
   }, undefined, { onFetch });
 });

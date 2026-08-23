@@ -89,6 +89,14 @@ test("comments, doctype, and processing instructions vanish", () => {
 test("entities decode in text and attributes; astral entities degrade", () => {
   assert.equal(decode("Tom &amp; Jerry &lt;3 &quot;x&quot; &#65; &#x42; &nbsp;end"), 'Tom & Jerry <3 "x" A B  end');
   assert.equal(decode("&#128512;"), "&#128512;"); // astral: kept literal, documented
+  // The typographic and accented entities that litter release names — a raw
+  // "&ndash;" in a torrent title was the report that prompted this.
+  assert.equal(decode("Sigur R&oacute;s &ndash; Takk"), "Sigur Rós – Takk");
+  assert.equal(decode("Bj&ouml;rk &mdash; Caf&eacute; 100&deg; &frac12; &hellip;"), "Björk — Café 100° ½ …");
+  // Case-sensitive where it matters: &Eacute; is É, &eacute; is é.
+  assert.equal(decode("&Eacute;p&eacute;e"), "Épée");
+  // An entity we don't know is left exactly as-is, never blanked or guessed.
+  assert.equal(decode("keep &madeupentity; here"), "keep &madeupentity; here");
   const root = parseHtml('<a href="/x?a=1&amp;b=2">A &amp; B</a>');
   const a = first(root, "a");
   assert.equal(a.attrs.href, "/x?a=1&b=2");
