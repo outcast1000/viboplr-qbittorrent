@@ -20,6 +20,8 @@ Declines (not connected, files not reachable from this machine, not a qbt URI)
 stay quiet nulls, matching the metadata resolver; everything past that throws
 its actual reason so the modal can say it instead of the generic line.
 
+## 0.40.0
+
 **Search results have an "Added" column.** Sortable like the rest, showing a
 relative age ("3 days ago") rather than an exact timestamp — what you actually
 ask of a download. All five bundled indexers report it, each in its own format
