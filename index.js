@@ -1547,6 +1547,19 @@ function parseQbtUri(id) {
   return { hash: hash, index: index };
 }
 
+// A download resolve's uri arrives WITH its scheme ("qbt://<hash>/<index>"),
+// unlike the stream resolver's id, which the host hands over scheme-stripped.
+// One parser accepts both shapes so the two paths can't drift. A FOREIGN
+// scheme is rejected outright — parseQbtUri alone would happily read
+// "ytdlp://x/3" as hash "ytdlp://x", and resolving someone else's URI can
+// only ever produce the wrong file.
+function qbtRefFromDownloadUri(uri) {
+  var s = String(uri || "");
+  if (s.toLowerCase().indexOf("qbt://") === 0) s = s.substring(6);
+  else if (s.indexOf("://") >= 0) return null;
+  return parseQbtUri(s);
+}
+
 // A magnet's info hash, when it is written as hex (40 chars for v1, 64 for v2).
 //
 // Base32 magnets exist and are NOT converted here: qBittorrent reports hashes in
@@ -8155,6 +8168,73 @@ function resolveDownloadByMetadata(title, artistName, albumName, durationSecs, f
   return discoveryEnabled ? discoverAndFetch(want, format) : Promise.resolve(null);
 }
 
+// The exact file behind a qbt:// track — "download what is playing". Unlike
+// resolveDownloadByMetadata this never searches or scores: the URI names one
+// file in one torrent, so serve that file or say why it can't be served.
+// `format` is ignored — the file is handed over as-is, whatever it is.
+//
+// Declines (null) mirror the metadata resolver's; everything past parsing
+// THROWS its reason instead, because the host shows a thrown message verbatim
+// where a null becomes the generic "could not resolve this track".
+function resolveDownloadByUri(uri, format) {
+  if (!connected || !baseUrl) {
+    dbg("download:uri: not connected to qBittorrent — decline");
+    return Promise.resolve(null);
+  }
+  if (!filesAreReachable()) {
+    api.log("warn", "download resolve declined: qBittorrent's files aren't reachable from this machine", "qbittorrent");
+    dbg("download:uri: qBittorrent's files aren't reachable on this machine — decline");
+    return Promise.resolve(null);
+  }
+  var ref = qbtRefFromDownloadUri(uri);
+  if (!ref) {
+    dbg("download:uri: not a qbt uri — decline");
+    return Promise.resolve(null);
+  }
+  // Same startup case as the stream resolver: a queue restored before the
+  // first poll refers to torrents the cache hasn't seen yet.
+  var torrent = torrents[ref.hash];
+  var ensureTorrent = torrent ? Promise.resolve(torrent) : refresh().then(function () { return torrents[ref.hash]; });
+  return ensureTorrent.then(function (t) {
+    if (!t) throw new Error("That torrent is no longer in qBittorrent");
+    // A fresh list, not the cache — the branch below reads `progress`, which
+    // a cached list can misreport in either direction mid-download.
+    return fetchFilesQuiet(ref.hash).then(function (files) {
+      var file = null;
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].index === ref.index) { file = files[i]; break; }
+      }
+      if (!file) throw new Error("That file is no longer in the torrent");
+      if (numOr(file.progress, 0) >= 1) {
+        dbg("download:uri: file is fully downloaded — serving it");
+        reportPct(100);
+        return downloadResultFor(t, file);
+      }
+      // The same select-and-wait as tier 2, minus the tag check: verification
+      // guards a metadata MATCH against being the wrong song, and a URI is not
+      // a match — it names the very file the user is playing.
+      dbg("download:uri: file is " + Math.round(numOr(file.progress, 0) * 100) + "% here — selecting it and waiting");
+      reportPct(5);
+      var dbgTick = dbgEvery10("download:uri: downloading —");
+      var ensureWanted = numOr(file.priority, 1) === 0 ? postFilePriority(ref.hash, [file.index], 1) : Promise.resolve();
+      return ensureWanted
+        .then(function () {
+          return isPaused(t) ? postAction(startEndpoint(), [ref.hash], "Starting the torrent") : null;
+        })
+        .then(function () {
+          return waitForFileDownload(ref.hash, ref.index, function (frac) {
+            reportPct(5 + 94 * frac);
+            dbgTick(frac);
+          });
+        })
+        .then(function (done) {
+          reportPct(100);
+          return downloadResultFor(torrents[ref.hash] || t, done);
+        });
+    });
+  });
+}
+
 function registerDownloadProvider() {
   if (!api.downloads || typeof api.downloads.onResolveByMetadata !== "function") return;
 
@@ -8167,6 +8247,15 @@ function registerDownloadProvider() {
   // "Upgrade with qBittorrent" context-menu item, which lands on the Music
   // Search tab with the track's title/artist/album prefilled.
   api.downloads.onResolveByMetadata("qbt-download", resolveDownloadByMetadata);
+
+  // By URI is NOT optional polish: for a track playing from qbt:// the host
+  // resolves the download by URI and never falls back to metadata
+  // (decideDownload — a plugin source with a native URI is by-URI, full stop),
+  // so without this handler the download button on a playing torrent file
+  // dead-ends with the generic "could not resolve" while the file sits on disk.
+  if (typeof api.downloads.onResolveByUri === "function") {
+    api.downloads.onResolveByUri("qbt-download", resolveDownloadByUri);
+  }
 }
 
 function registerStreamResolver() {
@@ -9512,6 +9601,8 @@ return {
   _baseName: baseName,
   _qbtUri: qbtUri,
   _parseQbtUri: parseQbtUri,
+  _qbtRefFromDownloadUri: qbtRefFromDownloadUri,
+  _resolveDownloadByUri: resolveDownloadByUri,
   _playableFiles: playableFiles,
   _partitionByKind: partitionByKind,
   _matchesFilter: matchesFilter,

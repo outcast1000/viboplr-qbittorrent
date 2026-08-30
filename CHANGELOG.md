@@ -1,6 +1,24 @@
 # Changelog
 
-## 0.40.0
+## 0.41.0
+
+**Downloading the track you're playing works now.** The host resolves a
+download for a track playing from `qbt://` **by its URI** — never by metadata
+(a plugin source with a native URI takes the by-URI path, full stop) — and
+this plugin only registered a by-metadata resolver. So the Download button on
+a playing torrent file opened the modal, dead-ended with the generic
+"Provider could not resolve this track for download", and the file it wanted
+was sitting on disk the whole time.
+
+There is a `downloads.onResolveByUri` handler now, and it is the *exact*
+counterpart of playback: the URI names one file in one torrent, so there is no
+search, no scoring, and no tag verification — verification guards a metadata
+match against being the wrong song, and a URI is not a match. A finished file
+is served immediately; a partial one gets the same select-and-wait treatment
+as an existing-torrent metadata resolve (with live progress in the modal).
+Declines (not connected, files not reachable from this machine, not a qbt URI)
+stay quiet nulls, matching the metadata resolver; everything past that throws
+its actual reason so the modal can say it instead of the generic line.
 
 **Search results have an "Added" column.** Sortable like the rest, showing a
 relative age ("3 days ago") rather than an exact timestamp — what you actually

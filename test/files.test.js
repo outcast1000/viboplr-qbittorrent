@@ -223,6 +223,24 @@ test("parseQbtUri rejects anything malformed rather than resolving nonsense", ()
   assert.equal(plugin._parseQbtUri(""), null);
 });
 
+test("qbtRefFromDownloadUri accepts both the scheme'd and stripped shapes", () => {
+  // The download-provider host passes the FULL uri ("qbt://…"), the stream
+  // resolver a stripped id — one parser must read both, or the two paths drift.
+  assert.deepEqual(plugin._qbtRefFromDownloadUri("qbt://abc123/7"), { hash: "abc123", index: 7 });
+  assert.deepEqual(plugin._qbtRefFromDownloadUri("abc123/7"), { hash: "abc123", index: 7 });
+  assert.equal(plugin._qbtRefFromDownloadUri("qbt://abc123"), null);
+  assert.equal(plugin._qbtRefFromDownloadUri("ytdlp://something/3"), null);
+  assert.equal(plugin._qbtRefFromDownloadUri(""), null);
+});
+
+test("resolveDownloadByUri declines with null when not connected", async () => {
+  // The sandbox plugin is never activated, so `connected` is false. The
+  // decline must be a null (host: "try nothing else, hide quietly"), not a
+  // throw (host: show the message as a download failure) — same contract as
+  // resolveDownloadByMetadata's decline paths.
+  assert.equal(await plugin._resolveDownloadByUri("qbt://abc123/7", "original"), null);
+});
+
 test("playableFiles offers only finished media", () => {
   // A half-downloaded file opens and then hits EOF partway through, which reads
   // as a corrupt file rather than an incomplete download.
