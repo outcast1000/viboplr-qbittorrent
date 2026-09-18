@@ -2198,3 +2198,239 @@ test("the results filter row narrows what's on screen without re-searching", asy
     assert.equal(rows().length, 2);
   }, undefined, { onFetch });
 });
+
+// --- A search peek is not a torrent -----------------------------------------
+//
+// "View contents" on a search result ADDS the torrent, paused, because that is
+// the only way to read a file list. That add is an implementation detail of
+// reading the result: the torrent must not turn up in the list (or its count,
+// or the badge), and leaving the contents must return to the results and throw
+// it away rather than strand a paused torrent nothing can reach any more.
+
+const PEEK_HASH = "c".repeat(40);
+const PEEK_MAGNET = "magnet:?xt=urn:btih:" + PEEK_HASH + "&dn=Peeked+Release";
+
+function peekRun() {
+  let added = false;
+  const results = {
+    status: "Stopped",
+    results: [
+      { fileName: "Peeked Release [FLAC]", fileUrl: PEEK_MAGNET, fileSize: 100, nbSeeders: 5, nbLeechers: 0, engineName: "jackett" },
+    ],
+  };
+  return {
+    onFetch: (url) => {
+      // The add is what makes qBittorrent report the torrent from here on.
+      if (url.includes("/torrents/add")) added = true;
+      return url.includes("/search/plugins") ? JSON.stringify([{ name: "jackett", enabled: true }])
+        : url.includes("/search/start") ? JSON.stringify({ id: 7 })
+          : url.includes("/search/results") ? JSON.stringify(results)
+            : null;
+    },
+    torrents: () => {
+      if (!added) return TORRENTS;
+      const withPeek = { ...TORRENTS };
+      withPeek[PEEK_HASH] = {
+        hash: PEEK_HASH,
+        name: "Peeked Release [FLAC]",
+        state: "pausedDL",
+        progress: 0,
+        size: 0,
+        total_size: 500 * 1024 * 1024,
+        added_on: 300,
+        category: "viboplr",
+      };
+      return withPeek;
+    },
+  };
+}
+
+async function openPeek(handlers) {
+  handlers["qbt:search"]({ query: "peeked release" });
+  await settle();
+  await settle();
+  handlers["qbt:search-view"]({ itemId: PEEK_MAGNET });
+  await settle();
+  await settle();
+}
+
+test("a peeked search result never joins the torrent list", async () => {
+  const { onFetch, torrents } = peekRun();
+  await withPlugin(async ({ views, handlers }) => {
+    await openPeek(handlers);
+    const nodes = walk(last(views));
+    assert.ok(
+      nodes.some((n) => n.type === "detail-header" && /Peeked Release/.test(n.title || "")),
+      "the contents never opened",
+    );
+    // The tab strip renders above the contents panel, so its count is visible
+    // from here — and it counts the list the user would drop back into.
+    const tabs = nodes.find((n) => n.type === "tabs" && n.action === "qbt:tab");
+    assert.equal(tabs.tabs.find((t) => t.id === "torrents").count, 2, "the peek was counted as a torrent");
+  }, undefined, { onFetch, torrents });
+});
+
+test("Back from a peek returns to the search results and discards the torrent", async () => {
+  const { onFetch, torrents } = peekRun();
+  await withPlugin(async ({ views, handlers, posts }) => {
+    await openPeek(handlers);
+    posts.length = 0;
+    handlers["qbt:close-files"]();
+    await settle();
+    const nodes = walk(last(views));
+    const tabs = nodes.find((n) => n.type === "tabs" && n.action === "qbt:tab");
+    assert.equal(tabs.activeTab, "search", "Back landed somewhere other than the search results");
+    const list = nodes.find((n) => n.type === "track-row-list");
+    assert.ok(list && list.items.some((i) => i.id === PEEK_MAGNET), "the results the peek came from didn't come back");
+    // Nothing downloaded, and the row that could have removed it by hand is
+    // gone with the list — so leaving has to clean it up.
+    const del = posts.find((p) => p.url.includes("/torrents/delete"));
+    assert.ok(del, "the peeked torrent was left behind in qBittorrent");
+    assert.equal(del.form.hashes, PEEK_HASH);
+    assert.equal(del.form.deleteFiles, "false", "a peek must never delete data the user already had");
+  }, undefined, { onFetch, torrents });
+});
+
+test("starting a peeked torrent keeps it: Back then leads to the list that holds it", async () => {
+  const { onFetch, torrents } = peekRun();
+  await withPlugin(async ({ views, handlers, posts }) => {
+    await openPeek(handlers);
+    handlers["qbt:start"]({ hash: PEEK_HASH });
+    await settle();
+    posts.length = 0;
+    handlers["qbt:close-files"]();
+    await settle();
+    const nodes = walk(last(views));
+    const tabs = nodes.find((n) => n.type === "tabs" && n.action === "qbt:tab");
+    assert.equal(tabs.activeTab, "torrents", "a download the user committed to sent them back to the search");
+    assert.ok(!posts.some((p) => p.url.includes("/torrents/delete")), "removed a torrent the user had started");
+    const list = nodes.find((n) => n.type === "track-row-list");
+    assert.ok(list && list.items.some((i) => i.id === PEEK_HASH), "the started torrent never joined the list");
+  }, undefined, { onFetch, torrents });
+});
+
+// --- A file list is only a progress figure while it is current ---------------
+//
+// The list badge sums the torrent's FILE list when it has one, which is more
+// precise than the torrent's own figure. But only the open torrent's list is
+// kept current — every other copy is a snapshot. Looking inside a download and
+// coming back out used to pin its badge to whatever it read at that moment for
+// the rest of the session.
+
+// The two disagree on purpose, so the badge says which one it read: the file
+// list is stuck at 20%, the torrent itself reports 80% downloaded.
+const STALE_FILES = [{ index: 0, name: "01 - First.flac", size: 1000 * 1024 * 1024, progress: 0.2, priority: 1 }];
+const MOVING = {
+  aaa: {
+    hash: "aaa",
+    name: "Some Artist - Album (1998) [FLAC]",
+    state: "downloading",
+    progress: 0.8,
+    completed: Math.round(0.8 * 1000 * 1024 * 1024),
+    size: 1000 * 1024 * 1024,
+    total_size: 1000 * 1024 * 1024,
+    added_on: 200,
+    category: "viboplr",
+  },
+};
+
+// The percentage is baked into the row tile's data-URI SVG — the only place a
+// row states it.
+function tilePercent(imageUrl) {
+  const svg = decodeURIComponent(String(imageUrl || "").replace(/^data:image\/svg\+xml[^,]*,/, ""));
+  const m = /(\d+)%/.exec(svg);
+  return m ? m[1] + "%" : null;
+}
+const rowPercent = (views) => {
+  const list = walk(last(views)).find((n) => n.type === "track-row-list");
+  return list ? tilePercent(list.items[0].imageUrl) : null;
+};
+
+test("a stale file list stops standing in for the torrent's own progress", async () => {
+  await withPlugin(async ({ views, handlers }) => {
+    // Never opened: nothing cached, so the row reads the torrent itself.
+    assert.equal(rowPercent(views), "80%");
+
+    // Look inside and come back out. The list just came from qBittorrent, so
+    // it is the better figure and the badge uses it.
+    handlers["qbt:show-files"]({ itemId: "aaa" });
+    await settle();
+    handlers["qbt:close-files"]();
+    await settle();
+    assert.equal(rowPercent(views), "20%", "a just-read file list should be what the badge counts");
+
+    // Nothing refreshes that copy once the panel is shut, so a minute later it
+    // is a record of the past and the torrent's live bytes answer instead.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60000;
+    try {
+      handlers["qbt:refresh"]();
+      await settle();
+      assert.equal(rowPercent(views), "80%", "the badge is still pinned to the file list it read a minute ago");
+    } finally {
+      Date.now = realNow;
+    }
+  }, undefined, { torrents: MOVING, files: () => STALE_FILES });
+});
+
+// The reported row, exactly: a release added through *View contents* — so its
+// file list was read while the torrent was still empty — left to download, and
+// now seeding. It read "Seeding · 12 files · 286 MB · ratio 0.00" behind a 0%
+// badge, and nothing it ever did moved that number: the badge was counting a
+// file list captured before a byte had arrived.
+const SEED_SIZE = 286 * 1024 * 1024;
+
+function seedFixtures() {
+  let finished = false;
+  return {
+    finish: () => { finished = true; },
+    torrents: () => ({
+      aaa: {
+        hash: "aaa",
+        name: "[Bitsearch.to] The Sound - From the Lions Mouth (1981) [FLAC]",
+        state: finished ? "stalledUP" : "downloading",
+        progress: finished ? 1 : 0,
+        completed: finished ? SEED_SIZE : 0,
+        size: SEED_SIZE,
+        total_size: SEED_SIZE,
+        added_on: 200,
+        category: "viboplr",
+      },
+    }),
+    files: () => {
+      const out = [];
+      for (let i = 0; i < 12; i++) {
+        out.push({ index: i, name: "CD1/" + (i + 1) + " - Track.flac", size: SEED_SIZE / 12, progress: finished ? 1 : 0, priority: 1 });
+      }
+      return out;
+    },
+  };
+}
+
+test("a torrent read while it was empty still reaches 100% once it has seeded", async () => {
+  const fx = seedFixtures();
+  await withPlugin(async ({ views, handlers }) => {
+    // What "View contents" (and "choose which files download") does on the way
+    // in: the file list is fetched and cached with every file at 0%.
+    handlers["qbt:show-files"]({ itemId: "aaa" });
+    await settle();
+    handlers["qbt:close-files"]();
+    await settle();
+    assert.equal(rowPercent(views), "0%");
+
+    // It downloads and starts seeding. Nothing re-reads that cached list —
+    // the torrent's own bytes have to be what the badge counts by now.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 600000;
+    try {
+      fx.finish();
+      handlers["qbt:refresh"]();
+      await settle();
+      const row = walk(last(views)).find((n) => n.type === "track-row-list").items[0];
+      assert.match(row.subtitle, /Seeding/, "fixture no longer describes a seeding torrent");
+      assert.equal(rowPercent(views), "100%", "a finished, seeding torrent is still showing the 0% it was added at");
+    } finally {
+      Date.now = realNow;
+    }
+  }, undefined, { torrents: fx.torrents, files: fx.files });
+});

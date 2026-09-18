@@ -527,9 +527,18 @@ arriving. There is no second *Start download* press, because picking the files
 *is* the decision. **Discard** removes the whole thing and never deletes
 anything from disk.
 
-While a torrent is in that state the list says **Choose files to start** in
-yellow at **0%**, the contents panel puts *Download this file* first, and every
-file reads *Not selected for download*. That labelling is load-bearing: with
+A torrent opened this way is **not in your Torrents list** — it isn't a
+download you have, it's a file list you're reading, so it stays out of the
+list, its count and the sidebar badge. Going **back** (or switching tabs)
+returns you to the search results you came from and discards it; nothing was
+transferred, and looking again is the same click on the same row. Start it, or
+include a file, and it becomes an ordinary download: it joins the list, back
+leads there, and it stays until you remove it.
+
+While a torrent is in that state the contents panel puts *Download this file*
+first, and every file reads *Not selected for download* (a torrent held the
+same way by *Choose which files download* — which does sit in the list — says
+**Choose files to start** in yellow at **0%**). That labelling is load-bearing: with
 nothing selected there is nothing left to want, so **qBittorrent itself reports
 the torrent as 100% complete and starts seeding it**. The plugin never repeats
 that — it isn't counted as Finished, isn't coloured green, isn't announced as a

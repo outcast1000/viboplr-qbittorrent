@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.42.0
+
+**A peeked search result is no longer a torrent you have to clean up.**
+"View contents" on a search result adds the torrent paused — the only way to
+read a file list — but that add is an implementation detail of reading the
+result, and it used to show up as a row in Torrents, in that tab's count and in
+the sidebar badge, with Back dropping you into the list you never asked to be
+in.
+
+Peeks are now excluded from the torrent list entirely, and leaving their
+contents — Back, or switching tabs — returns to the search results and throws
+the peek away (`deleteFiles: false`; a peek downloads nothing, so there is
+nothing to keep, and looking again is the same click on the same row). The
+discard is what makes the hiding safe: a hidden peek that survived would be a
+paused torrent in qBittorrent that nothing in the plugin could reach any more.
+
+The moment a peek becomes a real download — Start, or including a file in an
+armed peek — it stops being a peek: it joins the list, Back leads to that list
+rather than back to the search, and nothing removes it.
+
+**A torrent's percentage stopped moving once you had looked inside it** — and
+for anything added through *View contents* or *choose which files download*, it
+never moved at all: those read the file list on the way in, while the torrent
+is still empty, so the badge sat at 0% through the whole download and kept
+saying 0% next to "Seeding" afterwards.
+
+The list badge sums a torrent's file list when it has one — more precise than the
+torrent's own figure, and the reason a torrent parked with everything
+deselected reads 0% instead of the 100% qBittorrent claims for it. But only the
+open torrent's file list is refreshed (once per poll); every other copy is a
+snapshot of the moment it was fetched. So opening a download's contents and
+coming back out pinned its badge to whatever it read at that moment, for the
+rest of the session — the same happened to any torrent the list filter matched
+files inside.
+
+A cached file list is now only counted while it is current (two polls of
+slack). Past that the torrent's own live byte counts answer instead: less
+precise about files that were downloaded and later deselected, always moving —
+which is the property a progress figure has to have.
+
 ## 0.41.0
 
 **Downloading the track you're playing works now.** The host resolves a

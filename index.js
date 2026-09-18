@@ -148,6 +148,13 @@ var metadataFetching = {};
 // Added only to look inside. Same paused hold, different framing: nothing has
 // been decided, so discarding is the expected outcome, not the exception.
 var peekedTorrents = {};
+// Where a peek came FROM, per hash. A peek started in the Search tab is part of
+// reading a search result, not of managing downloads, so leaving its contents
+// belongs back in the results the user was reading — not in the torrent list
+// they never asked to be in. Cleared the moment the peek becomes a real
+// download (see releasePeek / the Start handlers), because from then on the
+// list IS where the user wants to land.
+var peekOrigin = {};
 // Peeked torrents that are now RUNNING with every file deselected, so that
 // including a file starts it downloading on the spot rather than after a second
 // "Start download" press. See armPeek().
@@ -884,7 +891,7 @@ function mediaIconFor(kind) {
 // parked one reads the truth (usually 0%, or whatever really did land before
 // its files were deselected).
 function torrentIconFor(t) {
-  var fraction = torrentFraction(t, t && knownFiles(t.hash));
+  var fraction = torrentFraction(t, t && progressFiles(t.hash));
   return tileIcon(classifyTorrentMedia(t && t.name), percentLabel(fraction), progressBand(fraction));
 }
 
@@ -2380,6 +2387,11 @@ function visibleTorrents() {
     if (!Object.prototype.hasOwnProperty.call(torrents, hash)) continue;
     var t = torrents[hash];
     if (categoryFilterActive(restrictToCategory, category) && String(t.category || "") !== category) continue;
+    // A peek is not a torrent the user has: it was added, paused, purely to
+    // read a file list, and leaving its contents throws it away again (see
+    // leaveContents). Listing it would put a row the user never asked for into
+    // the list — and count it, badge it and watch it for completion.
+    if (peekedTorrents[hash]) continue;
     list.push(t);
   }
   list.sort(function (a, b) {
@@ -2493,7 +2505,7 @@ function waitForAddedTorrent(knownBefore, expectedHash, nameHint, attempt, maxAt
     });
 }
 
-function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
+function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint, origin) {
   var tries = attempt || 0;
   preparingElapsed = tries;
   var hash = matchAddedTorrent(knownBefore, expectedHash, nameHint);
@@ -2507,7 +2519,7 @@ function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
       return delay(ATTACH_POLL_MS)
         .then(refresh)
         .then(function () {
-          return beginSelection(knownBefore, expectedHash, tries + 1, peek, nameHint);
+          return beginSelection(knownBefore, expectedHash, tries + 1, peek, nameHint, origin);
         });
     }
     preparingAdd = false;
@@ -2536,6 +2548,10 @@ function beginSelection(knownBefore, expectedHash, attempt, peek, nameHint) {
   // A peeked torrent is one the user has not committed to, so the row says
   // "Remove" rather than only offering Start.
   if (peek) peekedTorrents[hash] = true;
+  // Remembered before the tab is switched: the contents panel only renders on
+  // the torrents tab, so getting there is unavoidable — but it is a detour, and
+  // this is what lets Back undo it (see leaveContents).
+  if (peek && origin) peekOrigin[hash] = origin;
   expandedHash = hash;
   activeTab = "torrents";
 
@@ -2719,6 +2735,9 @@ function addTorrentRaw(uri, opts) {
 function addTorrent(source, opts) {
   var uri = String(source || "").trim();
   var peek = !!(opts && opts.peek);
+  // Which tab a peek was started from, so leaving its contents can go back
+  // there. Only a peek has one — an ordinary add belongs in the list.
+  var origin = (opts && opts.origin) || null;
   var holdForSelection = peek || chooseFilesFirst;
   // What the thing is called, for matching it once qBittorrent has it. The
   // search result knows; a magnet carries it as dn.
@@ -2761,7 +2780,7 @@ function addTorrent(source, opts) {
       addOpen = false;
       render();
       return refresh().then(function () {
-        if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint);
+        if (holdForSelection) return beginSelection(knownBefore, expectedHash, 0, peek, nameHint, origin);
         // "Ok." only means qBittorrent ACCEPTED the request. For a URL it then
         // fetches and parses in the background, and a page that isn't a torrent
         // is discarded silently — so the plugin has to check that something
@@ -3222,7 +3241,7 @@ function addSearchResult(id, opts) {
     api.ui.showNotification("Fetching the magnet link from " + siteLabel(r.siteUrl) + "…");
     resolveWebFileUrl(r, webFetchFn)
       .then(function (resolved) {
-        return addTorrent(resolved.fileUrl, { peek: !!(opts && opts.peek), name: resolved.fileName, downloader: downloaderFor(resolved) });
+        return addTorrent(resolved.fileUrl, { peek: !!(opts && opts.peek), origin: opts && opts.origin, name: resolved.fileName, downloader: downloaderFor(resolved) });
       })
       .catch(function (e) {
         console.error("qBittorrent: could not resolve the result's magnet link:", e);
@@ -3230,7 +3249,7 @@ function addSearchResult(id, opts) {
       });
     return;
   }
-  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), name: r.fileName, downloader: downloaderFor(r) });
+  addTorrent(r.fileUrl, { peek: !!(opts && opts.peek), origin: opts && opts.origin, name: r.fileName, downloader: downloaderFor(r) });
 }
 
 // --- Library import ---------------------------------------------------------
@@ -3347,6 +3366,7 @@ function fetchFiles(hash) {
     })
     .then(function (list) {
       filesByHash[hash] = parseFileList(list);
+      filesFetchedAt[hash] = Date.now();
       rememberFileNames(hash, filesByHash[hash]);
       // Tags for this torrent's finished media, once, in the background. The
       // user is looking at this file list — reading the tags now is what makes
@@ -3427,6 +3447,9 @@ function refreshOpenFiles() {
     })
     .then(function (list) {
       var next = parseFileList(list);
+      // Stamped whether or not anything changed: the list was just read, so it
+      // is current — that is what the freshness check below asks about.
+      filesFetchedAt[hash] = Date.now();
       // Only re-render when something actually moved. The panel redraws on
       // every poll anyway, but rebuilding the row list — and its tiles — for an
       // unchanged list is work for nothing.
@@ -3524,6 +3547,9 @@ function releasePeek(hash) {
   delete armedPeek[hash];
   delete pendingSelection[hash];
   delete peekedTorrents[hash];
+  // It is a download the user chose now, so its contents lead back to the list
+  // that holds it rather than to the search results it came from.
+  delete peekOrigin[hash];
   return actOn(startEndpoint(), [hash], "Starting the download");
 }
 
@@ -3599,6 +3625,33 @@ function knownFiles(hash) {
   return filesByHash[hash] || matchFilesByHash[hash] || null;
 }
 
+// When each cached list was READ from qBittorrent. Only the torrent whose
+// contents are open is kept current (refreshOpenFiles, once per poll); every
+// other entry is a snapshot of the moment it was fetched and then sits there
+// for the rest of the session.
+var filesFetchedAt = {};
+
+// A file list is only a PROGRESS figure while it is current. Summing a stale
+// one pinned a downloading torrent's badge to whatever it read when the user
+// last looked inside it — the file list said 20% for as long as the app ran
+// while the download went to 80%. Two polls of slack, so the open torrent's
+// list (refreshed every poll) always qualifies and a single slow or failed
+// refresh doesn't flip the number back and forth.
+function filesAreFresh(hash) {
+  var at = filesFetchedAt[hash];
+  if (!at) return false;
+  return Date.now() - at <= Math.max(2 * pollMs, 6000);
+}
+
+// The file list to MEASURE a torrent with, as opposed to the one to DISPLAY.
+// Null means "ask the torrent itself" — torrentFraction then reads the live
+// completed/total_size bytes, which every poll updates. Less precise about
+// files that were downloaded and later deselected; always moving, which is the
+// property a progress figure has to have.
+function progressFiles(hash) {
+  return filesAreFresh(hash) ? knownFiles(hash) : null;
+}
+
 var matchFilesInFlight = {};
 var MATCH_FILES_PER_CYCLE = 6;
 
@@ -3624,6 +3677,7 @@ function fetchMatchFiles(hash) {
   return fetchFilesQuiet(hash)
     .then(function (files) {
       matchFilesByHash[hash] = files;
+      filesFetchedAt[hash] = Date.now();
       render();
     })
     .catch(function (e) {
@@ -4221,9 +4275,11 @@ function deleteTorrents(hashes, deleteFiles) {
         delete pendingSelection[list[i]];
         delete peekedTorrents[list[i]];
         delete filesByHash[list[i]];
+        delete filesFetchedAt[list[i]];
         delete fileCountByHash[list[i]];
         delete armedPeek[list[i]];
         delete fileFilters[list[i]];
+        delete peekOrigin[list[i]];
         // The contents panel is showing a torrent that no longer exists.
         if (expandedHash === list[i]) expandedHash = null;
       }
@@ -4583,7 +4639,7 @@ function fileMatchItems(entries, opts) {
     if (!knownFiles(t.hash)) unread++;
     // The torrent's own figure, for rows whose file is not known yet — once per
     // torrent rather than once per row.
-    var torrentDone = torrentFraction(t, knownFiles(t.hash));
+    var torrentDone = torrentFraction(t, progressFiles(t.hash));
     for (var j = 0; j < m.length; j++) {
       if (rows.length >= MATCH_ROWS_TOTAL) {
         overflow = true;
@@ -6027,6 +6083,45 @@ function openTorrentContents(hash) {
   }
   render();
   ensureFiles(hash);
+}
+
+// Send the view back where a peek was started from. Only a peek has an origin
+// (see peekOrigin), so for an ordinary torrent this does nothing and the panel
+// closes onto the list, as it always has.
+function returnFromPeek(hash) {
+  var back = hash && peekOrigin[hash];
+  delete peekOrigin[hash];
+  if (back) activeTab = back;
+}
+
+// Throw a peek away: the torrent was added paused only so its file list could
+// be read, and `deleteFiles` is false because a peek downloads nothing — this
+// must never become a route to deleting data the user already had.
+function discardPeek(hash) {
+  if (!hash) return;
+  returnFromPeek(hash);
+  delete pendingSelection[hash];
+  delete peekedTorrents[hash];
+  delete metadataFetching[hash];
+  delete armedPeek[hash];
+  if (expandedHash === hash) expandedHash = null;
+  deleteTorrents([hash], false);
+}
+
+// Leaving a torrent's contents. A peek does not survive it: it is hidden from
+// the torrent list (visibleTorrents), so keeping it would strand a paused
+// torrent in qBittorrent that nothing in the plugin can reach any more —
+// and nothing was downloaded, so there is nothing to keep. Looking again is
+// the same click on the same search row.
+function leaveContents() {
+  var hash = expandedHash;
+  expandedHash = null;
+  if (hash && peekedTorrents[hash]) {
+    discardPeek(hash);
+    return;
+  }
+  returnFromPeek(hash);
+  render();
 }
 
 // Torrent actions now arrive from two shapes: the contents panel's buttons send
@@ -8828,6 +8923,10 @@ function registerActions() {
     // pre-consolidation session can still name one of them; they all mean the
     // single list now, and falling through would leave a blank tab strip.
     if (id === "downloading" || id === "completed" || id === "all") id = "torrents";
+    // Switching tabs leaves the contents that were open, and a peek does not
+    // survive being left — same reasoning as Back. The tab the user asked for
+    // still wins over the peek's own origin.
+    if (expandedHash && peekedTorrents[expandedHash]) leaveContents();
     activeTab = id;
     render();
   });
@@ -8933,7 +9032,9 @@ function registerActions() {
     if (ids.length > 1) {
       api.ui.showNotification("Showing what's inside the first one — contents open one torrent at a time");
     }
-    addSearchResult(ids[0], { peek: true });
+    // The tab this was fired from is where Back leads — the contents of a
+    // search result belong to reading that result.
+    addSearchResult(ids[0], { peek: true, origin: activeTab });
   });
 
   api.ui.onAction("qbt:start", function (data) {
@@ -8944,21 +9045,13 @@ function registerActions() {
       delete pendingSelection[hashes[i]];
       delete peekedTorrents[hashes[i]];
       delete armedPeek[hashes[i]];
+      delete peekOrigin[hashes[i]];
     }
     actOn(startEndpoint(), hashes, hashes.length === 1 ? "Starting the torrent" : "Starting the torrents");
   });
 
   api.ui.onAction("qbt:discard-peek", function (data) {
-    var hash = hashOf(data);
-    if (!hash) return;
-    delete pendingSelection[hash];
-    delete peekedTorrents[hash];
-    delete metadataFetching[hash];
-    delete armedPeek[hash];
-    if (expandedHash === hash) expandedHash = null;
-    // deleteFiles is false: a peek downloads no content, and this must never be
-    // a route to deleting data the user already had.
-    deleteTorrents([hash], false);
+    discardPeek(hashOf(data));
   });
 
   api.ui.onAction("qbt:start-selected", function (data) {
@@ -8966,6 +9059,7 @@ function registerActions() {
     if (!hash) return;
     delete pendingSelection[hash];
     delete peekedTorrents[hash];
+    delete peekOrigin[hash];
     var files = filesByHash[hash] || [];
     var kept = 0;
     for (var i = 0; i < files.length; i++) {
@@ -9004,8 +9098,7 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:close-files", function () {
-    expandedHash = null;
-    render();
+    leaveContents();
   });
 
   api.ui.onAction("qbt:import", function (data) {
