@@ -198,7 +198,11 @@ var categoryEnsured = false;
 var previousCategory = "";
 
 // UI.
-var activeTab = "torrents";
+// Search is where the view opens. Finding something is what people come here to
+// do; the torrent list is what they check on afterwards, and it announces
+// itself anyway — the tab's count, the sidebar badge, and every add switches to
+// it. Session-only, like every other tab choice here.
+var activeTab = "search";
 var pollTimer = null;
 var stopped = false;
 // The torrents tab's filter box. One string, because there is one list — it is
@@ -5106,13 +5110,18 @@ function render() {
     type: "tabs",
     activeTab: activeTab,
     action: "qbt:tab",
+    // Search first: finding something is what people come to this view to do,
+    // and the torrent list is what they check on afterwards. The landing tab is
+    // still Torrents, which is a separate choice from the order.
     tabs: [
-      { id: "torrents", label: "Torrents", count: list.length },
       { id: "search", label: "Search" },
       // The tab id stays "debug" — the qbt:debug-* action ids, tests and
       // scrollKey all hang off it; only the user-facing name changed when the
       // workbench became the landing surface for "Upgrade with qBittorrent".
+      // Second because it is the other way of FINDING something; the list is
+      // what you come back to afterwards.
       { id: "debug", label: "Music Search" },
+      { id: "torrents", label: "Torrents", count: list.length },
       { id: "settings", label: "Settings" }
     ]
   });
@@ -8959,7 +8968,7 @@ function registerActions() {
   });
 
   api.ui.onAction("qbt:close-settings", function () {
-    activeTab = "torrents";
+    activeTab = "search";
     render();
   });
 
@@ -9003,6 +9012,20 @@ function registerActions() {
 
   api.ui.onAction("qbt:search", function (data) {
     runSearch((data && data.query) || "");
+  });
+
+  // The query the user typed into the app's OWN search box, handed over when
+  // they picked qBittorrent from "try one of your sources". The host otherwise
+  // seeds a view's first search box by position — which cannot work here: this
+  // view is tabbed, so on any tab but Search there is no box to seed and the
+  // query would sit unused until the user clicked that tab, which is the
+  // retyping the handover exists to spare them. Taking the action takes the
+  // whole gesture, and runSearch already raises the Search tab — the same
+  // thing "Find torrents…" does from a right-click.
+  api.ui.onAction("host:search", function (data) {
+    var q = String((data && data.query) || "").trim();
+    if (!q) return;
+    runSearch(q);
   });
 
   api.ui.onAction("qbt:search-stop", function () {

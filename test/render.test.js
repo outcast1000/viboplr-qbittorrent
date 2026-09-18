@@ -159,6 +159,17 @@ const headings = (nodes) => nodes.filter((n) => n.className === "plugin-heading"
 async function withPlugin(fn, stored, opts) {
   const ctx = run(stored, opts);
   await settle();
+  // The view OPENS on Search (index.js `activeTab`), so a test about the
+  // torrent list — its rows, a torrent's contents, the add box — has to go to
+  // that tab first, exactly as the user does. It is the default here because
+  // it is what most of this file is about. Pass `startTab: null` to stay where
+  // the app itself landed; that is what the landing test asserts, and it is
+  // the only thing keeping this convenience from hiding a change to it.
+  const startTab = opts && "startTab" in opts ? opts.startTab : "torrents";
+  if (startTab) {
+    ctx.handlers["qbt:tab"]({ tabId: startTab });
+    await settle();
+  }
   try {
     await fn(ctx);
   } finally {
@@ -748,12 +759,28 @@ test("removing keeps the files unless the user ticks the box", async () => {
   });
 });
 
-test("the tab strip is Torrents / Search / Debug / Settings", async () => {
+test("the view opens on Search, with the box ready", async () => {
+  await withPlugin(async ({ views }) => {
+    const nodes = walk(last(views));
+    assert.equal(nodes.find((n) => n.type === "tabs").activeTab, "search");
+    // The box being up is also what makes the host's own query hand-off land
+    // here: it seeds a view's first top-level search-input by position.
+    assert.ok(
+      nodes.some((n) => n.type === "search-input" && n.action === "qbt:search"),
+      "no search box on the tab the view opens on",
+    );
+  }, undefined, { startTab: null });
+});
+
+test("the tab strip is Search / Music Search / Torrents / Settings", async () => {
   await withPlugin(async ({ views }) => {
     const tabs = walk(last(views)).find((n) => n.type === "tabs");
-    assert.deepEqual(tabs.tabs.map((t) => t.id), ["torrents", "search", "debug", "settings"]);
-    assert.equal(tabs.tabs[0].count, 2);
-  });
+    // Both ways of FINDING something first; the list you come back to after.
+    assert.deepEqual(tabs.tabs.map((t) => t.id), ["search", "debug", "torrents", "settings"]);
+    assert.equal(tabs.tabs.find((t) => t.id === "debug").label, "Music Search");
+    // The count rides the Torrents tab wherever it sits, never a fixed slot.
+    assert.equal(tabs.tabs.find((t) => t.id === "torrents").count, 2);
+  }, undefined, { startTab: null });
 });
 
 test("web indexers: export fills the box, and a pasted array imports", async () => {
@@ -2433,4 +2460,59 @@ test("a torrent read while it was empty still reaches 100% once it has seeded", 
       Date.now = realNow;
     }
   }, undefined, { torrents: fx.torrents, files: fx.files });
+});
+
+// --- The app's own search box hands its query over ---------------------------
+//
+// Picking qBittorrent from Cmd+K's "try one of your sources" sends the typed
+// query here as the reserved `host:search` action. The host's default — seed
+// the view's first top-level search box — cannot work on a tabbed view, so
+// this plugin takes the action and runs the search itself.
+
+test("a handed-over query raises the Search tab and runs the indexer sweep", async () => {
+  const started = [];
+  const onFetch = (url) => {
+    if (url.includes("/search/start")) started.push(url);
+    return url.includes("/search/plugins") ? JSON.stringify([{ name: "jackett", enabled: true }])
+      : url.includes("/search/start") ? JSON.stringify({ id: 7 })
+        : url.includes("/search/results") ? JSON.stringify({ status: "Stopped", results: [] })
+          : null;
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    // The user is on the Torrents tab — the case the node-position seed cannot
+    // serve, since there is no top-level search box on it.
+    assert.equal(walk(last(views)).find((n) => n.type === "tabs" && n.action === "qbt:tab").activeTab, "torrents");
+
+    handlers["host:search"]({ viewId: "qbittorrent", query: "the sound lions mouth" });
+    await settle();
+    await settle();
+
+    const nodes = walk(last(views));
+    assert.equal(
+      nodes.find((n) => n.type === "tabs" && n.action === "qbt:tab").activeTab,
+      "search",
+      "the handed-over query didn't bring the Search tab up",
+    );
+    // The query is IN the box, so the user can edit and re-run it rather than
+    // facing results with an empty search field.
+    const box = nodes.find((n) => n.type === "search-input" && n.action === "qbt:search");
+    assert.ok(box, "the Search tab isn't showing its search box");
+    assert.equal(box.value, "the sound lions mouth");
+    assert.equal(started.length, 1, "the indexer search never ran");
+  }, undefined, { onFetch });
+});
+
+test("an empty handover is ignored rather than running an empty search", async () => {
+  const started = [];
+  const onFetch = (url) => {
+    if (url.includes("/search/start")) started.push(url);
+    return null;
+  };
+  await withPlugin(async ({ views, handlers }) => {
+    handlers["host:search"]({ viewId: "qbittorrent", query: "   " });
+    await settle();
+    assert.equal(started.length, 0);
+    // And it does not drag the user off the tab they were on for nothing.
+    assert.equal(walk(last(views)).find((n) => n.type === "tabs" && n.action === "qbt:tab").activeTab, "torrents");
+  }, undefined, { onFetch });
 });

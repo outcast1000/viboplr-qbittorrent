@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.43.0
+
+**The view opens on Search now**, and the tabs are reordered to match: Search,
+Music Search, Torrents, Settings. Both ways of *finding* something lead; the
+torrent list is what you come back to afterwards — and it never needed to be
+the front door, since it announces itself through the tab's count, the sidebar
+badge, and the fact that every add switches to it. The count stays on the
+Torrents tab wherever it sits.
+
+**The app's own search box can hand its query to the Search tab.** Type
+something Viboplr can't find in your library, pick qBittorrent from "try one of
+your sources", and the Search tab comes up with that text in the box and the
+indexer sweep already running — instead of the view opening cold and you
+retyping what you were just holding.
+
+Viboplr does that handover by filling a view's first top-level search box, which
+cannot work here: this view is tabbed, so on any tab but Search there is no box
+to fill and the query would sit unused until you clicked that tab yourself. The
+plugin now takes the host's `host:search` action instead and runs the search
+itself — the same thing *Find torrents…* does from a right-click. Needs a host
+that sends it; older ones simply open the view as before.
+
+This is deliberately NOT a global-search *provider* (results inside the Cmd+K
+dropdown). Those rows can only play or enqueue, and an indexer result is a
+release — a torrent that has to be added, have its files chosen and downloaded
+before anything can play. The Search tab is where that belongs: sortable
+columns, seeders, per-engine diagnostics, View contents. yt-dlp shipped a
+provider for five releases and removed it for the same reason.
+
 ## 0.42.0
 
 **A peeked search result is no longer a torrent you have to clean up.**

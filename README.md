@@ -429,6 +429,12 @@ reads.
 
 ## Searching
 
+**This is where the view opens.** The tabs run *Search · Music Search ·
+Torrents · Settings*: the two ways of finding something lead, and the torrent
+list is what you come back to — it never needed to be the front door, since the
+tab carries a count, the sidebar carries a badge, and adding anything switches
+to it.
+
 The **Search** tab searches two sources at once and merges them: the **web
 indexers** below (built in — no setup) and any **search plugins you have
 installed in qBittorrent**. Results are sorted by seeders and stream in as each
@@ -550,6 +556,13 @@ no file data moves during it — and the row says so while it happens.
 Right-clicking a track, album or artist in your library offers **Find torrents…**,
 which opens the tab and searches for it. A track searches its *album*, since
 that's the unit indexers actually publish.
+
+The app's own search box is a third way in. Type something it can't find in your
+library and it offers your sources — pick **qBittorrent** and the query comes
+with you: the Search tab opens with that text already in the box and the sweep
+already running. (Viboplr normally hands a query to a view's first search box
+on its own, which can't work here — this view is tabbed, so the box only exists
+while the Search tab is up. The plugin takes the handover itself instead.)
 
 With the web indexers on, the tab always has somewhere to search. If you turn
 them all off *and* qBittorrent has no search plugins enabled, the tab says so and
