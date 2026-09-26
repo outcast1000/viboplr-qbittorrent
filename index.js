@@ -9548,6 +9548,111 @@ function registerActions() {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Assistant tools (api.assistant) — the AI-facing surface. Deliberately
+// headless: search runs its OWN qBittorrent search job (never touching the
+// view's search state, which belongs to the user), and add goes through
+// addTorrentRaw so the file lands in the destination collection exactly like
+// a view-initiated add. Guarded: older hosts have no api.assistant namespace.
+// ---------------------------------------------------------------------------
+
+function registerAssistantTools() {
+  if (!api.assistant) return;
+
+  api.assistant.onTool("status", async function () {
+    var dest = collectionById(destCollectionId);
+    return {
+      connected: connected,
+      serverConfigured: !!baseUrl,
+      torrentCount: visibleTorrents().length,
+      savesTo: dest ? dest.name : null,
+    };
+  });
+
+  api.assistant.onTool("list_torrents", async function () {
+    return {
+      torrents: visibleTorrents().map(function (t) {
+        return {
+          hash: t.hash,
+          name: t.name,
+          state: t.state,
+          progress: numOr(t.progress, 0),
+          sizeBytes: numOr(t.size, 0),
+          addedOn: numOr(t.added_on, 0) || null,
+        };
+      }),
+    };
+  });
+
+  api.assistant.onTool("search_torrents", async function (args) {
+    var q = typeof args.query === "string" ? args.query.trim() : "";
+    if (!q) throw new Error('"query" (string) is required');
+    if (!connected) throw new Error("Not connected to qBittorrent (Settings → qBittorrent)");
+    var limit = Math.min(50, Math.max(1, parseInt(args.limit, 10) || 20));
+    var waitMs = 40000; // inside the host's 60s tool budget
+    var startResp = await authed("/search/start", {
+      method: "POST",
+      form: { pattern: q, plugins: "enabled", category: "all" },
+    });
+    expectOk(startResp, "Starting the search");
+    var job = await startResp.json();
+    var jobId = job && job.id;
+    if (jobId == null) throw new Error("qBittorrent did not start a search job — are any search plugins installed?");
+    try {
+      var elapsed = 0;
+      var rows = [];
+      for (;;) {
+        var data = await readSearchResultsPage(jobId, limit);
+        var fetched = (data && data.results) || [];
+        rows = [];
+        for (var i = 0; i < fetched.length; i++) {
+          if (!isPluginNotice(fetched[i])) rows.push(fetched[i]);
+        }
+        var running = String((data && data.status) || "") === "Running";
+        if (!running || elapsed >= waitMs) break;
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        elapsed += 2000;
+      }
+      return {
+        results: rows.slice(0, limit).map(function (r) {
+          return {
+            name: r.fileName,
+            sizeBytes: numOr(r.fileSize, 0) || null,
+            seeders: numOr(r.nbSeeders, 0),
+            leechers: numOr(r.nbLeechers, 0),
+            engine: r.engineName || null,
+            source: r.fileUrl || null,
+            page: r.descrLink || null,
+          };
+        }),
+        note: "qBittorrent search plugins only — the sidebar's web indexers are not swept here. Pass a result's source (plus its engine as downloader) to add_torrent.",
+      };
+    } finally {
+      // Server-side jobs are capped; never strand one.
+      disposeSearch(jobId).catch(function () { /* Fire-and-forget: best-effort job cleanup */ });
+    }
+  });
+
+  api.assistant.onTool("add_torrent", async function (args) {
+    var source = typeof args.source === "string" ? args.source.trim() : "";
+    if (!looksLikeTorrentSource(source)) {
+      throw new Error('"source" must be a magnet link or a .torrent URL (from search_torrents results or the user)');
+    }
+    if (!connected) throw new Error("Not connected to qBittorrent (Settings → qBittorrent)");
+    var dest = collectionById(destCollectionId);
+    await addTorrentRaw(source, {
+      downloader: typeof args.downloader === "string" ? args.downloader : "",
+    });
+    return {
+      added: true,
+      savesTo: dest ? dest.name : null,
+      note: dest
+        ? "Downloads land in the \"" + dest.name + "\" collection and reach the library when the files finish."
+        : "No destination collection is configured (Settings → qBittorrent) — finished files will not reach the library automatically.",
+    };
+  });
+}
+
 function activate(hostApi) {
   api = hostApi;
   stopped = false;
@@ -9563,6 +9668,7 @@ function activate(hostApi) {
   registerMetadataStreamResolver();
   registerDownloadProvider();
   registerContextMenu();
+  registerAssistantTools();
   render();
   renderSettings();
 

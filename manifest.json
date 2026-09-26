@@ -1,7 +1,7 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.43.0",
+  "version": "0.44.0",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, choose what downloads, watch progress, and play or import finished files. Requires qBittorrent 5.2.3+ and an API key.",
   "minAppVersion": "1.0.27",
@@ -44,6 +44,29 @@
     }
   ],
   "contributes": {
+    "assistant": {
+      "instructions": "Fetch music over BitTorrent through the user's qBittorrent server. Flow: status (connected? where do downloads land?) → search_torrents (qBittorrent's installed search plugins; slow, up to ~40s) → add_torrent with a result's source + engine as downloader. Downloads save into the configured destination collection and reach the library when files finish; watch progress with list_torrents. add_torrent is a real download the user's server performs — only add what the user actually asked for.",
+      "tools": [
+        {
+          "name": "status",
+          "description": "Connection state, torrent count, and which collection finished downloads land in"
+        },
+        {
+          "name": "list_torrents",
+          "description": "The torrents qBittorrent is managing: name, state, progress (0-1), size"
+        },
+        {
+          "name": "search_torrents",
+          "description": "Search via qBittorrent's installed search plugins — slow (runs up to ~40s). Returns name/size/seeders/engine/source; feed a result's source (+ engine as downloader) to add_torrent",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "number", "description": "1-50, default 20" } }, "required": ["query"] }
+        },
+        {
+          "name": "add_torrent",
+          "description": "Add a magnet link or .torrent URL to qBittorrent (saves into the destination collection, sequential download). A real download — add only what the user asked for",
+          "inputSchema": { "type": "object", "properties": { "source": { "type": "string", "description": "Magnet link or .torrent URL" }, "downloader": { "type": "string", "description": "The search plugin that produced the result (its engine field) — needed when source is a description page" } }, "required": ["source"] }
+        }
+      ]
+    },
     "streamResolvers": [
       {
         "id": "qbt-stream",
@@ -84,7 +107,7 @@
       },
       {
         "id": "qbt-upgrade",
-        "label": "Upgrade with qBittorrent…",
+        "label": "Upgrade…",
         "targets": [
           "track"
         ]

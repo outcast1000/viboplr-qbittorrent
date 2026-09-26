@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.44.0
+
+**AI assistants can drive the plugin.** Four tools on the host's new
+assistant surface (`api.assistant`, Viboplr's AI control API): `status`
+(connected? where do finished downloads land?), `list_torrents` (name, state,
+progress), `search_torrents`, and `add_torrent`.
+
+`search_torrents` runs its **own** qBittorrent search job — start, poll up to
+~40s, always stop-and-delete in a `finally` (server-side jobs are capped) —
+and never touches the sidebar's search state, which belongs to whatever the
+user has open. qBittorrent's installed search plugins only; the sidebar's web
+indexers are not swept, and the result note says so.
+
+`add_torrent` goes through the same core as a view-initiated add
+(`addTorrentRaw`): category, sequential + first/last piece priority, and the
+destination collection as the save path — so an assistant-added download
+reaches the library exactly like any other. The tool description carries the
+consent line: a real download the user's server performs, so only add what
+the user asked for.
+
+Everything is guarded on `api.assistant` existing — on hosts older than the
+surface this release changes nothing.
+
+**The Upgrade menu item no longer names the plugin itself** (`Upgrade…`).
+Apps that prefix plugin menu items with the plugin name show it as
+"qBittorrent: Upgrade…"; older apps show a bare "Upgrade…".
+
 ## 0.43.0
 
 **The view opens on Search now**, and the tabs are reordered to match: Search,
