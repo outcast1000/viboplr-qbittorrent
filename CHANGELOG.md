@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.44.1
+
+**"Sent to the queue", not "Added to the queue".** Adding files to the queue
+from a torrent or a search now says it *sent* them. Newer Viboplr versions run
+their duplicate check when a plugin adds to the queue: if some of the files are
+already queued, the queue panel's banner decides what lands, and you can still
+cancel. The old message counted what the plugin handed over and called it
+added, which could be wrong. Nothing else changes, and older apps behave
+exactly as before.
+
 ## 0.44.0
 
 **AI assistants can drive the plugin.** Four tools on the host's new

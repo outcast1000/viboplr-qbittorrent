@@ -9200,8 +9200,12 @@ function registerActions() {
         position = (q && q.tracks && q.tracks.length) || 0;
       }
       api.playback.insertTracks(result.tracks, position);
+      // "Sent", not "Added": newer hosts run their duplicate check on
+      // insertTracks, and when some files are already queued the queue panel's
+      // banner decides what lands (or the user cancels). The count is what we
+      // handed over, not what was inserted, so don't claim it was added.
       api.ui.showNotification(
-        result.tracks.length === 1 ? "Added to the queue" : "Added " + result.tracks.length + " to the queue"
+        result.tracks.length === 1 ? "Sent to the queue" : "Sent " + result.tracks.length + " tracks to the queue"
       );
     }).catch(function (e) {
       console.error("qBittorrent: could not queue the selected files:", e);
