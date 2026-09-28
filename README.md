@@ -134,6 +134,13 @@ The list's header is a single row: the filter box, then **Add torrent…**,
 **Refresh** and the connection status at its right end — one line of furniture
 above the rows instead of two.
 
+On Viboplr 1.0.77+, which draws a header strip over every plugin view, the
+connection status and **Refresh** live in that header instead — along with the
+qBittorrent version, the server address and an **Open Web UI** button — so the
+list's row keeps just the filter and **Add torrent…**. The status there is one
+word (*Connected*, *Unreachable*, *Key rejected*, …); the explanation and the
+fix stay in the banner inside the view.
+
 ### Adding a torrent
 
 **Add torrent…** sits on the header row and opens an *Add a torrent* panel: paste a

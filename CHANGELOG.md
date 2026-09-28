@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.45.0
+
+**The view has a header now.** Viboplr 1.0.77 draws a strip over every plugin
+view, and qBittorrent fills it in: the qBittorrent version and server address
+(plus the category, when the list is filtered to one), a one-word status —
+*Connected*, *Connecting…*, *Not set up*, *Unreachable*, *Key rejected*,
+*Needs an API key*, *Wrong address* and so on — and two buttons, **Refresh**
+and **Open Web UI**, which opens qBittorrent's own interface in the browser for
+the things this view doesn't do.
+
+The status is only the word. What went wrong and how to fix it stays in the
+banner inside the view, which is where it was.
+
+Because the header now says whether you're connected and carries Refresh, the
+Torrents list's row no longer repeats them: it keeps the filter box and
+**Add torrent…**. On older Viboplr versions there is no header, so nothing
+changes there — the row keeps Refresh and the status as before.
+
 ## 0.44.1
 
 **"Sent to the queue", not "Added to the queue".** Adding files to the queue

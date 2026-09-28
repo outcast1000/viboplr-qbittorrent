@@ -55,6 +55,7 @@ function run(stored, opts) {
   const opened = [];
   const played = [];
   const resolvers = {};
+  const headers = [];
   // A thunk, so a test can change what the server serves mid-run (qBittorrent
   // reports the NEW priorities once they have been posted). It is passed the
   // HASH being asked about, because the list fetches every torrent's files to
@@ -75,6 +76,9 @@ function run(stored, opts) {
       onAction: (id, fn) => { handlers[id] = fn; },
       setBadge: () => {},
       navigateToView: (id) => { navigations.push(id); },
+      // Only hosts >= 1.0.77 have it; opt in per test so every other test here
+      // keeps exercising the older-host view.
+      ...(opts && opts.viewHeader ? { setViewHeader: (id, h) => headers.push({ id, h }) } : {}),
     },
     storage: { get: async () => (stored === undefined ? { baseUrl: "http://localhost:8080", apiKey: "k" } : stored), set: async () => {} },
     network: {
@@ -116,7 +120,7 @@ function run(stored, opts) {
   const g = Object.freeze({});
   const plugin = new Function("api", "window", "globalThis", "self", "document", SOURCE)(undefined, g, g, g, g);
   plugin.activate(api);
-  return { plugin, views, settingsViews, handlers, ctxActions, navigations, api, posts, opened, played, resolvers };
+  return { plugin, views, settingsViews, handlers, ctxActions, navigations, api, posts, opened, played, resolvers, headers };
 }
 
 // Let the activate-time promise chain (settings read → version probe → poll)
@@ -207,6 +211,45 @@ test("one header row: filter, Add, Refresh and the status share the line", async
     // All + Stop is the same act.
     assert.ok(!nodes.some((n) => n.action === "qbt:start-all" || n.action === "qbt:stop-all"));
   });
+});
+
+test("with a host view header, Refresh and the status move up and leave the row", async () => {
+  await withPlugin(async ({ views, headers }) => {
+    const h = headers[headers.length - 1];
+    assert.equal(h.id, "qbittorrent");
+    assert.deepEqual(h.h.status, { variant: "success", label: "Connected" });
+    assert.match(h.h.subtitle, /^qBittorrent v5\.2\.4 · localhost:8080/);
+    assert.deepEqual(h.h.actions.map((a) => a.action), ["qbt:refresh", "qbt:open-webui"]);
+    const row = walk(last(views)).find((n) => n.type === "layout" && n.direction === "horizontal" &&
+      (n.children || []).some((c) => c.action === "qbt:list-filter"));
+    const actions = (row.children || []).map((c) => c.action);
+    assert.ok(actions.includes("qbt:add-toggle"), "Add torrent left the row");
+    assert.ok(!actions.includes("qbt:refresh"), "Refresh is said twice");
+    assert.ok(!(row.children || []).some((c) => c.type === "text"), "the status is said twice");
+  }, undefined, { viewHeader: true });
+});
+
+test("the header is only sent when it changes, and again after re-activating", async () => {
+  await withPlugin(async ({ plugin, api, headers, handlers }) => {
+    const sent = () => headers.filter((x) => x.h.status.label === "Connected").length;
+    assert.equal(sent(), 1, "an unchanged header was re-sent");
+    await handlers["qbt:refresh"]();
+    await settle();
+    assert.equal(sent(), 1, "a refresh re-sent an unchanged header");
+    // A reload drops the host's runtime header; activate must send it again.
+    plugin.deactivate();
+    plugin.activate(api);
+    await settle();
+    assert.equal(sent(), 2, "re-activating did not re-send the header");
+  }, undefined, { viewHeader: true });
+});
+
+test("Open Web UI opens the configured address", async () => {
+  await withPlugin(async ({ handlers, opened }) => {
+    handlers["qbt:open-webui"]();
+    await settle();
+    assert.deepEqual(opened, ["http://localhost:8080"]);
+  }, undefined, { viewHeader: true });
 });
 
 test("each torrent row carries name, size, status and a tile", async () => {

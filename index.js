@@ -4330,6 +4330,70 @@ function statusBanner() {
   };
 }
 
+// The manifest's `viewHeader.subtitle`, repeated so a state without a server
+// address to show says the same thing the manifest does.
+var VIEW_HEADER_SUBTITLE = "Search, download and play torrents through your qBittorrent";
+
+// One word per connection kind for the header's status. The sentence that
+// explains it — and the fix — stays in `statusBanner`, which is larger.
+var VIEW_HEADER_STATUS = {
+  ok: { variant: "success", label: "Connected" },
+  connecting: { variant: "muted", label: "Connecting…" },
+  unconfigured: { variant: "muted", label: "Not set up" },
+  host: { variant: "error", label: "Update Viboplr" },
+  "qbt-old": { variant: "error", label: "qBittorrent too old" },
+  unreachable: { variant: "error", label: "Unreachable" },
+  timeout: { variant: "error", label: "Not answering" },
+  nokey: { variant: "error", label: "Needs an API key" },
+  apikey: { variant: "error", label: "Key rejected" },
+  notfound: { variant: "error", label: "Wrong address" },
+  unknown: { variant: "error", label: "Error" }
+};
+
+// "http://localhost:8080/" → "localhost:8080". The scheme is noise in a one-line
+// subtitle; a reverse-proxy subpath is not, so it stays.
+function displayAddress(url) {
+  return String(url || "").replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
+// Pure: the host-drawn header over the view (api.ui.setViewHeader). `s` is
+// connectionStatus(); `ctx` is { baseUrl, qbtVersion, category, canOpenUrl }
+// where `category` is the active category filter ("" when none).
+function viewHeaderFor(s, ctx) {
+  var status = VIEW_HEADER_STATUS[s && s.kind] || VIEW_HEADER_STATUS.unknown;
+  if (!ctx.baseUrl || s.kind === "unconfigured" || s.kind === "host") {
+    return { subtitle: VIEW_HEADER_SUBTITLE, status: status, actions: [] };
+  }
+  var parts = [];
+  if (ctx.qbtVersion) parts.push("qBittorrent " + ctx.qbtVersion);
+  parts.push(displayAddress(ctx.baseUrl));
+  if (s.kind === "ok" && ctx.category) parts.push("category “" + ctx.category + "”");
+  var actions = [{ label: "Refresh", action: "qbt:refresh" }];
+  if (ctx.canOpenUrl) actions.push({ label: "Open Web UI", action: "qbt:open-webui" });
+  return { subtitle: parts.join(" · "), status: status, actions: actions };
+}
+
+function hasViewHeader() {
+  return !!(api && api.ui && typeof api.ui.setViewHeader === "function");
+}
+
+// Sends the header only when it changed: render() runs on every poll tick, and
+// each setViewHeader re-renders the host. Older hosts have no header at all.
+var lastViewHeader = null;
+function pushViewHeader() {
+  if (!hasViewHeader()) return;
+  var header = viewHeaderFor(connectionStatus(), {
+    baseUrl: baseUrl,
+    qbtVersion: qbtVersion,
+    category: categoryFilterActive(restrictToCategory, category) ? category : "",
+    canOpenUrl: !!(api.network && typeof api.network.openUrl === "function")
+  });
+  var key = JSON.stringify(header);
+  if (key === lastViewHeader) return;
+  lastViewHeader = key;
+  api.ui.setViewHeader(VIEW_ID, header);
+}
+
 function setupGuideNode() {
   var steps = setupSteps();
   var children = [];
@@ -5053,6 +5117,7 @@ function deleteConfirmNode(hashes) {
 
 function render() {
   if (!api) return;
+  pushViewHeader();
 
   var children = [];
 
@@ -5189,12 +5254,17 @@ function render() {
   // The toolbar's own button classes, so the row reads exactly as the toolbar
   // it replaces — a bare `button` node renders the larger plugin-button style.
   headerRow.push({ type: "button", label: "Add torrent…", action: "qbt:add-toggle", className: "ds-btn ds-btn--primary ds-btn--sm", disabled: !connected });
-  headerRow.push({ type: "button", label: "Refresh", action: "qbt:refresh", className: "plugin-toolbar-btn" });
-  headerRow.push({
-    type: "text",
-    content: statusLine(),
-    className: "plugin-toolbar-status" + (lastError ? " plugin-toolbar-status--error" : connected ? " plugin-toolbar-status--success" : "")
-  });
+  // Refresh and the connection status belong to the whole view, so on a host
+  // that draws a view header they live up there (viewHeaderFor) instead of
+  // being said twice. Older hosts have no header and keep them on this line.
+  if (!hasViewHeader()) {
+    headerRow.push({ type: "button", label: "Refresh", action: "qbt:refresh", className: "plugin-toolbar-btn" });
+    headerRow.push({
+      type: "text",
+      content: statusLine(),
+      className: "plugin-toolbar-status" + (lastError ? " plugin-toolbar-status--error" : connected ? " plugin-toolbar-status--success" : "")
+    });
+  }
   children.push({ type: "layout", direction: "horizontal", children: headerRow });
 
   // Adding is a thing you do once and then watch for an hour, so the box no
@@ -8976,6 +9046,16 @@ function registerActions() {
     refresh();
   });
 
+  // The view header's second button: qBittorrent's own Web UI, for what this
+  // view doesn't do (trackers, speed limits, RSS).
+  api.ui.onAction("qbt:open-webui", function () {
+    if (!baseUrl || typeof api.network.openUrl !== "function") return;
+    api.network.openUrl(baseUrl).catch(function (e) {
+      console.error("qBittorrent: could not open the Web UI:", e);
+      api.ui.showNotification("Couldn't open the browser — the Web UI is at " + baseUrl);
+    });
+  });
+
   api.ui.onAction("qbt:move-category", function () {
     var hashes = hashesInCategory(torrents, previousCategory);
     if (!hashes.length) {
@@ -9660,6 +9740,9 @@ function registerAssistantTools() {
 function activate(hostApi) {
   api = hostApi;
   stopped = false;
+  // The host drops runtime header state on reload, so the first render after
+  // activating must send it again even if it matches the last one sent.
+  lastViewHeader = null;
   // manifest.json's minAppVersion already blocks a gallery install on an older
   // host, but a side-loaded or dev copy bypasses that — so check and say so
   // plainly, rather than letting it surface as a session error later.
@@ -9893,6 +9976,9 @@ return {
   _findTorrentByName: findTorrentByName,
   _hasMetadata: hasMetadata,
   _setupSteps: setupSteps,
+  _viewHeaderFor: viewHeaderFor,
+  _displayAddress: displayAddress,
+  _VIEW_HEADER_SUBTITLE: VIEW_HEADER_SUBTITLE,
   _looksLikeTorrentSource: looksLikeTorrentSource,
   _magnetDisplayName: magnetDisplayName,
   _encodeForm: encodeForm,
