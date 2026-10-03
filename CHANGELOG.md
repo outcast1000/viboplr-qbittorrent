@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.46.0
+- **Runs in the plugin worker runtime.** It now gets only what it asks for
+  — `network:*`, `system:open`, `files:read`, `library:read`, `library:write`, `playback:read`, `playback:control` — and can't reach anything else in the app. Viboplr asks
+  you to allow these once when you update. Requires Viboplr 1.0.85.
+- `network:*` because the qBittorrent Web UI address is yours to set, and
+  custom indexers can live on any host.
+
 ## 0.45.0
 
 **The view has a header now.** Viboplr 1.0.77 draws a strip over every plugin
