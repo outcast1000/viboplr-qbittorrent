@@ -1,12 +1,21 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.46.1",
+  "version": "0.46.2",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, choose what downloads, watch progress, and play or import finished files. Requires qBittorrent 5.2.3+ and an API key.",
   "minAppVersion": "1.0.85",
   "runtime": "worker",
   "permissions": ["network:*", "system:open", "files:read", "library:read", "library:write", "playback:read", "playback:control"],
+  "permissionReasons": {
+    "network:*": "Talk to the qBittorrent Web UI at the address you set, and search torrent sites directly with the built-in indexers",
+    "system:open": "Open downloaded files and folders, the qBittorrent Web UI and download page, and a result's torrent page",
+    "files:read": "Read title, artist and album from finished files instead of guessing from the file name",
+    "library:read": "See your local collections, to tell which one a finished torrent landed in",
+    "library:write": "Rescan the collection a finished torrent landed in, so its files reach your library",
+    "playback:read": "Read how long the queue is, to add torrent files at its end",
+    "playback:control": "Play or queue files straight out of your torrents"
+  },
   "stability": "experimental",
   "homepage": "https://github.com/outcast1000/viboplr-qbittorrent",
   "viewHeader": {
@@ -14,40 +23,6 @@
   },
   "updateUrl": "https://github.com/outcast1000/viboplr-qbittorrent/releases/latest/download/update.json",
   "icon": "M4 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0M11 8.5v11M13.5 4.5v11M13.5 12a3.5 3.5 0 1 0 7 0 3.5 3.5 0 1 0-7 0",
-  "apiUsage": [
-    {
-      "api": "network.fetch",
-      "reason": "Talk to your qBittorrent WebUI, and search torrent websites directly (the built-in web indexers)"
-    },
-    {
-      "api": "storage.set",
-      "reason": "Remember your server address and API key, and cache each torrent's file names so the list filter can search inside torrents"
-    },
-    {
-      "api": "playback.onResolveStreamByUri",
-      "reason": "Play completed files straight out of a torrent"
-    },
-    {
-      "api": "system.readAudioTags",
-      "reason": "Read title, artist and album out of a finished file instead of guessing from its name"
-    },
-    {
-      "api": "collections.resync",
-      "reason": "Rescan your library when a download finishes inside it"
-    },
-    {
-      "api": "playback.onStreamResolve",
-      "reason": "Play any track straight from a file your torrents already hold"
-    },
-    {
-      "api": "downloads.onResolveByMetadata",
-      "reason": "Download a track by finding it in your torrents — or, if enabled, by searching for a torrent that has it"
-    },
-    {
-      "api": "downloads.onResolveByUri",
-      "reason": "Download the exact torrent file a playing track came from"
-    }
-  ],
   "contributes": {
     "assistant": {
       "instructions": "Fetch music over BitTorrent through the user's qBittorrent server. Flow: status (connected? where do downloads land?) → search_torrents (qBittorrent's installed search plugins; slow, up to ~40s) → add_torrent with a result's source + engine as downloader. Downloads save into the configured destination collection and reach the library when files finish; watch progress with list_torrents. add_torrent is a real download the user's server performs — only add what the user actually asked for.",
