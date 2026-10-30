@@ -1,7 +1,7 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.46.3",
+  "version": "0.46.4",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, choose what downloads, watch progress, and play or import finished files. Requires qBittorrent 5.2.3+ and an API key.",
   "minAppVersion": "1.0.85",
@@ -30,16 +30,19 @@
         {
           "name": "status",
           "description": "Connection state, torrent count, and which collection finished downloads land in",
+          "readOnly": true,
           "categories": ["download"]
         },
         {
           "name": "list_torrents",
           "description": "The torrents qBittorrent is managing: name, state, progress (0-1), size",
+          "readOnly": true,
           "categories": ["download"]
         },
         {
           "name": "search_torrents",
           "description": "Search via qBittorrent's installed search plugins — slow (runs up to ~40s). Returns name/size/seeders/engine/source; feed a result's source (+ engine as downloader) to add_torrent",
+          "readOnly": true,
           "categories": ["download"],
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "number", "description": "1-50, default 20" } }, "required": ["query"] }
         },

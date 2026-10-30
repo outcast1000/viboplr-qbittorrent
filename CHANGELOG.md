@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.46.4
+- The AI tools that only read — status, list_torrents and search_torrents — are now marked read-only, so an AI assistant can use them without the "Plugin actions" permission and without asking you first. Adding a torrent still asks.
+
 ## v0.46.3
 - Each AI tool now says what it is about (its category), so Viboplr's in-app assistant can offer it alongside the app's own tools of the same kind instead of sending every tool at once. Viboplr versions that don't know the field ignore it.
 
