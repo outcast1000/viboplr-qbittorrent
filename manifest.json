@@ -1,7 +1,7 @@
 {
   "id": "qbittorrent",
   "name": "qBittorrent",
-  "version": "0.46.4",
+  "version": "0.46.5",
   "author": "Viboplr",
   "description": "Control a qBittorrent WebUI from Viboplr: add magnet links, choose what downloads, watch progress, and play or import finished files. Requires qBittorrent 5.2.3+ and an API key.",
   "minAppVersion": "1.0.85",
@@ -90,14 +90,16 @@
           "track",
           "album",
           "artist"
-        ]
+        ],
+        "action": "find-source"
       },
       {
         "id": "qbt-upgrade",
         "label": "Upgrade…",
         "targets": [
           "track"
-        ]
+        ],
+        "action": "download"
       }
     ]
   }

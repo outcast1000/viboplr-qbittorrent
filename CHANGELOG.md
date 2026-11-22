@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.46.5
+- **Upgrade…** and **Find torrents…** now say which shared action they are, so Viboplr groups them with the other plugins' versions in one menu row each ("Download ▸ …", "Find downloads ▸ …"). Older Viboplr versions show the menu as before.
+
 ## v0.46.4
 - The AI tools that only read — status, list_torrents and search_torrents — are now marked read-only, so an AI assistant can use them without the "Plugin actions" permission and without asking you first. Adding a torrent still asks.
 
